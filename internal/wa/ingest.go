@@ -99,8 +99,8 @@ func (in *Ingestor) person(ctx context.Context, e store.Execer, j, alt types.JID
 	if err != nil {
 		return 0, err
 	}
-	if j.Server == types.HiddenUserServer && in.LIDs != nil {
-		pn, lerr := in.LIDs.GetPNForLID(ctx, j.ToNonAD())
+	if lid, ok := lidOf(j); ok && in.LIDs != nil {
+		pn, lerr := in.LIDs.GetPNForLID(ctx, lid)
 		if lerr == nil && !pn.IsEmpty() {
 			return people.LinkCurrent(ctx, e, j, pn, in.now())
 		}
@@ -112,10 +112,11 @@ func (in *Ingestor) person(ctx context.Context, e store.Execer, j, alt types.JID
 // the phone number the LID store knows. It is nil when the lookup fails, so
 // a step judged from it always runs.
 func (in *Ingestor) personJIDs(ctx context.Context, j types.JID) []types.JID {
-	if j.Server != types.HiddenUserServer || in.LIDs == nil {
+	lid, ok := lidOf(j)
+	if !ok || in.LIDs == nil {
 		return []types.JID{j}
 	}
-	pn, err := in.LIDs.GetPNForLID(ctx, j.ToNonAD())
+	pn, err := in.LIDs.GetPNForLID(ctx, lid)
 	if err != nil {
 		return nil
 	}
@@ -123,6 +124,13 @@ func (in *Ingestor) personJIDs(ctx context.Context, j types.JID) []types.JID {
 		return []types.JID{j}
 	}
 	return []types.JID{j, pn}
+}
+
+// lidOf returns the device-less @lid JID of a LID, also of a hosted device
+// (user:dev@hosted.lid), which whatsmeow's LID store does not know by that server.
+func lidOf(j types.JID) (types.JID, bool) {
+	n, kind, ok := people.Normalize(j)
+	return n, ok && kind == people.KindLID
 }
 
 func chatAlt(src types.MessageSource) types.JID {

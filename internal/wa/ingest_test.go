@@ -129,6 +129,28 @@ func TestLIDResolvedThroughStore(t *testing.T) {
 	}
 }
 
+// A group sender on a hosted device (user:dev@hosted.lid) with no alternate
+// address is the account's LID: the LID store names its number too.
+func TestHostedLIDSenderResolvedThroughStore(t *testing.T) {
+	in := newIngestor(t)
+	in.LIDs = fakeLIDs{marcoL: marcoPN}
+	live(t, in, dmFromMarco("P1", t0), textMsg("dal numero"))
+	live(t, in, types.MessageInfo{
+		MessageSource: types.MessageSource{
+			Chat: group, IsGroup: true,
+			Sender:         types.JID{User: marcoL.User, Server: types.HostedLIDServer, Device: 99},
+			AddressingMode: types.AddressingModeLID,
+		},
+		ID: "H1", Timestamp: t0.Add(time.Minute),
+	}, textMsg("dal dispositivo ospitato"))
+	if got := one[string](t, in, `SELECT COALESCE(p.phone_e164, '') FROM messages m JOIN persons p ON p.id = m.sender_person_id WHERE m.wa_id = 'H1'`); got != "+393331234567" {
+		t.Fatalf("hosted sender phone = %q, want the number the LID store holds", got)
+	}
+	if n := one[int](t, in, `SELECT COUNT(*) FROM persons WHERE is_me = 0`); n != 1 {
+		t.Fatalf("persons = %d, want 1", n)
+	}
+}
+
 func TestEditRevokeReaction(t *testing.T) {
 	in := newIngestor(t)
 	live(t, in, dmFromMarco("M1", t0), textMsg("prima versione"))
