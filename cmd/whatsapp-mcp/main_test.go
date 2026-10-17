@@ -164,6 +164,9 @@ func TestInternationalPhone(t *testing.T) {
 	for in, want := range map[string]string{
 		"": "", "+39 333 123 4567": "393331234567", "0039 333-123.4567": "393331234567",
 		" +1 (415) 555-0100 ": "14155550100",
+		// As copied from WhatsApp: no-break spaces inside direction marks.
+		"\u202a+39\u00a0333\u00a0123\u00a04567\u202c": "393331234567",
+		"\u2066+39\u202f333 123 4567\u2069\n":         "393331234567",
 	} {
 		if got, err := internationalPhone(in); err != nil || got != want {
 			t.Errorf("%q = %q, %v; want %q", in, got, err, want)

@@ -22,6 +22,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/vukappa4/whatsapp-mcp/internal/childproc"
 	"github.com/vukappa4/whatsapp-mcp/internal/config"
@@ -414,9 +415,19 @@ func pairCmd(args []string) (err error) {
 }
 
 // internationalPhone turns a phone number written with its country code
-// (+39 333 123 4567, 0039 333...) into its digits. Empty stays empty.
+// (+39 333 123 4567, 0039 333...) into its digits. Empty stays empty. A
+// number copied from WhatsApp carries no-break spaces, which count as
+// spaces, and direction marks, which are dropped.
 func internationalPhone(s string) (string, error) {
-	s = strings.TrimSpace(s)
+	s = strings.TrimSpace(strings.Map(func(r rune) rune {
+		switch {
+		case unicode.Is(unicode.Bidi_Control, r):
+			return -1
+		case unicode.IsSpace(r):
+			return ' '
+		}
+		return r
+	}, s))
 	if s == "" {
 		return "", nil
 	}
