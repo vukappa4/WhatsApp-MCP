@@ -34,15 +34,17 @@ var ErrNotUser = errors.New("not a user JID")
 // a LID is one WhatsApp account, so they are two people.
 var ErrTwoAccounts = errors.New("persons hold different LIDs")
 
-// Normalize strips device and agent parts. ok is false for non-user JIDs.
+// Normalize strips device and agent parts. A hosted (business API) device
+// names its account, as whatsmeow maps it for direct messages. ok is false
+// for non-user JIDs.
 func Normalize(j types.JID) (types.JID, Kind, bool) {
 	if j.User == "" {
 		return types.JID{}, "", false
 	}
 	switch j.Server {
-	case types.DefaultUserServer, types.LegacyUserServer:
+	case types.DefaultUserServer, types.LegacyUserServer, types.HostedServer:
 		return types.NewJID(j.User, types.DefaultUserServer), KindPN, true
-	case types.HiddenUserServer:
+	case types.HiddenUserServer, types.HostedLIDServer:
 		return types.NewJID(j.User, types.HiddenUserServer), KindLID, true
 	case types.BotServer:
 		return types.NewJID(j.User, types.BotServer), KindOther, true

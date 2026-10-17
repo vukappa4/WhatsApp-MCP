@@ -206,6 +206,27 @@ func TestNormalizeStripsDevice(t *testing.T) {
 	}
 }
 
+// A hosted (business API) device of an account, as whatsmeow reports a group
+// participant, names the same person as the account's phone number or LID.
+func TestNormalizeHostedDevice(t *testing.T) {
+	for _, c := range []struct{ in, want types.JID }{
+		{types.NewADJID(pn.User, types.HostedDomain, 99), pn},
+		{types.NewADJID(lid.User, types.HostedLIDDomain, 99), lid},
+	} {
+		j, _, ok := Normalize(c.in)
+		if !ok || j != c.want {
+			t.Errorf("Normalize(%s) = %s %v, want %s", c.in, j, ok, c.want)
+		}
+	}
+	ctx := context.Background()
+	db := openDB(t)
+	pp, _ := Resolve(ctx, db, pn)
+	ph, err := Resolve(ctx, db, types.NewADJID(pn.User, types.HostedDomain, 99))
+	if err != nil || ph != pp {
+		t.Fatalf("hosted device resolved to person %d (%v), want %d", ph, err, pp)
+	}
+}
+
 // Finding 5: a message stored in both chats keeps the richer fields of each copy.
 func TestMergeChatsMergesDuplicateFieldwise(t *testing.T) {
 	ctx := context.Background()
