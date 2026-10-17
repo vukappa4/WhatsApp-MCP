@@ -227,11 +227,22 @@ func pipeline(ctx context.Context, first string, firstArgs []string, second stri
 	// The children hold their own handles; ours would keep the pipe open.
 	pr.Close()
 	pw.Close()
-	errA := a.Wait()
-	errB := b.Wait()
-	// A failing ffmpeg starves the engine: report the cause, not the symptom.
+	// A failing ffmpeg starves the engine, and an engine that quits breaks
+	// ffmpeg's output: the one that ends first is the cause, not the symptom.
+	endA, endB := make(chan error, 1), make(chan error, 1)
+	go func() { endA <- a.Wait() }()
+	go func() { endB <- b.Wait() }()
+	var errA, errB error
+	ffmpegFirst := false
+	select {
+	case errA = <-endA:
+		ffmpegFirst = true
+		errB = <-endB
+	case errB = <-endB:
+		errA = <-endA
+	}
 	switch {
-	case errA != nil:
+	case errA != nil && (errB == nil || ffmpegFirst):
 		return nil, fmt.Errorf("ffmpeg failed: %v: %s", errA, lastLine(aErr.String()))
 	case errB != nil:
 		return nil, fmt.Errorf("%s failed: %v: %s", filepath.Base(second), errB, lastLine(bErr.String()))
