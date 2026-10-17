@@ -271,14 +271,25 @@ func MergeMessageRows(ctx context.Context, e Execer, keepID, dropID int64) error
 	merged.ID = keepID
 	orphan := int64(0)
 	if k.MediaID != 0 && d.MediaID != 0 && k.MediaID != d.MediaID {
-		dm, err := LoadMedia(ctx, e, d.MediaID)
+		// The row holding the downloaded file and transcript survives;
+		// UpdateMedia never moves them. Ties keep keep's row.
+		into, from, wins := k.MediaID, d.MediaID, SourceRank(d.Source) > SourceRank(k.Source)
+		const progress = `(SELECT (state = 'downloaded') * 2 + (transcript IS NOT NULL) FROM media WHERE id = ?)`
+		var kp, dp int
+		if err := e.QueryRowContext(ctx, `SELECT `+progress+`, `+progress, k.MediaID, d.MediaID).Scan(&kp, &dp); err != nil {
+			return err
+		}
+		if dp > kp {
+			into, from, wins = d.MediaID, k.MediaID, SourceRank(k.Source) >= SourceRank(d.Source)
+		}
+		fm, err := LoadMedia(ctx, e, from)
 		if err != nil {
 			return err
 		}
-		if err := UpdateMedia(ctx, e, k.MediaID, dm, SourceRank(d.Source) > SourceRank(k.Source)); err != nil {
+		if err := UpdateMedia(ctx, e, into, fm, wins); err != nil {
 			return err
 		}
-		orphan = d.MediaID
+		merged.MediaID, orphan = into, from
 	}
 	steps := []struct {
 		q    string
