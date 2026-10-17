@@ -209,6 +209,9 @@ func decodeCursor(s, tool string) (cursor, error) {
 	if err == nil {
 		err = json.Unmarshal(b, &c)
 	}
+	if err == nil && c.Off < 0 {
+		err = errors.New("negative offset") // a forged cursor; a negative slice bound panics the daemon
+	}
 	if err != nil {
 		return c, errors.New("invalid cursor: pass back the cursor string exactly as returned")
 	}

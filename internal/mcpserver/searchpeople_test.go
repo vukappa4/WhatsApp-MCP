@@ -149,3 +149,18 @@ func TestSearchPeople(t *testing.T) {
 		t.Fatalf("second page:\n%s", text)
 	}
 }
+
+// A cursor is opaque but comes back from the client: a forged or garbled one
+// with a negative offset must be refused, not crash the daemon.
+func TestNegativeCursorOffset(t *testing.T) {
+	cs := connect(t, seedSearch(t))
+	for _, c := range []cursor{
+		{Tool: toolSearchPeople, Query: "marco", Off: -1},
+		{Tool: toolSearchMessages, Query: "pizza", Off: -1},
+	} {
+		text, isErr := call(t, cs, c.Tool, map[string]any{"cursor": c.encode()})
+		if !isErr || !strings.Contains(text, "invalid cursor") {
+			t.Fatalf("%s with offset -1: isErr=%v\n%s", c.Tool, isErr, text)
+		}
+	}
+}
