@@ -216,7 +216,7 @@ func GetPersonActivity(ctx context.Context, e Execer, personID int64, maxGroups 
 
 // FTSQuery turns free user input into an FTS5 MATCH expression that can never
 // be a syntax error: every term becomes a double-quoted string holding only
-// letters, digits and spaces. Plain words are AND-ed, "quoted phrases" stay
+// letters, numbers and spaces. Plain words are AND-ed, "quoted phrases" stay
 // phrases, and a trailing * makes a prefix term. FTS operators (AND, OR, NOT,
 // NEAR, column filters, parentheses, -) are taken as plain text. It returns
 // "" when the input holds no searchable word.
@@ -273,11 +273,12 @@ func FTSPlainQuery(input string) string {
 	return strings.Join(words, " ")
 }
 
-// ftsWords splits s into runs of token characters (letters, digits, marks,
-// private use), the characters FTS5's unicode61 tokenizer indexes.
+// ftsWords splits s into runs of token characters (letters, numbers of any
+// kind such as ² or ½, marks, private use), the characters FTS5's unicode61
+// tokenizer indexes.
 func ftsWords(s string) []string {
 	return strings.FieldsFunc(s, func(r rune) bool {
-		return !(unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsMark(r) || unicode.Is(unicode.Co, r))
+		return !(unicode.IsLetter(r) || unicode.IsNumber(r) || unicode.IsMark(r) || unicode.Is(unicode.Co, r))
 	})
 }
 
