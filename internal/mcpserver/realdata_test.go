@@ -109,7 +109,7 @@ func TestRealData(t *testing.T) {
 // totalShown finds the match count search_messages and search_people state.
 var totalShown = regexp.MustCompile(`(\d+) (?:match(?:es)?|people match|person matches)\b`)
 
-var wrapped = regexp.MustCompile(`<untrusted_whatsapp nonce=\w+>(?s:.*?)</untrusted_whatsapp nonce=\w+>`)
+var wrapped = regexp.MustCompile(`<untrusted_wa n=\w+>(?s:.*?)</untrusted_wa n=\w+>`)
 
 // redact hides sender-written text so only the shape of a response is logged.
 func redact(s string) string {

@@ -16,7 +16,7 @@ func TestSearchMessages(t *testing.T) {
 	// Accents: "perche" finds "Perché" in the DM and in the group; senders render as names.
 	text, isErr := search(map[string]any{"query": "perche"})
 	if isErr || hits(text) != 2 || !strings.HasPrefix(text, "[whatsapp: ") || !strings.Contains(text, "Perché non vieni") ||
-		!strings.Contains(text, "Niccolò D'Amico:") || !strings.Contains(text, "Calcetto</untrusted_whatsapp") {
+		!strings.Contains(text, "Niccolò D'Amico:") || !strings.Contains(text, "Calcetto</untrusted_wa") {
 		t.Fatalf("accents:\n%s", text)
 	}
 
@@ -43,7 +43,7 @@ func TestSearchMessages(t *testing.T) {
 
 	// The transcript is searchable and shown with the voice note.
 	text, _ = search(map[string]any{"query": "bonifico"})
-	if !strings.Contains(text, "[voice 0:07 · transcript: <untrusted_whatsapp") {
+	if !strings.Contains(text, "[voice 0:07 · transcript: <untrusted_wa") {
 		t.Fatalf("transcript hit:\n%s", text)
 	}
 

@@ -301,7 +301,7 @@ func TestSendMessageRecipients(t *testing.T) {
 	// Groups by exact name, case and accents ignored.
 	text, isErr = call(t, e.cs, toolSendMessage, map[string]any{"to": "CALCETTO", "text": "chi c'è stasera?"})
 	// The group name is chosen by its members: wrapped.
-	if isErr || !regexp.MustCompile(`to group <untrusted_whatsapp nonce=\w+>Calcetto</untrusted_whatsapp nonce=\w+> in c_\d+ at `).MatchString(text) {
+	if isErr || !regexp.MustCompile(`to group <untrusted_wa n=\w+>Calcetto</untrusted_wa n=\w+> in c_\d+ at `).MatchString(text) {
 		t.Fatalf("group:\n%s", text)
 	}
 	if to := e.fake.sends()[1].to; to.Server != types.GroupServer {
@@ -502,7 +502,7 @@ func TestSendFile(t *testing.T) {
 		t.Fatalf("image message = %v", img)
 	}
 	// The file name can be a sender's (files from the media folder): wrapped.
-	if !regexp.MustCompile(`Sent the photo <untrusted_whatsapp nonce=(\w+)>scontrino.png</untrusted_whatsapp nonce=(\w+)> to ~Marco`).MatchString(text) {
+	if !regexp.MustCompile(`Sent the photo <untrusted_wa n=(\w+)>scontrino.png</untrusted_wa n=(\w+)> to ~Marco`).MatchString(text) {
 		t.Fatalf("result:\n%s", text)
 	}
 	stored := regexp.MustCompile(`Stored as m_(\d+)\.`).FindStringSubmatch(text)
@@ -528,7 +528,7 @@ func TestSendFile(t *testing.T) {
 	_ = os.WriteFile(outside, []byte("plan"), 0o600)
 	for _, p := range []string{secret, own, outside} {
 		text, isErr := call(t, e.cs, toolSendFile, map[string]any{"to": "+39 333 111 1111", "path": p})
-		if !isErr || !strings.Contains(text, "not allowed") || !strings.HasPrefix(text, "Not sent: <untrusted_whatsapp nonce=") {
+		if !isErr || !strings.Contains(text, "not allowed") || !strings.HasPrefix(text, "Not sent: <untrusted_wa n=") {
 			t.Fatalf("%s:\n%s", p, text)
 		}
 	}
@@ -600,7 +600,7 @@ func TestSentFileServedFromMediaFolder(t *testing.T) {
 	served := func(id string) []byte {
 		t.Helper()
 		text, isErr := call(t, e.cs, toolGetMedia, map[string]any{"message": id, "mode": "path"})
-		file := regexp.MustCompile(`File: <untrusted_whatsapp nonce=\w+>(.+?)</untrusted_whatsapp`).FindStringSubmatch(text)
+		file := regexp.MustCompile(`File: <untrusted_wa n=\w+>(.+?)</untrusted_wa`).FindStringSubmatch(text)
 		if isErr || file == nil {
 			t.Fatalf("get_media %s:\n%s", id, text)
 		}

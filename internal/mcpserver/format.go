@@ -82,8 +82,10 @@ func parseTimeAt(s string, now time.Time) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("cannot parse time %q: use ISO 8601, e.g. 2026-10-13T09:00:00+02:00, 2026-10-13, or 09:00 for today", s)
 }
 
-// tagName matches any spelling of the wrapper tag inside sender text.
-var tagName = regexp.MustCompile(`(?i)untrusted_whatsapp`)
+// tagName matches the wrapper tag name in any case inside sender text, and
+// look-alikes such as untrusted_whatsapp. sanitize keeps the zero-width joiner
+// for emoji, so the pattern skips joiners between letters.
+var tagName = regexp.MustCompile(`(?i)` + strings.Join(strings.Split("untrusted_w", ""), `\x{200D}*`))
 
 // sanitize strips control, invisible and bidi formatting characters (keeping
 // newlines, tabs and the emoji zero-width joiner) and defuses the wrapper tag.
@@ -105,7 +107,11 @@ func sanitize(s string) string {
 		}
 		b.WriteRune(r)
 	}
-	return tagName.ReplaceAllString(b.String(), "untrusted-whatsapp")
+	out := b.String()
+	if !strings.Contains(out, "_") { // every tagName match holds an underscore; the regex is slow
+		return out
+	}
+	return tagName.ReplaceAllString(out, "untrusted-w")
 }
 
 // wrapper marks sender-written text with a per-response nonce.
@@ -127,7 +133,7 @@ func (w wrapper) wrap(s string) string {
 	if s == "" {
 		return ""
 	}
-	return fmt.Sprintf("<untrusted_whatsapp nonce=%s>%s</untrusted_whatsapp nonce=%s>", w.nonce, s, w.nonce)
+	return "<untrusted_wa n=" + w.nonce + ">" + s + "</untrusted_wa n=" + w.nonce + ">"
 }
 
 // name renders a person's name: plain from the address book, "~Name" (cleaned

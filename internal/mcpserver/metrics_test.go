@@ -203,7 +203,7 @@ func TestSizeReport(t *testing.T) {
 }
 
 // wrapperTag matches the opening and closing tags around untrusted text.
-var wrapperTag = regexp.MustCompile(`</?untrusted_whatsapp nonce=[0-9a-f]+>`)
+var wrapperTag = regexp.MustCompile(`</?untrusted_wa n=[0-9a-f]+>`)
 
 // BenchmarkTools times every probe and reports its SQL statements per call.
 func BenchmarkTools(b *testing.B) {
