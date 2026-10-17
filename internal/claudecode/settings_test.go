@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -255,5 +256,33 @@ func TestUnregisterKeepsHooksForAnotherProfile(t *testing.T) {
 	if len(s.Permissions.Allow) != len(ReadTools) || len(s.Hooks["PreToolUse"]) != 1 ||
 		s.Hooks["PreToolUse"][0].Hooks[0].Command != filepath.ToSlash(exe) || len(s.Hooks["UserPromptSubmit"]) != 1 {
 		t.Errorf("prod registration damaged:\n%s", text)
+	}
+}
+
+// Rewriting an existing settings file keeps its permission bits: the
+// temporary file it is written through starts as 0600.
+func TestEditKeepsFileMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permission bits")
+	}
+	file := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(file, []byte(`{"model": "opus"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(file, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Register(file, exe, "whatsapp"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Unregister(file, "whatsapp", ""); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got != 0o644 {
+		t.Errorf("mode after rewrite = %o, want 644", got)
 	}
 }

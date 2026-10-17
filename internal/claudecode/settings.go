@@ -263,6 +263,13 @@ func edit(file string, change func(*object) error) error {
 		return err
 	}
 	defer os.Remove(tmp.Name())
+	// CreateTemp makes the file 0600: a rewrite keeps the file's own mode.
+	if fi, err := os.Stat(file); err == nil {
+		if err := tmp.Chmod(fi.Mode().Perm()); err != nil {
+			tmp.Close()
+			return err
+		}
+	}
 	if _, err := tmp.Write(out); err != nil {
 		tmp.Close()
 		return err
