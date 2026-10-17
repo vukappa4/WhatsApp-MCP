@@ -42,7 +42,7 @@ See [INSTALL.md](INSTALL.md#uninstall).
 
 ## Credits
 
-Built on [whatsmeow](https://github.com/tulir/whatsmeow) by Tulir Asokan. Architecture and behavior in detail: [docs/DESIGN.md](docs/DESIGN.md).
+Built on [whatsmeow](https://github.com/tulir/whatsmeow) by Tulir Asokan.
 
 ## License
 
