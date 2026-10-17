@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -39,6 +40,10 @@ func LoadSettings(dataDir string) (Settings, error) {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&s); err != nil {
 		return Settings{}, fmt.Errorf("%s: %w", path, err)
+	}
+	// Decode stops after the first value: a stray brace would hide the rest.
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return Settings{}, fmt.Errorf("%s: unexpected content after the settings object", path)
 	}
 	for _, list := range [][]string{s.SendFileRoots, s.SendFileExtraRoots} {
 		for _, r := range list {

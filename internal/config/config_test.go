@@ -85,7 +85,9 @@ func TestLoadSettings(t *testing.T) {
 	if s, err := LoadSettings(dir); err != nil || len(s.SendFileExtraRoots) != 1 || s.SendFileExtraRoots[0] != abs {
 		t.Fatalf("with BOM: %+v %v", s, err)
 	}
-	for _, bad := range []string{`{"send_files_roots": []}`, `{"send_file_roots": ["rel"]}`, `[1]`} {
+	for _, bad := range []string{`{"send_files_roots": []}`, `{"send_file_roots": ["rel"]}`, `[1]`,
+		// A stray brace must not hide the keys after it.
+		`{"send_file_roots": []}, "send_file_extra_roots": ["rel"]}`, `{} {"send_files_roots": []}`} {
 		_ = os.WriteFile(SettingsFile(dir), []byte(bad), 0o600)
 		if _, err := LoadSettings(dir); err == nil {
 			t.Errorf("%s accepted", bad)
