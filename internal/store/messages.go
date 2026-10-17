@@ -289,6 +289,13 @@ func MergeMessageRows(ctx context.Context, e Execer, keepID, dropID int64) error
 		if err := UpdateMedia(ctx, e, into, fm, wins); err != nil {
 			return err
 		}
+		// ResetMediaFile keeps the transcript, so the losing row may hold
+		// one the winner lacks: move it over (the FTS trigger reindexes).
+		if _, err := e.ExecContext(ctx, `UPDATE media SET transcript = f.transcript, transcript_lang = f.transcript_lang,
+			transcript_engine = f.transcript_engine, transcript_error = ''
+			FROM media AS f WHERE media.id = ? AND f.id = ? AND media.transcript IS NULL AND f.transcript IS NOT NULL`, into, from); err != nil {
+			return err
+		}
 		merged.MediaID, orphan = into, from
 	}
 	steps := []struct {

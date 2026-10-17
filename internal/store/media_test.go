@@ -369,6 +369,43 @@ func TestMergeMessageRowsKeepsDownloadedMedia(t *testing.T) {
 	}
 }
 
+// A reset row keeps its transcript while pending. When the downloaded row
+// wins the merge without one, the transcript moves over and stays searchable.
+func TestMergeMessageRowsKeepsResetTranscript(t *testing.T) {
+	db, _ := open(t)
+	ctx := context.Background()
+	for _, q := range []string{
+		`INSERT INTO chats(id, jid, kind, created_at) VALUES (1, 'a@g.us', 'group', 0), (2, 'b@g.us', 'group', 0)`,
+		`INSERT INTO media(id, mimetype, state, local_path, transcript, transcript_lang, transcript_engine, transcript_error)
+			VALUES (1, 'audio/ogg', 'pending', '', 'appuntamento in stazione', 'it', 'whisper', ''),
+			(2, 'audio/ogg', 'downloaded', 'b.ogg', NULL, NULL, NULL, 'timeout')`,
+		`INSERT INTO messages(id, chat_id, wa_id, ts, kind, source, media_id) VALUES (10, 1, 'X', 5, 'voice', 'history', 1), (20, 2, 'X', 5, 'voice', 'live', 2)`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := MergeMessageRows(ctx, db, 10, 20); err != nil {
+		t.Fatal(err)
+	}
+	j, ok, err := LoadMediaJob(ctx, db, 10)
+	if err != nil || !ok {
+		t.Fatalf("merged message has no media: %v %v", ok, err)
+	}
+	if j.State != MediaDownloaded || j.LocalPath != "b.ogg" || j.Transcript != "appuntamento in stazione" ||
+		j.TranscriptLang != "it" || j.TranscriptEngine != "whisper" || j.TranscriptError != "" {
+		t.Fatalf("merged media = %s %q %q %q %q %q", j.State, j.LocalPath, j.Transcript, j.TranscriptLang, j.TranscriptEngine, j.TranscriptError)
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM media`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("media rows = %d %v", n, err)
+	}
+	var id int64
+	if err := db.QueryRow(`SELECT rowid FROM messages_fts WHERE messages_fts MATCH 'stazione'`).Scan(&id); err != nil || id != 10 {
+		t.Fatalf("transcript search = %d %v", id, err)
+	}
+}
+
 // v10 makes downloaded rows that hold an absolute path (a sent file's
 // original location) pending again, and leaves relative paths alone.
 func TestMigrateV10ResetsAbsoluteMediaPaths(t *testing.T) {
