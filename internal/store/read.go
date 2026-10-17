@@ -1,10 +1,12 @@
 package store
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -384,6 +386,104 @@ func ReadMessages(ctx context.Context, e Execer, q MessageQuery) (msgs []Message
 		}
 	}
 	return msgs, more, attachReactions(ctx, e, msgs)
+}
+
+// Anchor is a message to read around: its chat and its (TS, ID) position.
+type Anchor struct{ ChatID, TS, ID int64 }
+
+// ReadAround returns, for each anchor, up to n messages of its chat before it
+// and up to n after it, each in chronological order, the same windows
+// ReadMessages gives from the anchor. It runs one query plus one reactions
+// query for all anchors.
+func ReadAround(ctx context.Context, e Execer, anchors []Anchor, n int) (before, after [][]MessageRow, err error) {
+	before, after = make([][]MessageRow, len(anchors)), make([][]MessageRow, len(anchors))
+	if len(anchors) == 0 || n <= 0 {
+		return before, after, nil
+	}
+	ph := make([]string, len(anchors))
+	args := make([]any, 0, 4*len(anchors)+1)
+	for i, a := range anchors {
+		ph[i] = "(?, ?, ?, ?)"
+		args = append(args, i, a.ChatID, a.TS, a.ID)
+	}
+	args = append(args, n)
+	window := func(dir int, op, order string) string {
+		return fmt.Sprintf(`SELECT a.k, %d, m.id FROM a JOIN messages m ON m.id IN (SELECT x.id FROM messages x
+			WHERE x.chat_id = a.chat_id AND (x.ts %s a.ts OR (x.ts = a.ts AND x.id %s a.id))
+			ORDER BY x.ts %s, x.id %s LIMIT ?%d)`, dir, op, op, order, order, len(args))
+	}
+	type keyed struct {
+		k, dir int
+		m      MessageRow
+	}
+	var out []keyed
+	err = eachRow(ctx, e, `WITH a(k, chat_id, ts, id) AS (VALUES `+strings.Join(ph, ", ")+`),
+		w(k, dir, id) AS (`+window(0, "<", "DESC")+` UNION ALL `+window(1, ">", "ASC")+`)
+		SELECT w.k, w.dir, `+messageColumns+` FROM w JOIN messages m ON m.id = w.id `+messageJoinsOnM, args,
+		func(rows *sql.Rows) error {
+			var r keyed
+			m, err := scanMessage(scanHead{rows, []any{&r.k, &r.dir}})
+			if err != nil {
+				return err
+			}
+			r.m = m
+			out = append(out, r)
+			return nil
+		})
+	if err != nil {
+		return nil, nil, err
+	}
+	// A message can sit in several windows: load its reactions once.
+	uniq := make([]MessageRow, 0, len(out))
+	seen := make(map[int64]int, len(out))
+	for _, r := range out {
+		if _, ok := seen[r.m.ID]; !ok {
+			seen[r.m.ID] = len(uniq)
+			uniq = append(uniq, r.m)
+		}
+	}
+	if err := attachReactions(ctx, e, uniq); err != nil {
+		return nil, nil, err
+	}
+	slices.SortFunc(out, func(x, y keyed) int {
+		return cmp.Or(cmp.Compare(x.m.TS, y.m.TS), cmp.Compare(x.m.ID, y.m.ID))
+	})
+	for _, r := range out {
+		r.m.Reactions = uniq[seen[r.m.ID]].Reactions
+		if r.dir == 0 {
+			before[r.k] = append(before[r.k], r.m)
+		} else {
+			after[r.k] = append(after[r.k], r.m)
+		}
+	}
+	return before, after, nil
+}
+
+// scanHead puts leading columns into extra before the message columns.
+type scanHead struct {
+	rows  *sql.Rows
+	extra []any
+}
+
+func (s scanHead) Scan(dest ...any) error { return s.rows.Scan(append(s.extra, dest...)...) }
+
+// ChatsByID returns the chats with these ids that exist, by id.
+func ChatsByID(ctx context.Context, e Execer, ids []int64) (map[int64]ChatRow, error) {
+	out := make(map[int64]ChatRow, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	in, args := idList(ids)
+	err := eachRow(ctx, e, `SELECT `+chatColumns+` FROM chats c LEFT JOIN persons p ON p.id = c.person_id WHERE c.id IN (`+in+`)`, args,
+		func(rows *sql.Rows) error {
+			c, err := scanChat(rows)
+			if err != nil {
+				return err
+			}
+			out[c.ID] = c
+			return nil
+		})
+	return out, err
 }
 
 // MessageByID returns one message; ok is false when it does not exist.

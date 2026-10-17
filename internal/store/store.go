@@ -14,10 +14,12 @@ import (
 )
 
 // DSN builds the SQLite DSN every database in the daemon uses. whatsmeow's
-// sqlstore Upgrade refuses to run without foreign_keys.
+// sqlstore Upgrade refuses to run without foreign_keys. Each connection may
+// cache up to 32 MB of pages: with SQLite's 2 MB default, a full-text search
+// rereads pages from disk on every call.
 func DSN(path string) string {
 	return "file:" + uriPath(path) +
-		"?_pragma=foreign_keys(1)&_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_txlock=immediate"
+		"?_pragma=foreign_keys(1)&_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-32000)&_txlock=immediate"
 }
 
 // ReadOnlyDSN opens a database without ever writing to it (used for legacy imports).

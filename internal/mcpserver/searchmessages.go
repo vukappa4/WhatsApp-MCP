@@ -156,12 +156,23 @@ func (s *Server) searchMessages(ctx context.Context, _ *mcp.CallToolRequest, in 
 	if err != nil {
 		return nil, err
 	}
+	ids := make([]int64, 0, len(hits)+1)
+	if q.ChatID != 0 {
+		ids = append(ids, q.ChatID)
+	}
+	for i := range hits {
+		ids = append(ids, hits[i].ChatID)
+	}
+	chats, err := store.ChatsByID(ctx, s.DB, ids)
+	if err != nil {
+		return nil, err
+	}
 	w := newWrapper()
 	full := detailed(in.ResponseFormat)
 
 	var b strings.Builder
 	b.WriteString(fresh + "\n")
-	desc, err := s.describeSearch(ctx, w, c, q)
+	desc, err := s.describeSearch(ctx, w, c, q, chats)
 	if err != nil {
 		return nil, err
 	}
@@ -195,32 +206,21 @@ func (s *Server) searchMessages(ctx context.Context, _ *mcp.CallToolRequest, in 
 	}
 	b.WriteString(".\n")
 
-	chats := map[int64]*store.ChatRow{}
+	anchors := make([]store.Anchor, len(hits))
+	for i := range hits {
+		anchors[i] = store.Anchor{ChatID: hits[i].ChatID, TS: hits[i].TS, ID: hits[i].ID}
+	}
+	before, after, err := store.ReadAround(ctx, s.DB, anchors, c.Ctx)
+	if err != nil {
+		return nil, err
+	}
 	for i := range hits {
 		h := &hits[i]
-		chat, ok := chats[h.ChatID]
-		if !ok {
-			row, found, err := store.ChatByID(ctx, s.DB, h.ChatID)
-			if err != nil {
-				return nil, err
-			}
-			if found {
-				chat = &row
-			}
-			chats[h.ChatID] = chat
+		var chat *store.ChatRow
+		if row, ok := chats[h.ChatID]; ok {
+			chat = &row
 		}
-		var before, after []store.MessageRow
-		if c.Ctx > 0 {
-			if before, _, err = store.ReadMessages(ctx, s.DB, store.MessageQuery{ChatID: h.ChatID, Limit: c.Ctx,
-				HasAnchor: true, AnchorTS: h.TS, AnchorID: h.ID}); err != nil {
-				return nil, err
-			}
-			if after, _, err = store.ReadMessages(ctx, s.DB, store.MessageQuery{ChatID: h.ChatID, Limit: c.Ctx, Newer: true,
-				HasAnchor: true, AnchorTS: h.TS, AnchorID: h.ID}); err != nil {
-				return nil, err
-			}
-		}
-		b.WriteString(w.hitBlock(i+1+c.Off, chat, h, before, after, full, c.Ctx > 0))
+		b.WriteString(w.hitBlock(i+1+c.Off, chat, h, before[i], after[i], full, c.Ctx > 0))
 	}
 	if more {
 		next := c
@@ -236,8 +236,8 @@ func (s *Server) searchMessages(ctx context.Context, _ *mcp.CallToolRequest, in 
 }
 
 // describeSearch restates the query and the resolved filters, so a wrong
-// person or chat pick is visible.
-func (s *Server) describeSearch(ctx context.Context, w wrapper, c cursor, q store.SearchQuery) (string, error) {
+// person or chat pick is visible. chats holds the in_chat chat when it exists.
+func (s *Server) describeSearch(ctx context.Context, w wrapper, c cursor, q store.SearchQuery, chats map[int64]store.ChatRow) (string, error) {
 	var parts []string
 	if c.Query != "" {
 		parts = append(parts, fmt.Sprintf("Search %q", c.Query))
@@ -262,11 +262,7 @@ func (s *Server) describeSearch(ctx context.Context, w wrapper, c cursor, q stor
 		parts = append(parts, "sent by others")
 	}
 	if q.ChatID != 0 {
-		chat, found, err := store.ChatByID(ctx, s.DB, q.ChatID)
-		if err != nil {
-			return "", err
-		}
-		if found {
+		if chat, found := chats[q.ChatID]; found {
 			parts = append(parts, fmt.Sprintf("in %s %s (%s)", chatID(chat.ID), w.chatName(&chat), chat.Kind))
 		} else {
 			parts = append(parts, "in "+chatID(q.ChatID))

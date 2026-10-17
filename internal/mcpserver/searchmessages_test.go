@@ -80,6 +80,11 @@ func TestSearchMessages(t *testing.T) {
 	if !strings.Contains(text, "from p_") || !strings.Contains(text, "Niccolò D'Amico (+39 333 555 5555)") {
 		t.Fatalf("resolved sender not restated:\n%s", text)
 	}
+	text, _ = search(map[string]any{"query": "perche", "in_chat": "Calcetto"})
+	if !strings.Contains(text, `Search "perche" in c_`) || !strings.Contains(text, "Calcetto</untrusted_wa") ||
+		!strings.Contains(text, "(group): 1 match") {
+		t.Fatalf("resolved chat not restated:\n%s", text)
+	}
 
 	// Ambiguous sender name: an error listing both people.
 	text, isErr = search(map[string]any{"query": "pizza", "from": "marco"})
