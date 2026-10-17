@@ -39,3 +39,29 @@ func TestRotationFallsBackWhenRenameFails(t *testing.T) {
 		t.Fatalf("fallback file content = %q", b)
 	}
 }
+
+// A single write larger than maxSize into an empty log is written as is: no
+// rotation of the empty file pushes the oldest real log out.
+func TestHugeWriteIntoEmptyLogKeepsOldLogs(t *testing.T) {
+	dir := t.TempDir()
+	for i := 1; i <= keepOlds; i++ {
+		if err := os.WriteFile(filepath.Join(dir, "whatsapp-mcp.log."+string(rune('0'+i))), []byte("old"+string(rune('0'+i))), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r, err := OpenRotating(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if _, err := r.Write(make([]byte, maxSize+1)); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= keepOlds; i++ {
+		name := "whatsapp-mcp.log." + string(rune('0'+i))
+		b, _ := os.ReadFile(filepath.Join(dir, name))
+		if want := "old" + string(rune('0'+i)); string(b) != want {
+			t.Errorf("%s = %q, want %q", name, b, want)
+		}
+	}
+}

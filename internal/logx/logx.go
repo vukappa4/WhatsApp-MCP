@@ -87,7 +87,8 @@ func (r *RotatingFile) rotate() error {
 func (r *RotatingFile) Write(p []byte) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.size+int64(len(p)) > maxSize {
+	// An empty file is never rotated: that would push the oldest log out for nothing.
+	if r.size > 0 && r.size+int64(len(p)) > maxSize {
 		if err := r.rotate(); err != nil {
 			return 0, err
 		}
