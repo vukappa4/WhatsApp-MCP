@@ -171,18 +171,50 @@ func ListChats(ctx context.Context, e Execer, f ChatFilter) (chats []ChatRow, mo
 	if len(chats) > f.Limit {
 		chats, more = chats[:f.Limit], true
 	}
-	for i := range chats {
-		// The newest message at or before last_message_at: the one the shown
-		// time refers to, never a later poll vote (votes do not bump recency).
-		last, _, err := ReadMessages(ctx, e, MessageQuery{ChatID: chats[i].ID, Limit: 1, Before: chats[i].LastMessageAt + 1})
-		if err != nil {
-			return nil, false, err
-		}
-		if len(last) == 1 {
-			chats[i].Last = &last[0]
-		}
+	return chats, more, attachLast(ctx, e, chats)
+}
+
+// attachLast sets each chat's Last in one query: the newest message at or
+// before the LastMessageAt read with the chat, the one the shown time refers
+// to, never a later poll vote (votes do not bump recency).
+func attachLast(ctx context.Context, e Execer, chats []ChatRow) error {
+	if len(chats) == 0 {
+		return nil
 	}
-	return chats, more, nil
+	idx := make(map[int64]int, len(chats))
+	ph := make([]string, len(chats))
+	args := make([]any, 0, 2*len(chats))
+	for i, c := range chats {
+		idx[c.ID] = i
+		ph[i] = "(?, ?)"
+		args = append(args, c.ID, c.LastMessageAt)
+	}
+	rows, err := e.QueryContext(ctx, `WITH page(chat_id, last_at) AS (VALUES `+strings.Join(ph, ", ")+`)
+		SELECT `+messageColumns+` FROM page JOIN messages m ON m.id = (SELECT l.id FROM messages l
+			WHERE l.chat_id = page.chat_id AND l.ts <= page.last_at ORDER BY l.ts DESC, l.id DESC LIMIT 1)
+		`+messageJoinsOnM, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var msgs []MessageRow
+	for rows.Next() {
+		m, err := scanMessage(rows)
+		if err != nil {
+			return err
+		}
+		msgs = append(msgs, m)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if err := attachReactions(ctx, e, msgs); err != nil {
+		return err
+	}
+	for i := range msgs {
+		chats[idx[msgs[i].ChatID]].Last = &msgs[i]
+	}
+	return nil
 }
 
 func onlyDigits(s string) string {
