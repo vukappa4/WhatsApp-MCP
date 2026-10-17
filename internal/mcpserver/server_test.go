@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -10,9 +11,11 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -94,7 +97,14 @@ func (b bearer) RoundTrip(r *http.Request) (*http.Response, error) {
 
 func connect(t *testing.T, db *store.DB) *mcp.ClientSession {
 	t.Helper()
-	s := &Server{DB: db, WA: fixedStatus{State: wa.StateNotPaired, Since: t0}, Profile: "dev", DataDir: "x", Version: "test",
+	return connectWith(t, db, fixedStatus{State: wa.StateNotPaired, Since: t0})
+}
+
+// connectWith serves the tools over real HTTP with st as the link state and
+// returns a client session.
+func connectWith(t *testing.T, db *store.DB, st StatusSource) *mcp.ClientSession {
+	t.Helper()
+	s := &Server{DB: db, WA: st, Profile: "dev", DataDir: "x", Version: "test",
 		Now: func() time.Time { return t0.Add(3 * time.Hour) }}
 	hs := httptest.NewServer(s.Handler(token, 8766))
 	t.Cleanup(hs.Close)
@@ -567,5 +577,59 @@ func TestReadChatGapsFollowRequestedRange(t *testing.T) {
 	text, isErr = call(t, cs, toolReadChat, map[string]any{"chat": "+39 333 222 2222", "after": "2026-10-12T10:45", "before": "2026-10-12T11:30"})
 	if isErr || !strings.Contains(text, "sono l'altro Marco") || strings.Contains(text, "gap") {
 		t.Fatalf("gap outside after/before named:\n%s", text)
+	}
+}
+
+// panicStatus panics on the next Status call while armed, like a bug in a
+// tool handler.
+type panicStatus struct{ armed atomic.Bool }
+
+func (p *panicStatus) Status() wa.Status {
+	if p.armed.CompareAndSwap(true, false) {
+		panic("boom")
+	}
+	return wa.Status{State: wa.StateNotPaired, Since: t0}
+}
+
+// A panic in a tool answers that call with an error and leaves the daemon
+// serving: the SDK runs each request in a goroutine without a recover.
+func TestToolPanicKeepsServing(t *testing.T) {
+	st := &panicStatus{}
+	cs := connectWith(t, seed(t), st)
+
+	st.armed.Store(true)
+	text, isErr := call(t, cs, toolStatus, nil)
+	if !isErr || !strings.Contains(text, "internal error in whatsapp_status") || strings.Contains(text, "boom") {
+		t.Fatalf("panicking tool: isError=%v text %q, want an internal error without the panic value", isErr, text)
+	}
+	text, isErr = call(t, cs, toolStatus, nil)
+	if isErr || !strings.HasPrefix(text, "[whatsapp:") {
+		t.Fatalf("call after the panic: isError=%v text %q", isErr, text)
+	}
+}
+
+// A panic in a send tool may come after WhatsApp took the request, so the
+// answer warns against a blind retry.
+func TestSendToolPanicWarnsAboutRetry(t *testing.T) {
+	h := (&Server{}).recoverPanics(func(context.Context, string, mcp.Request) (mcp.Result, error) { panic("boom") })
+	for tool, warn := range map[string]string{
+		toolSendMessage:    "same idempotency_key",
+		toolSendFile:       "same idempotency_key",
+		toolRequestHistory: "wait a few minutes",
+		toolReadChat:       "",
+	} {
+		res, err := h(context.Background(), "tools/call", &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: tool}})
+		if err != nil {
+			t.Fatalf("%s: %v", tool, err)
+		}
+		r := res.(*mcp.CallToolResult)
+		text := r.Content[0].(*mcp.TextContent).Text
+		if !r.IsError || !strings.Contains(text, warn) || warn == "" && strings.Contains(text, "again") {
+			t.Errorf("%s: isError=%v text %q, want the warning %q", tool, r.IsError, text, warn)
+		}
+	}
+	var werr *jsonrpc.Error
+	if _, err := h(context.Background(), "tools/list", &mcp.ListToolsRequest{}); !errors.As(err, &werr) || werr.Code != jsonrpc.CodeInternalError {
+		t.Errorf("tools/list panic: err %v, want a JSON-RPC internal error", err)
 	}
 }

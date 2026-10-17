@@ -10,11 +10,13 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/vukappa4/whatsapp-mcp/internal/logx"
@@ -73,8 +75,44 @@ func (s *Server) NewMCP() *mcp.Server {
 		Capabilities: &mcp.ServerCapabilities{},
 		Logger:       logx.Quiet(s.Log), // per-request SDK chatter at debug
 	})
+	srv.AddReceivingMiddleware(s.recoverPanics)
 	s.addTools(srv)
 	return srv
+}
+
+// recoverPanics turns a panic in a request into an error answer. The SDK
+// runs each request in its own goroutine without a recover, so one bad tool
+// call would otherwise end the daemon. The panic value goes to the log only:
+// it may quote message content.
+func (s *Server) recoverPanics(next mcp.MethodHandler) mcp.MethodHandler {
+	return func(ctx context.Context, method string, req mcp.Request) (res mcp.Result, err error) {
+		defer func() {
+			r := recover()
+			if r == nil {
+				return
+			}
+			var tool string
+			if c, ok := req.(*mcp.CallToolRequest); ok && c.Params != nil {
+				tool = c.Params.Name
+			}
+			s.logger().Error("request panicked", "method", method, "tool", tool, "panic", r, "stack", string(debug.Stack()))
+			if method != "tools/call" {
+				res, err = nil, &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: "internal error in " + method + ": see the daemon log"}
+				return
+			}
+			msg := "internal error in " + tool + ": see the daemon log."
+			switch tool {
+			case toolSendMessage, toolSendFile:
+				// The send may have gone out before the panic: only the same
+				// idempotency_key retries it without a second send.
+				msg += " The message may have been sent. Retry only with the same idempotency_key; without one, ask the user before sending again."
+			case toolRequestHistory:
+				msg += " The request may have reached the phone: wait a few minutes and read the chat before asking again."
+			}
+			res, err = &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: msg}}}, nil
+		}()
+		return next(ctx, method, req)
+	}
 }
 
 // Handler returns the HTTP handler for /mcp with bearer auth and origin checks.

@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -121,9 +122,22 @@ func (m *Manager) loop(q *workQueue, run func(*task) error) {
 			if !ok {
 				return
 			}
-			q.finish(t, run(t))
+			q.finish(t, m.runSafe(run, t))
 		}
 	}()
+}
+
+// runSafe runs one task and turns a panic into its error, so the worker and
+// the daemon go on and a whatsapp_get_media waiting on the task gets an
+// answer. The panic value goes to the log only: it may quote message content.
+func (m *Manager) runSafe(run func(*task) error, t *task) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			m.o.Log.Error("media task panicked", "media", t.mediaID, "message", t.messageID, "panic", r, "stack", string(debug.Stack()))
+			err = errors.New("internal error: see the daemon log")
+		}
+	}()
+	return run(t)
 }
 
 // LiveMedia queues the eager download of a live media message that was just

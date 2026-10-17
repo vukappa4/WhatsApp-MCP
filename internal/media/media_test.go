@@ -777,3 +777,32 @@ func TestRetryAnswersRoutedByChat(t *testing.T) {
 		t.Fatal("single waiting download did not get its answer")
 	}
 }
+
+// A panicking task fails with an error that keeps the panic value out, and
+// its worker goes on with the next task: the daemon stays up.
+func TestWorkerSurvivesPanic(t *testing.T) {
+	m := New(Options{DB: nil})
+	defer m.Stop()
+	q := newQueue(10)
+	m.loop(q, func(t *task) error {
+		if t.mediaID == 1 {
+			panic("boom")
+		}
+		return nil
+	})
+	for _, c := range []struct {
+		id      int64
+		wantErr bool
+	}{{1, true}, {2, false}} {
+		id, wantErr := c.id, c.wantErr
+		task, _ := q.submit(id, id, true)
+		select {
+		case <-task.done:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("task %d never finished", id)
+		}
+		if (task.err != nil) != wantErr || task.err != nil && strings.Contains(task.err.Error(), "boom") {
+			t.Fatalf("task %d: err %v, want error %v without the panic value", id, task.err, wantErr)
+		}
+	}
+}
