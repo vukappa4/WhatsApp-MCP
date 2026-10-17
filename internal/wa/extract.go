@@ -280,7 +280,14 @@ func contactText(name, vcard string) string {
 	var phones []string
 	for _, line := range strings.Split(vcard, "\n") {
 		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(strings.ToUpper(line), "TEL") {
+		prop := line
+		if i := strings.IndexAny(prop, ";:"); i >= 0 {
+			prop = prop[:i]
+		}
+		if i := strings.LastIndex(prop, "."); i >= 0 {
+			prop = prop[i+1:] // group prefix, as iOS writes it: item1.TEL
+		}
+		if !strings.EqualFold(prop, "TEL") {
 			continue
 		}
 		if i := strings.LastIndex(line, ":"); i >= 0 {

@@ -359,3 +359,16 @@ func TestHistoryEditOfMissingOriginalKeepsCurrentText(t *testing.T) {
 		t.Fatalf("text = %q", got)
 	}
 }
+
+// iOS writes vCard phones with a group prefix (item1.TEL); TELEX is not a phone.
+func TestContactVCardGroupedTEL(t *testing.T) {
+	vcard := "BEGIN:VCARD\r\nVERSION:3.0\r\nN:;Marco;;;\r\nFN:Marco\r\n" +
+		"item1.TEL;waid=393331234567:+39 333 123 4567\r\nitem1.X-ABLabel:Mobile\r\n" +
+		"TELEX:12345\r\ntel;type=CELL:+39 333 765 4321\r\nEND:VCARD"
+	in := newIngestor(t)
+	live(t, in, dmFromMarco("C1", t0), &waE2E.Message{ContactMessage: &waE2E.ContactMessage{
+		DisplayName: proto.String("Marco"), Vcard: proto.String(vcard)}})
+	if got := one[string](t, in, `SELECT text FROM messages WHERE wa_id = 'C1'`); got != "Marco: +39 333 123 4567, +39 333 765 4321" {
+		t.Fatalf("contact text = %q", got)
+	}
+}
