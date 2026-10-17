@@ -172,23 +172,21 @@ type statusIn struct{}
 
 func (s *Server) status(ctx context.Context, _ *mcp.CallToolRequest, _ statusIn) (*mcp.CallToolResult, error) {
 	st := s.WA.Status()
-	fresh, err := s.freshness(ctx, s.now().Add(-7*24*time.Hour).Unix(), 0)
+	d, err := s.loadFresh(ctx)
 	if err != nil {
 		return nil, err
 	}
+	fresh := s.freshLine(d, s.now().Add(-7*24*time.Hour).Unix(), 0)
 	stats, err := store.GetStats(ctx, s.DB)
 	if err != nil {
 		return nil, err
 	}
-	gaps, err := store.Gaps(ctx, s.DB)
-	if err != nil {
-		return nil, err
-	}
+	gaps := d.Gaps
 	events, err := store.RecentConnections(ctx, s.DB, 8)
 	if err != nil {
 		return nil, err
 	}
-	histAt, _ := store.GetStateTS(ctx, s.DB, store.KeyHistorySyncAt)
+	histAt := d.HistorySyncAt
 	histState, _, _ := store.GetState(ctx, s.DB, store.KeyHistorySyncState)
 	imported, _, _ := store.GetState(ctx, s.DB, store.KeyImportLegacy)
 
@@ -270,11 +268,7 @@ func (s *Server) status(ctx context.Context, _ *mcp.CallToolRequest, _ statusIn)
 			fmt.Fprintf(&b, "Transcription: NOT READY - %s\n", ms.Detail)
 		}
 	}
-	seen, err := phoneLastSeen(ctx, s.DB)
-	if err != nil {
-		return nil, err
-	}
-	b.WriteString(phoneHealth(seen, s.now()) + "\n")
+	b.WriteString(phoneHealth(d.phoneSeen(), s.now()) + "\n")
 	if len(events) > 0 {
 		b.WriteString("Recent connection events:\n")
 		for _, e := range events {
@@ -294,24 +288,6 @@ const maxStatusGaps = 10
 // phoneWarnAfter is when the status warns that the phone has been offline
 // long: WhatsApp unlinks linked devices after 14 days without it.
 const phoneWarnAfter = 12 * 24 * time.Hour
-
-// phoneLastSeen is the newest sign of the phone being online: activity on
-// it (phone_seen_at) or the last history sync blob, which only the phone
-// sends.
-func phoneLastSeen(ctx context.Context, db *store.DB) (time.Time, error) {
-	seen, err := store.GetStateTS(ctx, db, store.KeyPhoneSeenAt)
-	if err != nil {
-		return seen, err
-	}
-	hist, err := store.GetStateTS(ctx, db, store.KeyHistorySyncAt)
-	if err != nil {
-		return seen, err
-	}
-	if hist.After(seen) {
-		seen = hist
-	}
-	return seen, nil
-}
 
 // phoneHealth reports the phone's last activity and warns before WhatsApp
 // unlinks this device.

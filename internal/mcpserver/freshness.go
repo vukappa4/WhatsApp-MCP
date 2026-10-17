@@ -4,21 +4,77 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/vukappa4/whatsapp-mcp/internal/store"
 	"github.com/vukappa4/whatsapp-mcp/internal/wa"
 )
 
+// freshData is the database state behind the freshness line.
+type freshData struct {
+	store.FreshState
+	Gaps []store.Gap // shared with the cache: never modify
+}
+
+// phoneSeen is the newest sign of the phone being online: activity on it
+// (phone_seen_at) or the last history sync blob, which only the phone sends.
+func (d freshData) phoneSeen() time.Time {
+	if d.HistorySyncAt.After(d.PhoneSeenAt) {
+		return d.HistorySyncAt
+	}
+	return d.PhoneSeenAt
+}
+
+// gapCache keeps the offline gaps of the last connection_log version seen,
+// so a read derives them again only after a new connection event.
+type gapCache struct {
+	mu   sync.Mutex
+	ok   bool
+	log  store.LogVersion
+	gaps []store.Gap
+}
+
+// loadFresh reads the freshness state: one query while connection_log is
+// unchanged, two after it changed.
+func (s *Server) loadFresh(ctx context.Context) (freshData, error) {
+	f, err := store.GetFreshState(ctx, s.DB)
+	if err != nil {
+		return freshData{}, err
+	}
+	c := &s.gapCache
+	c.mu.Lock()
+	hit, gaps := c.ok && c.log == f.Log, c.gaps
+	c.mu.Unlock()
+	if !hit {
+		// Gaps reads connection_log after f.Log was read, so it holds at
+		// least the rows of f.Log: a newer row changes Log and is read on
+		// the next miss.
+		if gaps, err = store.Gaps(ctx, s.DB); err != nil {
+			return freshData{}, err
+		}
+		c.mu.Lock()
+		c.ok, c.log, c.gaps = true, f.Log, gaps
+		c.mu.Unlock()
+	}
+	return freshData{FreshState: f, Gaps: gaps}, nil
+}
+
 // freshness builds the line that starts every read result. from/to (unix)
 // bound the data shown; gaps of the daemon overlapping them are named.
 func (s *Server) freshness(ctx context.Context, from, to int64) (string, error) {
-	now := s.now()
-	st := s.WA.Status()
-	lastEvent, err := store.GetStateTS(ctx, s.DB, store.KeyLastEventAt)
+	d, err := s.loadFresh(ctx)
 	if err != nil {
 		return "", err
 	}
+	return s.freshLine(d, from, to), nil
+}
+
+// freshLine renders the freshness line from d.
+func (s *Server) freshLine(d freshData, from, to int64) string {
+	now := s.now()
+	st := s.WA.Status()
+	lastEvent := d.LastEventAt
 	var parts []string
 	stale := false
 	switch st.State {
@@ -61,21 +117,15 @@ func (s *Server) freshness(ctx context.Context, from, to int64) (string, error) 
 		stale = true
 	}
 
-	if seen, err := phoneLastSeen(ctx, s.DB); err != nil {
-		return "", err
-	} else if !seen.IsZero() && now.Sub(seen) >= phoneWarnAfter {
+	if seen := d.phoneSeen(); !seen.IsZero() && now.Sub(seen) >= phoneWarnAfter {
 		parts = append(parts, fmt.Sprintf("PHONE OFFLINE %d days: open WhatsApp on the phone, this device is unlinked at 14", int(now.Sub(seen).Hours()/24)))
 	}
 
-	gaps, err := store.Gaps(ctx, s.DB)
-	if err != nil {
-		return "", err
-	}
 	if to == 0 {
 		to = now.Unix()
 	}
 	var hits []string
-	for _, g := range gaps {
+	for _, g := range d.Gaps {
 		gto := g.To
 		if gto.IsZero() {
 			gto = now
@@ -96,7 +146,7 @@ func (s *Server) freshness(ctx context.Context, from, to int64) (string, error) 
 	if stale {
 		line += " - results may be stale"
 	}
-	return line + "]", nil
+	return line + "]"
 }
 
 func (s *Server) now() time.Time {

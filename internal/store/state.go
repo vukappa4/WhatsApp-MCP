@@ -114,17 +114,52 @@ func DeleteStateBefore(ctx context.Context, e Execer, prefix string, t time.Time
 	return err
 }
 
+// FreshState is what the freshness line of every read result needs, read
+// in one query.
+type FreshState struct {
+	LastEventAt, PhoneSeenAt, HistorySyncAt time.Time // zero when missing
+	// Log identifies the content of connection_log for caching Gaps. Rows
+	// are only appended while the daemon runs (migrations rewrite them
+	// before it serves), so Gaps changes only when Log does.
+	Log LogVersion
+}
+
+// LogVersion is the newest id and the row count of connection_log.
+type LogVersion struct{ MaxID, Rows int64 }
+
+// GetFreshState reads the freshness keys and the connection_log version.
+func GetFreshState(ctx context.Context, e Execer) (FreshState, error) {
+	var last, phone, hist sql.NullString
+	var f FreshState
+	err := e.QueryRowContext(ctx, `SELECT
+		(SELECT value FROM sync_state WHERE key = ?), (SELECT value FROM sync_state WHERE key = ?),
+		(SELECT value FROM sync_state WHERE key = ?),
+		(SELECT COALESCE(MAX(id), 0) FROM connection_log), (SELECT COUNT(*) FROM connection_log)`,
+		KeyLastEventAt, KeyPhoneSeenAt, KeyHistorySyncAt).Scan(&last, &phone, &hist, &f.Log.MaxID, &f.Log.Rows)
+	if err != nil {
+		return FreshState{}, err
+	}
+	f.LastEventAt, f.PhoneSeenAt, f.HistorySyncAt = parseStateTS(last), parseStateTS(phone), parseStateTS(hist)
+	return f, nil
+}
+
 // GetStateTS reads a timestamp key; zero time when missing.
 func GetStateTS(ctx context.Context, e Execer, key string) (time.Time, error) {
 	v, ok, err := GetState(ctx, e, key)
 	if err != nil || !ok {
 		return time.Time{}, err
 	}
-	n, err := strconv.ParseInt(v, 10, 64)
-	if err != nil || n == 0 {
-		return time.Time{}, nil
+	return parseStateTS(sql.NullString{String: v, Valid: true}), nil
+}
+
+// parseStateTS reads a unix timestamp value; zero time when missing, zero
+// or not a number.
+func parseStateTS(v sql.NullString) time.Time {
+	n, err := strconv.ParseInt(v.String, 10, 64)
+	if !v.Valid || err != nil || n == 0 {
+		return time.Time{}
 	}
-	return time.Unix(n, 0), nil
+	return time.Unix(n, 0)
 }
 
 // Connection log events.

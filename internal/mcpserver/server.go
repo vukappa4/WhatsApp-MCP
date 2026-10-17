@@ -51,8 +51,9 @@ type Server struct {
 	// outgoing.LoadPolicy(DataDir).
 	Files *outgoing.Policy
 
-	sendMu  sync.Mutex  // one send at a time: idempotency keys stay exact
-	closing atomic.Bool // the daemon is stopping: new sends are refused (Drain)
+	sendMu   sync.Mutex  // one send at a time: idempotency keys stay exact
+	closing  atomic.Bool // the daemon is stopping: new sends are refused (Drain)
+	gapCache gapCache
 }
 
 // Instructions are sent to the client at initialize. Keep under 2,048 characters.
