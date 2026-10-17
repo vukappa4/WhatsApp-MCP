@@ -11,13 +11,13 @@ import (
 )
 
 type readChatIn struct {
-	Chat           string `json:"chat,omitempty" jsonschema:"c_N chat id, p_N person id, phone number such as +39 333 1234567, or an exact person or group name. Optional with around or cursor"`
-	After          string `json:"after,omitempty" jsonschema:"only messages at or after this time, ISO 8601 (e.g. 2026-10-13T09:00:00+02:00, 2026-10-13, or 09:00 for today)"`
-	Before         string `json:"before,omitempty" jsonschema:"only messages before this time, ISO 8601"`
-	Around         string `json:"around,omitempty" jsonschema:"m_N message id: return the messages around it"`
+	Chat           string `json:"chat,omitempty" jsonschema:"c_N, p_N (their DM), phone number such as +39 333 1234567, or exact person or group name; optional with around or cursor"`
+	After          string `json:"after,omitempty" jsonschema:"only messages at or after this time"`
+	Before         string `json:"before,omitempty" jsonschema:"only messages before this time"`
+	Around         string `json:"around,omitempty" jsonschema:"m_N: the messages around it"`
 	Limit          int    `json:"limit,omitempty" jsonschema:"messages per page, 1-100, default 30"`
-	Cursor         string `json:"cursor,omitempty" jsonschema:"older_cursor or newer_cursor from a previous call; chat and bounds then come from the cursor"`
-	ResponseFormat string `json:"response_format,omitempty" jsonschema:"concise (default) or detailed (adds WhatsApp ids, reply previews, media details and who reacted)"`
+	Cursor         string `json:"cursor,omitempty" jsonschema:"older_cursor or newer_cursor of a previous call; it carries chat and bounds"`
+	ResponseFormat string `json:"response_format,omitempty" jsonschema:"default concise; detailed adds WhatsApp ids, reply previews, media details and who reacted"`
 }
 
 // resolveChat turns the chat argument into one chat, or an actionable error.

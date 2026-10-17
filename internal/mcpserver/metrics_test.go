@@ -120,9 +120,10 @@ func resultText(res *mcp.CallToolResult) string {
 	return b.String()
 }
 
-// dumpProbes prints every probe's text in the size report:
+// dumpProbes prints the tools/list payload and every probe's text in the
+// size report:
 // go test ./internal/mcpserver -run TestSizeReport -v -args -dump
-var dumpProbes = flag.Bool("dump", false, "TestSizeReport: print the text of every probe")
+var dumpProbes = flag.Bool("dump", false, "TestSizeReport: print the tools/list payload and the text of every probe")
 
 func sizeLine(name string, chars int) string {
 	return fmt.Sprintf("SIZE %-34s chars %7d  tokens %6d", name, chars, int(float64(chars)/3.5+0.5))
@@ -154,6 +155,9 @@ func TestSizeReport(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Log(sizeLine("tools_list", utf8.RuneCount(payload)))
+	if *dumpProbes {
+		t.Logf("---- tools_list\n%s", payload)
+	}
 	for _, tl := range tools.Tools {
 		b, _ := json.Marshal(tl)
 		t.Log(sizeLine("tools_list/"+tl.Name, utf8.RuneCount(b)))

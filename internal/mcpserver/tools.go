@@ -87,7 +87,7 @@ func addTool[In any](srv *mcp.Server, t *mcp.Tool, h textHandler[In]) {
 func (s *Server) addTools(srv *mcp.Server) {
 	addTool(srv, &mcp.Tool{
 		Name: toolStatus,
-		Description: "Health of the WhatsApp link: connection state, account, newest stored message, offline gaps, " +
+		Description: "Health of the WhatsApp link: connection, account, newest stored message, offline gaps, " +
 			"history coverage, storage errors, a temporary ban and when the phone was last active (WhatsApp unlinks " +
 			"this device after 14 days without it). Call it when results look stale or before trusting " +
 			"that nothing new arrived.",
@@ -96,9 +96,8 @@ func (s *Server) addTools(srv *mcp.Server) {
 
 	addTool(srv, &mcp.Tool{
 		Name: toolListChats,
-		Description: "List chats by most recent message, newest first, with the counterpart's name and phone, " +
-			"unread count and a preview of the last message. Filter by unread, dm or group, or by a query that " +
-			"matches chat names, person names and phone numbers. Page with next_cursor.",
+		Description: "List chats, newest message first, with the counterpart's name and phone, unread count and " +
+			"a preview of the last message.",
 		InputSchema: schemaFor[listChatsIn](map[string][]any{
 			"filter":          {"all", "unread", "dm", "group"},
 			"response_format": formatEnum,
@@ -108,21 +107,17 @@ func (s *Server) addTools(srv *mcp.Server) {
 
 	addTool(srv, &mcp.Tool{
 		Name: toolReadChat,
-		Description: "Read the transcript of one chat, oldest to newest. chat is a c_N chat id, a p_N person id, " +
-			"a phone number or an exact person or group name. Without bounds it returns the latest messages; " +
-			"after/before bound by time (ISO 8601); around=m_N centers on one message. Page with older_cursor / " +
-			"newer_cursor. Up to 100 messages per page; detailed mode cuts each text at 4,000 characters unless " +
-			"limit=1, and a long page leaves its oldest messages to the cursor. Media, replies, edits, deletions and " +
-			"reactions are marked inline.",
+		Description: "Read the transcript of one chat, oldest to newest; without after, before or around, the latest " +
+			"messages. Detailed mode cuts each text at 4,000 characters unless limit=1, and a long page leaves its " +
+			"oldest messages to the cursor. Media, replies, edits, deletions and reactions are marked inline.",
 		InputSchema: schemaFor[readChatIn](map[string][]any{"response_format": formatEnum}),
 		Annotations: readOnly("Read a WhatsApp chat"),
 	}, s.readChat)
 
 	addTool(srv, &mcp.Tool{
 		Name: toolSearchPeople,
-		Description: "Find people by part of a name (case and accents ignored), a phone number in any format, a p_N id " +
-			"or a LID. Returns a ranked list, best match first: person id, name and where it comes from (address book " +
-			"or their WhatsApp profile), phone numbers, their DM and the groups they wrote in, and the last interaction. " +
+		Description: "Find people, best match first: person id, name and where it comes from (address book or their " +
+			"WhatsApp profile), phone numbers, their DM, the groups they wrote in and the last interaction. " +
 			"Use it to pick the right person before reading or searching.",
 		InputSchema: schemaFor[searchPeopleIn](map[string][]any{"response_format": formatEnum}),
 		Annotations: readOnly("Search WhatsApp people"),
@@ -130,11 +125,8 @@ func (s *Server) addTools(srv *mcp.Server) {
 
 	addTool(srv, &mcp.Tool{
 		Name: toolSearchMessages,
-		Description: "Full-text search over message text, captions and voice-note transcripts across all chats. " +
-			"Words are AND-ed, \"quoted phrases\" match in order, word* matches a prefix; case and accents are ignored. " +
-			"Filter by sender (from), chat (in_chat), time (after/before), media type (has_media) or from_me; " +
-			"without a query it lists the messages the filters select, newest first. Sort by relevance or newest, " +
-			"add context messages around each hit, page with next_cursor. Open a hit with whatsapp_read_chat around=m_N.",
+		Description: "Full-text search across all chats; without a query it lists the messages the filters select, " +
+			"newest first. Open a hit with whatsapp_read_chat around=m_N.",
 		InputSchema: schemaFor[searchMessagesIn](map[string][]any{
 			"has_media":       {"image", "video", "voice", "audio", "document", "sticker", "any"},
 			"sort":            {"relevance", "newest"},
@@ -145,11 +137,10 @@ func (s *Server) addTools(srv *mcp.Server) {
 
 	addTool(srv, &mcp.Tool{
 		Name: toolGetMedia,
-		Description: "Open the media of one message (m_N from read_chat or search_messages): downloads it if needed and " +
-			"returns its local path and details. Voice notes and audio come with their transcript; JPEG, PNG, GIF and " +
-			"WebP images under 1 MB (checked by their bytes) also come as a picture; documents and videos as a path to open with other tools. mode=transcript waits " +
-			"for the text of a voice note, mode=path only downloads. If the download or transcription takes longer, " +
-			"the result says when to call again.",
+		Description: "Open the media of one message: downloads it if needed and returns its local path and details. " +
+			"Voice notes and audio come with their transcript; JPEG, PNG, GIF and WebP images under 1 MB (checked by " +
+			"their bytes) also come as a picture; documents and videos as a path to open with other tools. If the " +
+			"download or transcription takes longer, the result says when to call again.",
 		InputSchema: schemaFor[getMediaIn](map[string][]any{
 			"mode":            {"auto", "transcript", "path"},
 			"response_format": formatEnum,
@@ -362,11 +353,11 @@ func (w wrapper) chatName(c *store.ChatRow) string {
 // ---- whatsapp_list_chats ----
 
 type listChatsIn struct {
-	Filter         string `json:"filter,omitempty" jsonschema:"all (default), unread, dm or group"`
+	Filter         string `json:"filter,omitempty" jsonschema:"default all"`
 	Query          string `json:"query,omitempty" jsonschema:"substring of a chat name, person name or phone number"`
 	Limit          int    `json:"limit,omitempty" jsonschema:"chats per page, 1-100, default 20"`
-	Cursor         string `json:"cursor,omitempty" jsonschema:"next_cursor from the previous page; filter and query then come from the cursor"`
-	ResponseFormat string `json:"response_format,omitempty" jsonschema:"concise (default) or detailed (adds JIDs, archive and mute state)"`
+	Cursor         string `json:"cursor,omitempty" jsonschema:"next_cursor of the previous page; it carries filter and query"`
+	ResponseFormat string `json:"response_format,omitempty" jsonschema:"default concise; detailed adds JIDs, archive and mute state"`
 }
 
 func (s *Server) listChats(ctx context.Context, _ *mcp.CallToolRequest, in listChatsIn) (*mcp.CallToolResult, error) {

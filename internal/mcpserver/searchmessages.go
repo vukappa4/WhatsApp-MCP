@@ -12,18 +12,18 @@ import (
 )
 
 type searchMessagesIn struct {
-	Query          string `json:"query,omitempty" jsonschema:"words to find in message text, captions and voice-note transcripts. Words are AND-ed, \"quoted phrases\" match in order, word* matches a prefix; case and accents are ignored, other punctuation is ignored. Optional when a filter is set"`
-	From           string `json:"from,omitempty" jsonschema:"sender: p_N person id, phone number, part of a name, or me"`
-	InChat         string `json:"in_chat,omitempty" jsonschema:"only this chat: c_N chat id, p_N person id (their DM), phone number or exact name, as in whatsapp_read_chat"`
-	After          string `json:"after,omitempty" jsonschema:"only messages at or after this time, ISO 8601 (e.g. 2026-10-13T09:00:00+02:00, 2026-10-13, or 09:00 for today)"`
-	Before         string `json:"before,omitempty" jsonschema:"only messages before this time, ISO 8601"`
-	HasMedia       string `json:"has_media,omitempty" jsonschema:"only messages with this media: image, video, voice, audio, document, sticker or any"`
+	Query          string `json:"query,omitempty" jsonschema:"words in message text, captions and voice-note transcripts: words are AND-ed, \"quoted phrases\" match in order, word* matches a prefix; case, accents and other punctuation are ignored. Optional when a filter is set"`
+	From           string `json:"from,omitempty" jsonschema:"sender: p_N, phone number, part of a name, or me"`
+	InChat         string `json:"in_chat,omitempty" jsonschema:"only this chat: c_N, p_N (their DM), phone number or exact name"`
+	After          string `json:"after,omitempty" jsonschema:"only messages at or after this time"`
+	Before         string `json:"before,omitempty" jsonschema:"only messages before this time"`
+	HasMedia       string `json:"has_media,omitempty" jsonschema:"only messages with this media"`
 	FromMe         *bool  `json:"from_me,omitempty" jsonschema:"true: only messages the user sent; false: only messages others sent"`
-	Sort           string `json:"sort,omitempty" jsonschema:"relevance (default with a query) or newest"`
-	Context        int    `json:"context,omitempty" jsonschema:"messages of the same chat to show before and after each hit, 0-3, default 0"`
+	Sort           string `json:"sort,omitempty" jsonschema:"default relevance with a query, newest without"`
+	Context        int    `json:"context,omitempty" jsonschema:"messages of the same chat shown before and after each hit, 0-3, default 0"`
 	Limit          int    `json:"limit,omitempty" jsonschema:"hits per page, 1-50, default 20 (10 with context)"`
-	Cursor         string `json:"cursor,omitempty" jsonschema:"next_cursor from the previous page; query, filters, sort and context then come from the cursor"`
-	ResponseFormat string `json:"response_format,omitempty" jsonschema:"concise (default: long texts cut to an excerpt around the match) or detailed (full texts, WhatsApp ids, media details, who reacted)"`
+	Cursor         string `json:"cursor,omitempty" jsonschema:"next_cursor of the previous page; it carries query, filters, sort and context"`
+	ResponseFormat string `json:"response_format,omitempty" jsonschema:"default concise (long texts cut to an excerpt around the match); detailed gives full texts, WhatsApp ids, media details and who reacted"`
 }
 
 // Concise bodies: a hit is cut to an excerpt around the match, a context line shorter.

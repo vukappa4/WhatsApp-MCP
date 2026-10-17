@@ -63,26 +63,20 @@ const toHelp = "recipient: c_N chat id (person or group), p_N person id, a phone
 func (s *Server) addSendTools(srv *mcp.Server) {
 	addTool(srv, &mcp.Tool{
 		Name: toolSendMessage,
-		Description: "Send a WhatsApp text message to a person or group, optionally as a reply to a stored message. " +
-			"Returns the stored message id, the resolved recipient (name and phone, or group name) and the server time. " +
-			"An ambiguous name returns the candidates instead of sending. Pass idempotency_key to make retries safe: " +
-			"the same key within 24 h returns the first result without sending again." + sendWarning,
+		Description: "Send a WhatsApp text message to a person or group. Returns the stored message id, the resolved " +
+			"recipient (name and phone, or group name) and the server time. An ambiguous name returns the candidates " +
+			"instead of sending." + sendWarning,
 		InputSchema: schemaFor[sendMessageIn](nil),
 		Annotations: sendAnnotations("Send a WhatsApp message"),
 	}, s.sendMessage)
 
 	addTool(srv, &mcp.Tool{
 		Name: toolSendFile,
-		Description: "Send a local file over WhatsApp: a photo (JPEG/PNG), an MP4 video, a document, or a voice note " +
-			"(any audio, converted to Opus). kind=auto sends JPEG/PNG as photos, MP4 as video and everything else as a " +
-			"document; voice notes only with kind=voice_note. Limits: 16 MB for photos, videos and voice notes, 100 MB for " +
-			"documents. Only files inside the user's Desktop, Documents, Downloads, Pictures, Videos (Movies on macOS), Music " +
-			"and cloud drive (OneDrive, iCloud Drive, Dropbox) folders, your session's scratchpad folder (save files you generate there) and " +
-			"the WhatsApp media folder can be sent " +
-			"(the user can change the folders in config.json in the profile data dir); even there, secrets, keys, " +
-			"databases and repositories are refused (.env*, *.pem, *.key, id_*, *.kdbx, *.pfx, *.p12, *.ppk, *.ovpn, " +
-			".git-credentials, .netrc, .npmrc, .pypirc, *.db, *.sqlite, and anything in .git, .ssh, .aws, .azure, " +
-			".docker, .kube or .gnupg folders)." + sendWarning,
+		Description: "Send a local file over WhatsApp as a photo, video, document or voice note. Limits: 16 MB for " +
+			"photos, videos and voice notes, 100 MB for documents. Secrets, keys, databases and repositories are refused " +
+			"even in an allowed folder: .env*, *.pem, *.key, id_*, *.kdbx, *.pfx, *.p12, *.ppk, *.ovpn, .git-credentials, " +
+			".netrc, .npmrc, .pypirc, *.db, *.sqlite, and anything in a .git, .ssh, .aws, .azure, .docker, .kube or " +
+			".gnupg folder." + sendWarning,
 		InputSchema: schemaFor[sendFileIn](map[string][]any{"kind": {"auto", "document", "image", "video", "voice_note"}}),
 		Annotations: sendAnnotations("Send a file on WhatsApp"),
 	}, s.sendFile)
@@ -710,10 +704,10 @@ func (s *Server) Drain(timeout time.Duration) bool {
 // ---- whatsapp_send_message ----
 
 type sendMessageIn struct {
-	To             string `json:"to" jsonschema:"recipient: c_N chat id (person or group), p_N person id, a phone number in any format (+39 333 123 4567, 3331234567), or the exact name of one person or group (case and accents ignored)"`
+	To             string `json:"to" jsonschema:"recipient: c_N (person or group), p_N, a phone number in any format (+39 333 123 4567, 3331234567), or the exact name of one person or group (case and accents ignored)"`
 	Text           string `json:"text" jsonschema:"the message text, exactly as it should arrive"`
-	ReplyTo        string `json:"reply_to,omitempty" jsonschema:"m_N id of a stored message in the same chat to reply to (shown quoted)"`
-	IdempotencyKey string `json:"idempotency_key,omitempty" jsonschema:"any unique string; repeating a call with the same key within 24 h returns the first result instead of sending again"`
+	ReplyTo        string `json:"reply_to,omitempty" jsonschema:"m_N of a stored message in the same chat to reply to (shown quoted)"`
+	IdempotencyKey string `json:"idempotency_key,omitempty" jsonschema:"any unique string; pass one to make retries safe: a call with the same key within 24 h returns the first result instead of sending again"`
 }
 
 func (s *Server) sendMessage(ctx context.Context, _ *mcp.CallToolRequest, in sendMessageIn) (*mcp.CallToolResult, error) {

@@ -64,9 +64,9 @@ func inlineImage(path string) (*mcp.ImageContent, bool) {
 }
 
 type getMediaIn struct {
-	Message        string `json:"message" jsonschema:"m_N id of a message with media (image, video, voice, audio, document or sticker)"`
-	Mode           string `json:"mode,omitempty" jsonschema:"auto (default: file, plus transcript for voice and audio, plus the picture for images under 1 MB), transcript (voice and audio: wait for the text) or path (download only, return the local path)"`
-	ResponseFormat string `json:"response_format,omitempty" jsonschema:"concise (default) or detailed (adds WhatsApp ids, hashes, engine and error details)"`
+	Message        string `json:"message" jsonschema:"m_N (from read_chat or search_messages) of a message with an image, video, voice note, audio, document or sticker"`
+	Mode           string `json:"mode,omitempty" jsonschema:"auto (default): the file, plus the transcript or the picture; transcript: wait for the text of voice and audio; path: only download"`
+	ResponseFormat string `json:"response_format,omitempty" jsonschema:"default concise; detailed adds WhatsApp ids, hashes, engine and error details"`
 }
 
 func (s *Server) getMedia(ctx context.Context, _ *mcp.CallToolRequest, in getMediaIn) (*mcp.CallToolResult, error) {

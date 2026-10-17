@@ -245,10 +245,10 @@ func nameSource(c *store.PersonCandidate) string {
 // ---- whatsapp_search_people ----
 
 type searchPeopleIn struct {
-	Query          string `json:"query,omitempty" jsonschema:"part of a name (case and accents ignored), a phone number in any format (+39 333 123 4567, 393331234567, 3331234567, part of a number), a p_N id or a LID such as 123456789@lid. Required unless cursor is set"`
+	Query          string `json:"query,omitempty" jsonschema:"part of a name (case and accents ignored), a phone number in any format or part of one (+39 333 123 4567, 393331234567, 3331234567), a p_N id or a LID such as 123456789@lid; required unless cursor is set"`
 	Limit          int    `json:"limit,omitempty" jsonschema:"people per page, 1-50, default 10"`
-	Cursor         string `json:"cursor,omitempty" jsonschema:"next_cursor from the previous page; the query then comes from the cursor"`
-	ResponseFormat string `json:"response_format,omitempty" jsonschema:"concise (default) or detailed (adds every name candidate, all phone numbers and LIDs, and more groups)"`
+	Cursor         string `json:"cursor,omitempty" jsonschema:"next_cursor of the previous page; it carries the query"`
+	ResponseFormat string `json:"response_format,omitempty" jsonschema:"default concise; detailed adds every name candidate, all phone numbers and LIDs, and more groups"`
 }
 
 func (s *Server) searchPeople(ctx context.Context, _ *mcp.CallToolRequest, in searchPeopleIn) (*mcp.CallToolResult, error) {

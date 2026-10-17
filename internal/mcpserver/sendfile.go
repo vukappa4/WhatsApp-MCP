@@ -22,12 +22,12 @@ import (
 // ---- whatsapp_send_file ----
 
 type sendFileIn struct {
-	To             string `json:"to" jsonschema:"recipient: c_N chat id (person or group), p_N person id, a phone number in any format, or the exact name of one person or group"`
-	Path           string `json:"path" jsonschema:"absolute path of a local file inside an allowed folder (Desktop, Documents, Downloads, Pictures, Videos or Movies, Music, a cloud drive folder, your session's scratchpad folder or the WhatsApp media folder), e.g. C:\\Users\\me\\Documents\\offerta.pdf on Windows, /Users/me/Documents/offerta.pdf on macOS"`
-	Kind           string `json:"kind,omitempty" jsonschema:"auto (default: JPEG/PNG as photo, MP4 as video, anything else as document), document, image, video or voice_note (any audio, converted to an Opus voice note)"`
+	To             string `json:"to" jsonschema:"recipient: c_N (person or group), p_N, a phone number in any format, or the exact name of one person or group (case and accents ignored)"`
+	Path           string `json:"path" jsonschema:"absolute path of a local file in an allowed folder: Desktop, Documents, Downloads, Pictures, Videos (Movies on macOS), Music, a cloud drive (OneDrive, iCloud Drive, Dropbox), your session's scratchpad (save files you generate there) or the WhatsApp media folder; the user can change the folders in config.json in the profile data dir. E.g. C:\\Users\\me\\Documents\\offerta.pdf or /Users/me/Documents/offerta.pdf"`
+	Kind           string `json:"kind,omitempty" jsonschema:"auto (default): JPEG/PNG as photo, MP4 as video, anything else as document; image takes only JPEG/PNG, video only MP4; only voice_note sends a voice note: any audio, converted to Opus"`
 	Caption        string `json:"caption,omitempty" jsonschema:"text shown under a photo, video or document; voice notes have none"`
-	ReplyTo        string `json:"reply_to,omitempty" jsonschema:"m_N id of a stored message in the same chat to reply to"`
-	IdempotencyKey string `json:"idempotency_key,omitempty" jsonschema:"any unique string; repeating a call with the same key within 24 h returns the first result instead of sending again"`
+	ReplyTo        string `json:"reply_to,omitempty" jsonschema:"m_N of a stored message in the same chat to reply to"`
+	IdempotencyKey string `json:"idempotency_key,omitempty" jsonschema:"any unique string; a call with the same key within 24 h returns the first result instead of sending again"`
 }
 
 // filePolicy is the send-file policy: s.Files, else the profile's, read
@@ -146,7 +146,7 @@ func fileMessage(f *outgoing.File, up whatsmeow.UploadResponse, caption string, 
 // ---- whatsapp_request_history ----
 
 type requestHistoryIn struct {
-	Chat  string `json:"chat" jsonschema:"c_N chat id, p_N person id, phone number or exact person or group name"`
+	Chat  string `json:"chat" jsonschema:"c_N, p_N, phone number or exact person or group name"`
 	Count int    `json:"count,omitempty" jsonschema:"how many older messages to ask for, 1-200, default 50"`
 }
 
