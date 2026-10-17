@@ -186,22 +186,38 @@ func (s *Server) readChat(ctx context.Context, _ *mcp.CallToolRequest, in readCh
 	var msgs []store.MessageRow
 	var err error
 	anchor := -1 // index of the around message in msgs
+	// Whether messages lie beyond each end of the page, within the bounds.
+	// A read knows it for the side it reads towards. Without an anchor, the
+	// other side is empty: the read starts at the bound or at the newest
+	// message. Only a cursor's other side needs a probe.
+	var olderMore, newerMore bool
+	olderKnown, newerKnown := false, false
 	if aroundMsg != nil {
 		half := (limit + 1) / 2
-		older, _, err := store.ReadMessages(ctx, s.DB, store.MessageQuery{ChatID: q.ChatID, Limit: half,
+		older, more, err := store.ReadMessages(ctx, s.DB, store.MessageQuery{ChatID: q.ChatID, Limit: half,
 			HasAnchor: true, AnchorTS: aroundMsg.TS, AnchorID: aroundMsg.ID, Inclusive: true})
 		if err != nil {
 			return nil, err
 		}
-		newer, _, err := store.ReadMessages(ctx, s.DB, store.MessageQuery{ChatID: q.ChatID, Limit: limit - len(older),
+		olderMore, olderKnown = more, true
+		newer, more, err := store.ReadMessages(ctx, s.DB, store.MessageQuery{ChatID: q.ChatID, Limit: limit - len(older),
 			Newer: true, HasAnchor: true, AnchorTS: aroundMsg.TS, AnchorID: aroundMsg.ID})
 		if err != nil {
 			return nil, err
 		}
+		newerMore, newerKnown = more, true
 		anchor = len(older) - 1
 		msgs = append(older, newer...)
-	} else if msgs, _, err = store.ReadMessages(ctx, s.DB, q); err != nil {
-		return nil, err
+	} else {
+		var more bool
+		if msgs, more, err = store.ReadMessages(ctx, s.DB, q); err != nil {
+			return nil, err
+		}
+		if q.Newer {
+			newerMore, newerKnown, olderKnown = more, true, !q.HasAnchor
+		} else {
+			olderMore, olderKnown, newerKnown = more, true, !q.HasAnchor
+		}
 	}
 
 	// Render, then keep the response under its budget: messages beyond it
@@ -229,10 +245,12 @@ func (s *Server) readChat(ctx context.Context, _ *mcp.CallToolRequest, in readCh
 		if fromEnd {
 			size -= len(lines[len(lines)-1]) + 1
 			msgs, lines = msgs[:len(msgs)-1], lines[:len(lines)-1]
+			newerMore, newerKnown = true, true
 		} else {
 			size -= len(lines[0]) + 1
 			msgs, lines = msgs[1:], lines[1:]
 			anchor--
+			olderMore, olderKnown = true, true
 		}
 	}
 
@@ -241,18 +259,24 @@ func (s *Server) readChat(ctx context.Context, _ *mcp.CallToolRequest, in readCh
 	if len(msgs) > 0 {
 		first, last := msgs[0], msgs[len(msgs)-1]
 		bounds := store.MessageQuery{ChatID: q.ChatID, After: q.After, Before: q.Before, Limit: 0, HasAnchor: true}
-		probe := bounds
-		probe.AnchorTS, probe.AnchorID = first.TS, first.ID
-		if _, more, err := store.ReadMessages(ctx, s.DB, probe); err != nil {
-			return nil, err
-		} else if more {
+		if !olderKnown {
+			probe := bounds
+			probe.AnchorTS, probe.AnchorID = first.TS, first.ID
+			if _, olderMore, err = store.ReadMessages(ctx, s.DB, probe); err != nil {
+				return nil, err
+			}
+		}
+		if olderMore {
 			olderCur = cursor{Tool: toolReadChat, Chat: q.ChatID, TS: first.TS, ID: first.ID, After: q.After, Before: q.Before}.encode()
 		}
-		probe = bounds
-		probe.Newer, probe.AnchorTS, probe.AnchorID = true, last.TS, last.ID
-		if _, more, err := store.ReadMessages(ctx, s.DB, probe); err != nil {
-			return nil, err
-		} else if more {
+		if !newerKnown {
+			probe := bounds
+			probe.Newer, probe.AnchorTS, probe.AnchorID = true, last.TS, last.ID
+			if _, newerMore, err = store.ReadMessages(ctx, s.DB, probe); err != nil {
+				return nil, err
+			}
+		}
+		if newerMore {
 			newerCur = cursor{Tool: toolReadChat, Chat: q.ChatID, Newer: true, TS: last.TS, ID: last.ID, After: q.After, Before: q.Before}.encode()
 		}
 	}
