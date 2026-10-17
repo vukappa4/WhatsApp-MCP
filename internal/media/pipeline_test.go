@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -19,15 +22,12 @@ func TestPipelineHelperProcess(t *testing.T) {
 	role := os.Args[len(os.Args)-1]
 	switch role {
 	case "ffmpeg-streams":
-		// Decodes forever; a write to a closed pipe ends it, as it ends ffmpeg.
-		buf := make([]byte, 32<<10)
-		for {
-			if _, err := os.Stdout.Write(buf); err != nil {
-				fmt.Fprintln(os.Stderr, "av_interleaved_write_frame(): Broken pipe")
-				time.Sleep(100 * time.Millisecond)
-				os.Exit(1)
-			}
-		}
+		// Real ffmpeg ignores SIGPIPE and reports the failed write.
+		signal.Ignore(syscall.SIGPIPE)
+		stream()
+	case "ffmpeg-sigpipe":
+		// Outside Windows, a writer that keeps SIGPIPE dies from it.
+		stream()
 	case "ffmpeg-fails":
 		fmt.Fprintln(os.Stderr, "Invalid data found when processing input")
 		os.Exit(1)
@@ -45,7 +45,24 @@ func TestPipelineHelperProcess(t *testing.T) {
 	os.Exit(2)
 }
 
-// TestPipelineReportsTheCause names the process that failed first: an engine
+// stream decodes forever: a write to a closed pipe ends it with the
+// errors ffmpeg prints, where Windows reports EPIPE as EINVAL.
+func stream() {
+	errno := "Broken pipe"
+	if runtime.GOOS == "windows" {
+		errno = "Invalid argument"
+	}
+	buf := make([]byte, 32<<10)
+	for {
+		if _, err := os.Stdout.Write(buf); err != nil {
+			fmt.Fprintln(os.Stderr, "Error submitting a packet to the muxer: "+errno)
+			fmt.Fprintln(os.Stderr, "Error writing trailer: "+errno)
+			os.Exit(1)
+		}
+	}
+}
+
+// TestPipelineReportsTheCause names the cause, not the symptom: an engine
 // that quits breaks ffmpeg's output, and a failing ffmpeg starves the engine.
 func TestPipelineReportsTheCause(t *testing.T) {
 	t.Setenv("WHATSAPP_MCP_PIPELINE_HELPER", "1")
@@ -58,6 +75,7 @@ func TestPipelineReportsTheCause(t *testing.T) {
 		ffmpeg, engine, want string
 	}{
 		{"ffmpeg-streams", "engine-fails", "failed to load model"},
+		{"ffmpeg-sigpipe", "engine-fails", "failed to load model"},
 		{"ffmpeg-fails", "engine-reads", "Invalid data found when processing input"},
 	} {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)

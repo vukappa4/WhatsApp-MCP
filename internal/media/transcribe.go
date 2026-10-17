@@ -227,27 +227,26 @@ func pipeline(ctx context.Context, first string, firstArgs []string, second stri
 	// The children hold their own handles; ours would keep the pipe open.
 	pr.Close()
 	pw.Close()
+	errA := a.Wait()
+	errB := b.Wait()
 	// A failing ffmpeg starves the engine, and an engine that quits breaks
-	// ffmpeg's output: the one that ends first is the cause, not the symptom.
-	endA, endB := make(chan error, 1), make(chan error, 1)
-	go func() { endA <- a.Wait() }()
-	go func() { endB <- b.Wait() }()
-	var errA, errB error
-	ffmpegFirst := false
-	select {
-	case errA = <-endA:
-		ffmpegFirst = true
-		errB = <-endB
-	case errB = <-endB:
-		errA = <-endA
-	}
+	// ffmpeg's output: report the cause, not the symptom. Which one exits
+	// first is a race, so only ffmpeg's own error tells them apart.
 	switch {
-	case errA != nil && (errB == nil || ffmpegFirst):
+	case errA != nil && (errB == nil || !closedPipe(errA, aErr.String())):
 		return nil, fmt.Errorf("ffmpeg failed: %v: %s", errA, lastLine(aErr.String()))
 	case errB != nil:
 		return nil, fmt.Errorf("%s failed: %v: %s", filepath.Base(second), errB, lastLine(bErr.String()))
 	}
 	return out.Bytes(), nil
+}
+
+// closedPipe reports whether ffmpeg died writing into a pipe whose reader
+// had quit: killed by SIGPIPE, or reporting EPIPE. ffmpeg on Windows gets
+// EINVAL for that write and reports it at the muxer.
+func closedPipe(err error, stderr string) bool {
+	return strings.Contains(err.Error(), "signal: broken pipe") || strings.Contains(stderr, "Broken pipe") ||
+		runtime.GOOS == "windows" && strings.Contains(stderr, "Error submitting a packet to the muxer: Invalid argument")
 }
 
 func lastLine(s string) string {
