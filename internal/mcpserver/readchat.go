@@ -257,11 +257,16 @@ func (s *Server) readChat(ctx context.Context, _ *mcp.CallToolRequest, in readCh
 		}
 	}
 
+	// Where a cursor leads on, the range ends at the message shown. Where
+	// none does, it runs to the requested bound, or to now: a gap between
+	// that bound and the messages may hide some.
 	from, to := q.After, q.Before
 	if len(msgs) > 0 {
-		from, to = msgs[0].TS, msgs[len(msgs)-1].TS
-		if newerCur == "" {
-			to = 0 // the range runs up to now
+		if olderCur != "" || from == 0 {
+			from = msgs[0].TS
+		}
+		if newerCur != "" {
+			to = msgs[len(msgs)-1].TS
 		}
 	}
 	fresh, err := s.freshness(ctx, from, to)

@@ -543,3 +543,29 @@ func TestReadChatAroundKeepsAnchor(t *testing.T) {
 		t.Fatalf("anchor dropped or nothing trimmed (%d characters)", len(text))
 	}
 }
+
+// A gap inside the requested after/before range is named even when no
+// message falls in it: it is where messages may be missing.
+func TestReadChatGapsFollowRequestedRange(t *testing.T) {
+	db := seed(t)
+	// A second gap after the before bound used below.
+	for _, ev := range []struct {
+		at time.Time
+		ev string
+	}{{t0.Add(150 * time.Minute), store.EvDisconnected}, {t0.Add(160 * time.Minute), store.EvConnected}} {
+		if err := store.LogConnection(context.Background(), db, ev.at, ev.ev, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cs := connect(t, db)
+	// The only message of this chat is at 11:00; the gap 09:59 - 10:30 lies between after and it.
+	text, isErr := call(t, cs, toolReadChat, map[string]any{"chat": "+39 333 222 2222", "after": "2026-10-12T09:00"})
+	if isErr || !strings.Contains(text, "gap 09:59 - 10:30 overlaps this range") {
+		t.Fatalf("gap between after and the first message not named:\n%s", text)
+	}
+	// The gap 12:30 - 12:40 lies after before: outside the range.
+	text, isErr = call(t, cs, toolReadChat, map[string]any{"chat": "+39 333 222 2222", "after": "2026-10-12T10:45", "before": "2026-10-12T11:30"})
+	if isErr || !strings.Contains(text, "sono l'altro Marco") || strings.Contains(text, "gap") {
+		t.Fatalf("gap outside after/before named:\n%s", text)
+	}
+}
