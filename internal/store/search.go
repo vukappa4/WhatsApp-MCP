@@ -17,22 +17,34 @@ type PersonCandidate struct {
 	LastAt                                      int64 // newest DM message or message they sent, 0 when none
 }
 
-const candidateColumns = `p.id, p.display_name, p.name_source, COALESCE(p.phone_e164, ''), p.is_me, p.saved_contact,
-	p.full_name, p.first_name, p.business_name, p.push_name,
-	MAX(COALESCE((SELECT last_message_at FROM chats WHERE person_id = p.id AND kind = 'dm'), 0),
+const nameColumns = `p.id, p.display_name, p.name_source, COALESCE(p.phone_e164, ''), p.is_me, p.saved_contact,
+	p.full_name, p.first_name, p.business_name, p.push_name`
+
+// lastAtColumn is PersonCandidate.LastAt of the person p.
+const lastAtColumn = `MAX(COALESCE((SELECT last_message_at FROM chats WHERE person_id = p.id AND kind = 'dm'), 0),
 	    COALESCE((SELECT MAX(ts) FROM messages WHERE sender_person_id = p.id), 0))`
 
 func queryCandidates(ctx context.Context, e Execer, where string, args ...any) ([]PersonCandidate, error) {
-	rows, err := e.QueryContext(ctx, `SELECT `+candidateColumns+` FROM persons p WHERE `+where, args...)
+	return queryPersons(ctx, e, nameColumns+`, `+lastAtColumn, where, args...)
+}
+
+// queryPersons scans nameColumns and, when columns has it, lastAtColumn.
+func queryPersons(ctx context.Context, e Execer, columns, where string, args ...any) ([]PersonCandidate, error) {
+	rows, err := e.QueryContext(ctx, `SELECT `+columns+` FROM persons p WHERE `+where, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []PersonCandidate
+	withLastAt := strings.HasSuffix(columns, lastAtColumn)
 	for rows.Next() {
 		var c PersonCandidate
-		if err := rows.Scan(&c.ID, &c.Name, &c.Source, &c.Phone, &c.IsMe, &c.Saved,
-			&c.FullName, &c.FirstName, &c.BusinessName, &c.PushName, &c.LastAt); err != nil {
+		dest := []any{&c.ID, &c.Name, &c.Source, &c.Phone, &c.IsMe, &c.Saved,
+			&c.FullName, &c.FirstName, &c.BusinessName, &c.PushName}
+		if withLastAt {
+			dest = append(dest, &c.LastAt)
+		}
+		if err := rows.Scan(dest...); err != nil {
 			return nil, err
 		}
 		out = append(out, c)
@@ -40,9 +52,41 @@ func queryCandidates(ctx context.Context, e Execer, where string, args ...any) (
 	return out, rows.Err()
 }
 
-// AllPersonCandidates returns every person that has a name or a phone number.
-func AllPersonCandidates(ctx context.Context, e Execer) ([]PersonCandidate, error) {
-	return queryCandidates(ctx, e, `p.display_name != '' OR p.phone_e164 IS NOT NULL`)
+// AllPersonNames returns every person that has a name or a phone number,
+// without LastAt: name search scans them all and needs LastAt only for the
+// matches, which FillLastAt adds.
+func AllPersonNames(ctx context.Context, e Execer) ([]PersonCandidate, error) {
+	return queryPersons(ctx, e, nameColumns, `p.display_name != '' OR p.phone_e164 IS NOT NULL`)
+}
+
+// FillLastAt sets LastAt on every candidate. A short query can match most
+// of a large account, so it asks in chunks well below SQLite's limit of
+// 32766 variables per statement.
+func FillLastAt(ctx context.Context, e Execer, cs []PersonCandidate) error {
+	const chunk = 500
+	for len(cs) > 0 {
+		part := cs[:min(len(cs), chunk)]
+		cs = cs[len(part):]
+		ids := make([]int64, len(part))
+		for i := range part {
+			ids[i] = part[i].ID
+		}
+		in, args := idList(ids)
+		last := make(map[int64]int64, len(part))
+		err := eachRow(ctx, e, `SELECT p.id, `+lastAtColumn+` FROM persons p WHERE p.id IN (`+in+`)`, args, func(rows *sql.Rows) error {
+			var id, at int64
+			err := rows.Scan(&id, &at)
+			last[id] = at
+			return err
+		})
+		if err != nil {
+			return err
+		}
+		for i := range part {
+			part[i].LastAt = last[part[i].ID]
+		}
+	}
+	return nil
 }
 
 // PersonCandidateByID returns one person; ok is false when it does not exist.
@@ -120,96 +164,157 @@ type PersonActivity struct {
 // GetPersonActivity returns the person's JIDs, former numbers, DM chat and
 // the groups they wrote in, most recent first.
 func GetPersonActivity(ctx context.Context, e Execer, personID int64, maxGroups int) (PersonActivity, error) {
-	var a PersonActivity
-	rows, err := e.QueryContext(ctx, `SELECT jid, kind FROM jids WHERE person_id = ? ORDER BY kind DESC, jid`, personID)
-	if err != nil {
-		return a, err
+	as, err := GetPeopleActivity(ctx, e, []int64{personID}, maxGroups)
+	return as[personID], err
+}
+
+// GetPeopleActivity is GetPersonActivity for many persons in a fixed number
+// of queries. Persons without any activity are missing from the map.
+func GetPeopleActivity(ctx context.Context, e Execer, personIDs []int64, maxGroups int) (map[int64]PersonActivity, error) {
+	out := make(map[int64]PersonActivity, len(personIDs))
+	if len(personIDs) == 0 {
+		return out, nil
 	}
-	for rows.Next() {
-		var j JIDRow
-		if err := rows.Scan(&j.JID, &j.Kind); err != nil {
-			rows.Close()
-			return a, err
+	in, args := idList(personIDs)
+	// Map values are not addressable: work on pointers, copy out at the end.
+	acts := make(map[int64]*PersonActivity, len(personIDs))
+	act := func(id int64) *PersonActivity {
+		a := acts[id]
+		if a == nil {
+			a = &PersonActivity{}
+			acts[id] = a
 		}
-		a.JIDs = append(a.JIDs, j)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return a, err
+		return a
 	}
 
-	rows, err = e.QueryContext(ctx, `SELECT n.pn, jp.person_id FROM number_links n
-		JOIN jids jl ON jl.jid = n.lid AND jl.person_id = ?1
-		JOIN jids jp ON jp.jid = n.pn AND jp.person_id != ?1
-		ORDER BY n.seen_at DESC, n.pn`, personID)
+	err := eachRow(ctx, e, `SELECT person_id, jid, kind FROM jids WHERE person_id IN (`+in+`) ORDER BY person_id, kind DESC, jid`, args,
+		func(rows *sql.Rows) error {
+			var id int64
+			var j JIDRow
+			if err := rows.Scan(&id, &j.JID, &j.Kind); err != nil {
+				return err
+			}
+			a := act(id)
+			a.JIDs = append(a.JIDs, j)
+			return nil
+		})
 	if err != nil {
-		return a, err
-	}
-	for rows.Next() {
-		var pn string
-		var f FormerPhone
-		if err := rows.Scan(&pn, &f.Owner); err != nil {
-			rows.Close()
-			return a, err
-		}
-		user, _, _ := strings.Cut(pn, "@")
-		f.Phone = "+" + user
-		a.Former = append(a.Former, f)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return a, err
+		return nil, err
 	}
 
-	dms, err := queryChats(ctx, e, `c.kind = 'dm' AND c.person_id = ?`, personID)
+	err = eachRow(ctx, e, `SELECT jl.person_id, n.pn, jp.person_id FROM number_links n
+		JOIN jids jl ON jl.jid = n.lid
+		JOIN jids jp ON jp.jid = n.pn AND jp.person_id != jl.person_id
+		WHERE jl.person_id IN (`+in+`) ORDER BY jl.person_id, n.seen_at DESC, n.pn`, args,
+		func(rows *sql.Rows) error {
+			var id int64
+			var pn string
+			var f FormerPhone
+			if err := rows.Scan(&id, &pn, &f.Owner); err != nil {
+				return err
+			}
+			user, _, _ := strings.Cut(pn, "@")
+			f.Phone = "+" + user
+			a := act(id)
+			a.Former = append(a.Former, f)
+			return nil
+		})
 	if err != nil {
-		return a, err
-	}
-	if len(dms) > 0 {
-		dm := ChatActivity{Chat: dms[0], LastAt: dms[0].LastMessageAt}
-		if err := e.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE chat_id = ?`, dm.Chat.ID).Scan(&dm.Messages); err != nil {
-			return a, err
-		}
-		a.DM = &dm
-		a.LastAt, a.LastChatID = dm.LastAt, dm.Chat.ID
+		return nil, err
 	}
 
-	rows, err = e.QueryContext(ctx, `SELECT m.chat_id, COUNT(*), MAX(m.ts) FROM messages m JOIN chats c ON c.id = m.chat_id
-		WHERE m.sender_person_id = ? AND c.kind != 'dm' GROUP BY m.chat_id ORDER BY MAX(m.ts) DESC, m.chat_id DESC`, personID)
+	err = eachRow(ctx, e, `SELECT `+chatColumns+`, c.person_id, (SELECT COUNT(*) FROM messages WHERE chat_id = c.id)
+		FROM chats c LEFT JOIN persons p ON p.id = c.person_id WHERE c.kind = 'dm' AND c.person_id IN (`+in+`)`, args,
+		func(rows *sql.Rows) error {
+			var id int64
+			var dm ChatActivity
+			c, err := scanChat(scanTail{rows, []any{&id, &dm.Messages}})
+			if err != nil {
+				return err
+			}
+			dm.Chat, dm.LastAt = c, c.LastMessageAt
+			a := act(id)
+			a.DM = &dm
+			a.LastAt, a.LastChatID = dm.LastAt, c.ID
+			return nil
+		})
 	if err != nil {
-		return a, err
+		return nil, err
 	}
-	var groups []ChatActivity
-	for rows.Next() {
-		var g ChatActivity
-		if err := rows.Scan(&g.Chat.ID, &g.Messages, &g.LastAt); err != nil {
-			rows.Close()
-			return a, err
-		}
-		groups = append(groups, g)
+
+	var chatIDs []int64
+	err = eachRow(ctx, e, `SELECT m.sender_person_id, m.chat_id, COUNT(*), MAX(m.ts) FROM messages m JOIN chats c ON c.id = m.chat_id
+		WHERE m.sender_person_id IN (`+in+`) AND c.kind != 'dm'
+		GROUP BY m.sender_person_id, m.chat_id ORDER BY m.sender_person_id, MAX(m.ts) DESC, m.chat_id DESC`, args,
+		func(rows *sql.Rows) error {
+			var id int64
+			var g ChatActivity
+			if err := rows.Scan(&id, &g.Chat.ID, &g.Messages, &g.LastAt); err != nil {
+				return err
+			}
+			a := act(id)
+			if a.GroupsTotal == 0 && g.LastAt > a.LastAt {
+				a.LastAt, a.LastChatID = g.LastAt, g.Chat.ID
+			}
+			a.GroupsTotal++
+			if len(a.Groups) < maxGroups {
+				a.Groups = append(a.Groups, g)
+				chatIDs = append(chatIDs, g.Chat.ID)
+			}
+			return nil
+		})
+	if err != nil {
+		return nil, err
 	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return a, err
-	}
-	a.GroupsTotal = len(groups)
-	if len(groups) > 0 && groups[0].LastAt > a.LastAt {
-		a.LastAt, a.LastChatID = groups[0].LastAt, groups[0].Chat.ID
-	}
-	if len(groups) > maxGroups {
-		groups = groups[:maxGroups]
-	}
-	for i := range groups {
-		c, ok, err := ChatByID(ctx, e, groups[i].Chat.ID)
+
+	if len(chatIDs) > 0 {
+		in, args := idList(chatIDs)
+		chats := map[int64]ChatRow{}
+		err = eachRow(ctx, e, `SELECT `+chatColumns+` FROM chats c LEFT JOIN persons p ON p.id = c.person_id WHERE c.id IN (`+in+`)`, args,
+			func(rows *sql.Rows) error {
+				c, err := scanChat(rows)
+				chats[c.ID] = c
+				return err
+			})
 		if err != nil {
-			return a, err
+			return nil, err
 		}
-		if ok {
-			groups[i].Chat = c
+		for _, a := range acts {
+			for i := range a.Groups {
+				if c, ok := chats[a.Groups[i].Chat.ID]; ok {
+					a.Groups[i].Chat = c
+				}
+			}
 		}
 	}
-	a.Groups = groups
-	return a, nil
+	for id, a := range acts {
+		out[id] = *a
+	}
+	return out, nil
+}
+
+// idList returns the placeholders and arguments for "IN (...)" over ids.
+func idList(ids []int64) (string, []any) {
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	return strings.TrimSuffix(strings.Repeat("?,", len(ids)), ","), args
+}
+
+// eachRow runs a query and calls fn for every row.
+func eachRow(ctx context.Context, e Execer, query string, args []any, fn func(*sql.Rows) error) error {
+	rows, err := e.QueryContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		if err := fn(rows); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
 }
 
 // ---- message search ----

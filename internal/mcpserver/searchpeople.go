@@ -147,14 +147,23 @@ func (s *Server) matchPeople(ctx context.Context, query string) ([]personMatch, 
 			break
 		}
 		words := strings.Fields(fq)
-		all, err := store.AllPersonCandidates(ctx, s.DB)
+		all, err := store.AllPersonNames(ctx, s.DB)
 		if err != nil {
 			return nil, err
 		}
+		var hits []store.PersonCandidate
+		var scores []int
 		for i := range all {
 			if sc := nameScore(fq, words, &all[i]); sc > 0 {
-				byScore[all[i].ID] = personMatch{all[i], sc}
+				hits = append(hits, all[i])
+				scores = append(scores, sc)
 			}
+		}
+		if err := store.FillLastAt(ctx, s.DB, hits); err != nil {
+			return nil, err
+		}
+		for i := range hits {
+			byScore[hits[i].ID] = personMatch{hits[i], scores[i]}
 		}
 	}
 	out := make([]personMatch, 0, len(byScore))
@@ -305,13 +314,17 @@ func (s *Server) searchPeople(ctx context.Context, _ *mcp.CallToolRequest, in se
 	} else {
 		fmt.Fprintf(&b, "%d people match %q, best match first; showing %d-%d:\n", len(ms), query, offset+1, offset+len(page))
 	}
+	ids := make([]int64, len(page))
 	for i := range page {
-		m := &page[i]
-		act, err := store.GetPersonActivity(ctx, s.DB, m.ID, maxGroups)
-		if err != nil {
-			return nil, err
-		}
-		b.WriteString(w.personBlock(m, &act, full))
+		ids[i] = page[i].ID
+	}
+	acts, err := store.GetPeopleActivity(ctx, s.DB, ids, maxGroups)
+	if err != nil {
+		return nil, err
+	}
+	for i := range page {
+		act := acts[page[i].ID]
+		b.WriteString(w.personBlock(&page[i], &act, full))
 	}
 	if more {
 		next := cursor{Tool: toolSearchPeople, Query: query, Off: offset + len(page)}.encode()
