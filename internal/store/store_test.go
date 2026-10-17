@@ -227,3 +227,32 @@ func TestTxRollsBackOnPanic(t *testing.T) {
 		t.Fatal("the panicking transaction committed")
 	}
 }
+
+func TestListChatsQueryWithKind(t *testing.T) {
+	db, _ := open(t)
+	ctx := context.Background()
+	for i, name := range []string{"Family", "Work"} {
+		id, err := EnsureChat(ctx, db, string(rune('1'+i))+"@g.us", "group")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := SetChatName(ctx, db, id, name); err != nil {
+			t.Fatal(err)
+		}
+		if err := BumpChat(ctx, db, id, int64(100+i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, f := range []ChatFilter{
+		{Kind: "group", Query: "Family", Limit: 10},
+		{Kind: "group", Query: "Family", HasCursor: true, AfterTS: 1000, AfterID: 1000, Limit: 10},
+	} {
+		chats, _, err := ListChats(ctx, db, f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(chats) != 1 || chats[0].Name != "Family" {
+			t.Errorf("%+v: got %d chats %+v, want only Family", f, len(chats), chats)
+		}
+	}
+}

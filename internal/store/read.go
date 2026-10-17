@@ -138,10 +138,10 @@ func ListChats(ctx context.Context, e Execer, f ChatFilter) (chats []ChatRow, mo
 			cond += ` OR p.phone_e164 LIKE ?2`
 		}
 		cond += ")"
-		// Number placeholders after the positional ones built so far.
+		// Number placeholders after the positional ones built so far, in one
+		// pass: a renumbered ?1 must not be renumbered again as ?2.
 		n := len(args)
-		cond = strings.ReplaceAll(cond, "?1", fmt.Sprintf("?%d", n+1))
-		cond = strings.ReplaceAll(cond, "?2", fmt.Sprintf("?%d", n+2))
+		cond = strings.NewReplacer("?1", fmt.Sprintf("?%d", n+1), "?2", fmt.Sprintf("?%d", n+2)).Replace(cond)
 		where = append(where, cond)
 		args = append(args, likeArg(q), "%"+digits+"%")
 	}
