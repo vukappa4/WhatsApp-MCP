@@ -1,0 +1,3 @@
+# The manifest is embedded byte for byte in rsrc_windows_amd64.syso (TestManifestEmbedded).
+*.manifest text eol=lf
+*.syso binary

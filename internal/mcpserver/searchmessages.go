@@ -1,0 +1,343 @@
+package mcpserver
+
+import (
+	"context"
+	"fmt"
+	"slices"
+	"strings"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/vukappa4/whatsapp-mcp/internal/store"
+)
+
+type searchMessagesIn struct {
+	Query          string `json:"query,omitempty" jsonschema:"words to find in message text, captions and voice-note transcripts. Words are AND-ed, \"quoted phrases\" match in order, word* matches a prefix; case and accents are ignored, other punctuation is ignored. Optional when a filter is set"`
+	From           string `json:"from,omitempty" jsonschema:"sender: p_N person id, phone number, part of a name, or me"`
+	InChat         string `json:"in_chat,omitempty" jsonschema:"only this chat: c_N chat id, p_N person id (their DM), phone number or exact name, as in whatsapp_read_chat"`
+	After          string `json:"after,omitempty" jsonschema:"only messages at or after this time, ISO 8601 (e.g. 2026-10-13T09:00:00+02:00, 2026-10-13, or 09:00 for today)"`
+	Before         string `json:"before,omitempty" jsonschema:"only messages before this time, ISO 8601"`
+	HasMedia       string `json:"has_media,omitempty" jsonschema:"only messages with this media: image, video, voice, audio, document, sticker or any"`
+	FromMe         *bool  `json:"from_me,omitempty" jsonschema:"true: only messages the user sent; false: only messages others sent"`
+	Sort           string `json:"sort,omitempty" jsonschema:"relevance (default with a query) or newest"`
+	Context        int    `json:"context,omitempty" jsonschema:"messages of the same chat to show before and after each hit, 0-3, default 0"`
+	Limit          int    `json:"limit,omitempty" jsonschema:"hits per page, 1-50, default 20 (10 with context)"`
+	Cursor         string `json:"cursor,omitempty" jsonschema:"next_cursor from the previous page; query, filters, sort and context then come from the cursor"`
+	ResponseFormat string `json:"response_format,omitempty" jsonschema:"concise (default: long texts cut to an excerpt around the match) or detailed (full texts, WhatsApp ids, media details, who reacted)"`
+}
+
+// Concise bodies: a hit is cut to an excerpt around the match, a context line shorter.
+const (
+	maxHitText     = 300
+	maxContextText = 160
+)
+
+func (s *Server) searchMessages(ctx context.Context, _ *mcp.CallToolRequest, in searchMessagesIn) (*mcp.CallToolResult, error) {
+	c := cursor{Tool: toolSearchMessages}
+	if in.Cursor != "" {
+		var err error
+		if c, err = decodeCursor(in.Cursor, toolSearchMessages); err != nil {
+			return errResult("%v", err)
+		}
+	} else {
+		c.Query, c.Media, c.Sort, c.Ctx = strings.TrimSpace(in.Query), in.HasMedia, in.Sort, in.Context
+		if in.FromMe != nil {
+			c.Mine = 2
+			if *in.FromMe {
+				c.Mine = 1
+			}
+		}
+		if from := strings.TrimSpace(in.From); strings.EqualFold(from, "me") {
+			if c.Mine == 2 {
+				return errResult("from=me contradicts from_me=false")
+			}
+			c.Mine = 1
+		} else if from != "" {
+			p, msg, err := s.resolvePerson(ctx, from, "from")
+			if err != nil {
+				return nil, err
+			}
+			if p == nil {
+				return errResult("%s", msg)
+			}
+			c.Person = p.ID
+		}
+		if in.InChat != "" {
+			chat, msg := s.resolveChat(ctx, in.InChat)
+			if chat == nil {
+				return errResult("in_chat: %s", msg)
+			}
+			c.Chat = chat.ID
+		}
+		if in.After != "" {
+			t, err := parseTime(in.After)
+			if err != nil {
+				return errResult("after: %v", err)
+			}
+			c.After = t.Unix()
+		}
+		if in.Before != "" {
+			t, err := parseTime(in.Before)
+			if err != nil {
+				return errResult("before: %v", err)
+			}
+			c.Before = t.Unix()
+		}
+		if c.After != 0 && c.Before != 0 && c.After >= c.Before {
+			return errResult("after (%s) must be earlier than before (%s)", in.After, in.Before)
+		}
+	}
+
+	q := store.SearchQuery{PersonID: c.Person, ChatID: c.Chat, After: c.After, Before: c.Before, FromMe: c.Mine}
+	switch c.Media {
+	case "":
+	case "any":
+		q.Kinds = store.MediaKinds
+	default:
+		if !slices.Contains(store.MediaKinds, c.Media) {
+			return errResult("has_media must be image, video, voice, audio, document, sticker or any, got %q", c.Media)
+		}
+		q.Kinds = []string{c.Media}
+	}
+	if c.Ctx < 0 || c.Ctx > 3 {
+		return errResult("context must be between 0 and 3, got %d", c.Ctx)
+	}
+	switch c.Sort {
+	case "", "relevance":
+	case "newest":
+		q.Newest = true
+	default:
+		return errResult("sort must be relevance or newest, got %q", c.Sort)
+	}
+	if c.Query != "" {
+		if q.Match = store.FTSQuery(c.Query); q.Match == "" {
+			return errResult("query %q has no searchable words: use letters or digits", c.Query)
+		}
+	} else if q.PersonID == 0 && q.ChatID == 0 && q.After == 0 && q.Before == 0 && q.Kinds == nil && q.FromMe == 0 {
+		return errResult("give a query or at least one filter: from, in_chat, after, before, has_media or from_me")
+	}
+	ranked := q.Match != "" && !q.Newest
+
+	limit := in.Limit
+	if limit == 0 {
+		limit = 20
+		if c.Ctx > 0 {
+			limit = 10
+		}
+	}
+	if limit < 1 || limit > 50 {
+		return errResult("limit must be between 1 and 50, got %d", in.Limit)
+	}
+	q.Limit = limit
+	if ranked {
+		q.Offset = c.Off
+	} else if in.Cursor != "" {
+		q.HasAnchor, q.AnchorTS, q.AnchorID = true, c.TS, c.ID
+	}
+
+	hits, more, err := store.SearchMessages(ctx, s.DB, q)
+	simplified := false
+	if store.IsFTSError(err) {
+		// FTSQuery output is always valid; this guards against tokenizer surprises.
+		q.Match, simplified = store.FTSPlainQuery(c.Query), true
+		if q.Match == "" {
+			return errResult("query %q has no searchable words: use letters or digits", c.Query)
+		}
+		hits, more, err = store.SearchMessages(ctx, s.DB, q)
+	}
+	if err != nil {
+		return nil, err
+	}
+	total, err := store.CountMatches(ctx, s.DB, q)
+	if err != nil {
+		return nil, err
+	}
+	fresh, err := s.freshness(ctx, q.After, q.Before)
+	if err != nil {
+		return nil, err
+	}
+	w := newWrapper()
+	full := detailed(in.ResponseFormat)
+
+	var b strings.Builder
+	b.WriteString(fresh + "\n")
+	desc, err := s.describeSearch(ctx, w, c, q)
+	if err != nil {
+		return nil, err
+	}
+	b.WriteString(desc)
+	if simplified {
+		b.WriteString(" (query simplified to plain words)")
+	}
+	if len(hits) == 0 {
+		if c.Off > 0 || q.HasAnchor {
+			b.WriteString(": no more matches.")
+		} else {
+			b.WriteString(": no matches. Try fewer words, a prefix such as fattur*, or fewer filters.")
+		}
+		return textResult(b.String()), nil
+	}
+	order := "newest first"
+	if ranked {
+		order = "best match first"
+	}
+	matches := fmt.Sprintf("%d matches", total)
+	if total == 1 {
+		matches = "1 match"
+	}
+	fmt.Fprintf(&b, ": %s, %s", matches, order)
+	if more || c.Off > 0 || q.HasAnchor {
+		if ranked {
+			fmt.Fprintf(&b, "; showing %d-%d", c.Off+1, c.Off+len(hits))
+		} else {
+			fmt.Fprintf(&b, "; showing %d", len(hits))
+		}
+	}
+	b.WriteString(".\n")
+
+	chats := map[int64]*store.ChatRow{}
+	for i := range hits {
+		h := &hits[i]
+		chat, ok := chats[h.ChatID]
+		if !ok {
+			row, found, err := store.ChatByID(ctx, s.DB, h.ChatID)
+			if err != nil {
+				return nil, err
+			}
+			if found {
+				chat = &row
+			}
+			chats[h.ChatID] = chat
+		}
+		var before, after []store.MessageRow
+		if c.Ctx > 0 {
+			if before, _, err = store.ReadMessages(ctx, s.DB, store.MessageQuery{ChatID: h.ChatID, Limit: c.Ctx,
+				HasAnchor: true, AnchorTS: h.TS, AnchorID: h.ID}); err != nil {
+				return nil, err
+			}
+			if after, _, err = store.ReadMessages(ctx, s.DB, store.MessageQuery{ChatID: h.ChatID, Limit: c.Ctx, Newer: true,
+				HasAnchor: true, AnchorTS: h.TS, AnchorID: h.ID}); err != nil {
+				return nil, err
+			}
+		}
+		b.WriteString(w.hitBlock(i+1+c.Off, chat, h, before, after, full, c.Ctx > 0))
+	}
+	if more {
+		next := c
+		if ranked {
+			next.Off = c.Off + len(hits)
+		} else {
+			last := hits[len(hits)-1]
+			next.TS, next.ID = last.TS, last.ID
+		}
+		fmt.Fprintf(&b, "More matches: call again with cursor=%q", next.encode())
+	}
+	return textResult(strings.TrimRight(b.String(), "\n")), nil
+}
+
+// describeSearch restates the query and the resolved filters, so a wrong
+// person or chat pick is visible.
+func (s *Server) describeSearch(ctx context.Context, w wrapper, c cursor, q store.SearchQuery) (string, error) {
+	var parts []string
+	if c.Query != "" {
+		parts = append(parts, fmt.Sprintf("Search %q", c.Query))
+	} else {
+		parts = append(parts, "Messages")
+	}
+	if q.PersonID != 0 {
+		p, found, err := store.PersonCandidateByID(ctx, s.DB, q.PersonID)
+		if err != nil {
+			return "", err
+		}
+		if found {
+			parts = append(parts, "from "+personID(p.ID)+" "+w.label(&p.PersonRef))
+		} else {
+			parts = append(parts, "from "+personID(q.PersonID))
+		}
+	}
+	switch q.FromMe {
+	case 1:
+		parts = append(parts, "sent by me")
+	case 2:
+		parts = append(parts, "sent by others")
+	}
+	if q.ChatID != 0 {
+		chat, found, err := store.ChatByID(ctx, s.DB, q.ChatID)
+		if err != nil {
+			return "", err
+		}
+		if found {
+			parts = append(parts, fmt.Sprintf("in %s %s (%s)", chatID(chat.ID), w.chatName(&chat), chat.Kind))
+		} else {
+			parts = append(parts, "in "+chatID(q.ChatID))
+		}
+	}
+	if c.Media != "" {
+		parts = append(parts, "with "+c.Media+" media")
+	}
+	if q.After != 0 {
+		parts = append(parts, "after "+fmtTS(q.After))
+	}
+	if q.Before != 0 {
+		parts = append(parts, "before "+fmtTS(q.Before))
+	}
+	return strings.Join(parts, " "), nil
+}
+
+// hitBlock renders one hit under a header naming its chat and day, with
+// context messages around it marked apart from the hit.
+func (w wrapper) hitBlock(n int, chat *store.ChatRow, h *store.SearchHit, before, after []store.MessageRow, full, withContext bool) string {
+	var b strings.Builder
+	name := "deleted chat"
+	kind := ""
+	if chat != nil {
+		name, kind = w.chatName(chat), " ("+chat.Kind+")"
+	}
+	day := local(h.TS).Format("Mon 2 Jan 2006 (UTC-07:00)")
+	fmt.Fprintf(&b, "#%d %s %s%s · %s\n", n, chatID(h.ChatID), name, kind, day)
+	ctxLine := func(m *store.MessageRow) {
+		if d := local(m.TS).Format("Mon 2 Jan 2006 (UTC-07:00)"); d != day {
+			day = d
+			fmt.Fprintf(&b, "  ── %s ──\n", d)
+		}
+		b.WriteString("  " + w.cutLine(m, full, maxContextText, "") + "\n")
+	}
+	for i := range before {
+		ctxLine(&before[i])
+	}
+	prefix := ""
+	if withContext {
+		prefix = "> "
+	}
+	m := h.MessageRow
+	note := ""
+	if n := len([]rune(m.Transcript())); !full && n > maxHitText {
+		md := *m.Media
+		md.Transcript = h.TranscriptExcerpt
+		m.Media = &md
+		note = fmt.Sprintf(" [transcript excerpt of %d characters; whatsapp_read_chat with around=%s, limit=1, response_format=detailed shows all]", n, messageID(m.ID))
+	}
+	hw := w
+	hw.transcripts = true // the hit may have matched in its transcript
+	b.WriteString(prefix + hw.cutLine(&m, full, maxHitText, h.TextExcerpt) + note + "\n")
+	day = local(h.TS).Format("Mon 2 Jan 2006 (UTC-07:00)")
+	for i := range after {
+		ctxLine(&after[i])
+	}
+	return b.String()
+}
+
+// cutLine renders a transcript line; in concise mode a body over maxText
+// runes becomes the excerpt (or its start) with a pointer to the full text.
+func (w wrapper) cutLine(m *store.MessageRow, full bool, maxText int, excerpt string) string {
+	n := len([]rune(m.Text))
+	if full || n <= maxText {
+		return w.line(m, full)
+	}
+	cp := *m
+	if excerpt == "" || len([]rune(excerpt)) >= n {
+		excerpt = string([]rune(m.Text)[:maxText]) + "…"
+	}
+	cp.Text = excerpt
+	return w.line(&cp, false) + fmt.Sprintf(" [excerpt of %d characters; whatsapp_read_chat with around=%s, limit=1, response_format=detailed shows all]", n, messageID(m.ID))
+}
