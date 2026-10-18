@@ -5,7 +5,7 @@ Go daemon that links to WhatsApp as a device (whatsmeow), stores everything in S
 ## Work
 
 - Build `CGO_ENABLED=0 go build ./cmd/whatsapp-mcp`, test `go test ./...`. Keep `README.md` and `INSTALL.md` in step with the commands.
-- Release: push a tag `vX.Y.Z` on a commit of `main` (`vX.Y.Z-rc.N` publishes a prerelease); `release.yml` refuses a tag outside `main`, tests it, then GoReleaser (`.goreleaser.yaml`) publishes the binaries and `checksums.txt`. Only the highest `vX.Y.Z` becomes the latest release.
+- Release: push a tag `vX.Y.Z` on a commit of `main` (`vX.Y.Z-rc.N` publishes a prerelease); `release.yml` refuses a tag outside `main`, tests it, then GoReleaser (`.goreleaser.yaml`) publishes the binaries and `checksums.txt`. Only the highest `vX.Y.Z` tag on `main` becomes the latest release, published only once all its assets are uploaded.
 - Two installed profiles, each its own linked device: `dev` (port 8766) and `prod` (8765, in daily use). Deploy: commit, build, `<exe> install --profile dev`, check, then `--profile prod`. Never start `run` by hand for an installed profile.
 - Token and speed metrics on a synthetic fake account: `go test ./internal/mcpserver -run TestSizeReport -v` (chars and tokens of tool definitions, instructions and a probe per read tool; `-args -dump` prints the texts) and `go test ./internal/mcpserver -run '^$' -bench . -benchtime 30x` (ns/op and SQL queries/op per probe).
 - Real-data check, safe while the daemon runs: `WHATSAPP_MCP_E2E_DB=<prod data.db> go test ./internal/mcpserver -run TestRealData -v`.

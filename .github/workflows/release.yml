@@ -24,21 +24,25 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Full history: the steps below test which tags main contains.
           fetch-depth: 0
           persist-credentials: false
       - name: Refuse a tag outside main
         run: |
-          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          # main as it is now and every tag, over the full history.
+          git fetch --force --tags origin +refs/heads/main:refs/remotes/origin/main
           if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
             echo "::error::$GITHUB_REF_NAME is not on main: only a commit of main publishes a release"
             exit 1
           fi
-      - name: Make only the highest vX.Y.Z the latest release
+      # A tag outside main (a branch never merged) is no release: it does
+      # not count as higher.
+      - name: Make only main's highest vX.Y.Z the latest release
         run: |
-          highest=$(git tag --list 'v*' | { grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || true; } | sort -V | tail -n 1)
+          highest=$(git tag --merged origin/main --list 'v*' | { grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || true; } | sort -V | tail -n 1)
           if [ "$GITHUB_REF_NAME" = "$highest" ]; then latest=true; else latest=false; fi
           echo "MAKE_LATEST=$latest" >> "$GITHUB_ENV"
-          echo "$GITHUB_REF_NAME: make_latest $latest (highest vX.Y.Z tag: $highest)"
+          echo "$GITHUB_REF_NAME: make_latest $latest (highest vX.Y.Z tag on main: $highest)"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod

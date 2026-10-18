@@ -40,10 +40,15 @@ changelog:
   use: github-native
 
 release:
+  # GoReleaser creates the release as a draft, uploads every asset, then
+  # publishes it with prerelease and make_latest in one update: GitHub never
+  # shows the release, nor serves it as releases/latest, without its assets.
+  # Leave draft unset: with draft: true GoReleaser never publishes.
+  #
   # A tag with a suffix (v0.2.0-rc.1) publishes a prerelease.
   prerelease: auto
   # GitHub makes every new stable release the latest: a backport tag would
   # make releases/latest/download/<asset> serve an older build. release.yml
-  # sets MAKE_LATEST to true only for the highest vX.Y.Z tag; GoReleaser
+  # sets MAKE_LATEST to true only for main's highest vX.Y.Z tag; GoReleaser
   # never makes a prerelease the latest.
   make_latest: "{{ .Env.MAKE_LATEST }}"
