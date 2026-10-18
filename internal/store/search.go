@@ -467,10 +467,16 @@ func IsFTSError(err error) bool {
 }
 
 // CountMatches counts every message the query selects, ignoring paging.
+// With only a Match it counts the index alone: the triggers keep exactly
+// one messages_fts row per message, with rowid = messages.id.
 func CountMatches(ctx context.Context, e Execer, q SearchQuery) (int, error) {
 	where, args := q.where()
+	from := q.from()
+	if where == "messages_fts MATCH ?" {
+		from = "FROM messages_fts"
+	}
 	var n int
-	err := e.QueryRowContext(ctx, `SELECT COUNT(*) `+q.from()+` WHERE `+where, args...).Scan(&n)
+	err := e.QueryRowContext(ctx, `SELECT COUNT(*) `+from+` WHERE `+where, args...).Scan(&n)
 	return n, err
 }
 

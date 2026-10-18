@@ -168,6 +168,9 @@ func TestSearchMessagesMatchesReference(t *testing.T) {
 	var hits, ties, idTies, reacted, quoted, transcripts, pages int
 	for _, c := range cases {
 		ref := referenceSearch(t, db, c.q)
+		if n, err := store.CountMatches(ctx, db, c.q); err != nil || n != len(ref) {
+			t.Fatalf("%s %+v: CountMatches %d (err %v), want %d", c.name, c.q, n, err, len(ref))
+		}
 		for i := 1; i < len(ref); i++ {
 			if c.q.Match != "" && !c.q.Newest && ref[i].score == ref[i-1].score {
 				ties++
@@ -236,5 +239,51 @@ func TestSearchMessagesMatchesReference(t *testing.T) {
 	if ties == 0 || idTies == 0 || reacted == 0 || quoted == 0 || transcripts == 0 || hits < 1000 {
 		t.Fatalf("the cases miss a shape: %d hits, %d ties, %d id ties, %d reacted, %d quoted, %d transcripts",
 			hits, ties, idTies, reacted, quoted, transcripts)
+	}
+}
+
+// TestFTSRowsMatchMessages checks the invariant CountMatches relies on to
+// count a bare MATCH without joining messages: exactly one messages_fts row
+// per message, with rowid = messages.id, after every kind of write the
+// triggers handle.
+func TestFTSRowsMatchMessages(t *testing.T) {
+	fx, _ := fixtureDB(t)
+	ctx := context.Background()
+	db, err := fx.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Rollback()
+	check := func(step string) {
+		t.Helper()
+		var messages, rows, orphans, missing int
+		if err := db.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM messages), (SELECT COUNT(*) FROM messages_fts),
+			(SELECT COUNT(*) FROM messages_fts f WHERE NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = f.rowid)),
+			(SELECT COUNT(*) FROM messages m WHERE NOT EXISTS (SELECT 1 FROM messages_fts f WHERE f.rowid = m.id))`).
+			Scan(&messages, &rows, &orphans, &missing); err != nil {
+			t.Fatal(err)
+		}
+		if messages == 0 || rows != messages || orphans != 0 || missing != 0 {
+			t.Fatalf("%s: %d messages, %d fts rows, %d without a message, %d messages without a row", step, messages, rows, orphans, missing)
+		}
+	}
+	check("fixture")
+	for _, s := range []struct{ step, q string }{
+		{"insert", `INSERT INTO messages (chat_id, wa_id, sender_jid, sender_person_id, from_me, ts, kind, text)
+			SELECT chat_id, 'FXFTSCOPY' || id, sender_jid, sender_person_id, from_me, ts, kind, text FROM messages WHERE id % 50 = 0`},
+		{"edit", `UPDATE messages SET text = 'fxedited ' || text WHERE id % 7 = 0`},
+		{"media", `UPDATE messages SET media_id = (SELECT MIN(id) FROM media) WHERE id IN (SELECT id FROM messages WHERE media_id IS NULL LIMIT 5)`},
+		{"detach", `UPDATE messages SET media_id = NULL WHERE id IN (SELECT id FROM messages WHERE media_id IS NOT NULL LIMIT 5)`},
+		{"transcript", `UPDATE media SET transcript = 'fxtranscript' WHERE id IN (SELECT media_id FROM messages WHERE media_id IS NOT NULL LIMIT 20)`},
+		{"delete", `DELETE FROM messages WHERE id % 11 = 0`},
+	} {
+		res, err := db.ExecContext(ctx, s.q)
+		if err != nil {
+			t.Fatalf("%s: %v", s.step, err)
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			t.Fatalf("%s changed no rows", s.step)
+		}
+		check(s.step)
 	}
 }
