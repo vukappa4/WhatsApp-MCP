@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -28,28 +29,90 @@ var rome = func() *time.Location {
 
 func local(ts int64) time.Time { return time.Unix(ts, 0).In(rome) }
 
-// fmtTS renders a full timestamp: "2026-10-13 10:40 +02:00".
-func fmtTS(ts int64) string {
+// fmtTS renders a timestamp in Europe/Rome as of now: "13 Oct 10:40", with
+// the year when it is not now's year ("13 Oct 2025 10:40") and the UTC offset
+// only where the wall time is ambiguous (see clock). A zero now always shows
+// the year: use it for text that is stored and shown again later.
+func fmtTS(ts int64, now time.Time) string {
 	if ts == 0 {
 		return ""
 	}
-	return local(ts).Format("2006-01-02 15:04 -07:00")
+	return fmtTime(local(ts), now)
 }
 
-// fmtShort renders "08:02" for today and "11 Oct 22:00" otherwise.
+// fmtShort renders "08:02" for today and fmtTS's form otherwise.
 func fmtShort(t, now time.Time) string {
 	if t.IsZero() {
 		return "never"
 	}
 	t, now = t.In(rome), now.In(rome)
 	if t.Year() == now.Year() && t.YearDay() == now.YearDay() {
-		return t.Format("15:04")
+		return clock(t)
 	}
-	if t.Year() == now.Year() {
-		return t.Format("2 Jan 15:04")
-	}
-	return t.Format("2 Jan 2006 15:04")
+	return fmtTime(t, now)
 }
+
+func fmtTime(t, now time.Time) string {
+	t = t.In(rome)
+	return t.Format(withFold(t, withYear(t, "2 Jan", now)+" 15:04"))
+}
+
+// fmtDay renders a day header: "Tue 13 Oct", with the year when it is not
+// now's year.
+func fmtDay(ts int64, now time.Time) string {
+	t := local(ts)
+	return t.Format(withYear(t, "Mon 2 Jan", now))
+}
+
+func withYear(t time.Time, layout string, now time.Time) string {
+	if now.IsZero() || t.Year() != now.In(rome).Year() {
+		return layout + " 2006"
+	}
+	return layout
+}
+
+// clock renders "10:40". In the hour that repeats when daylight saving time
+// ends, the only time a Europe/Rome wall time names two instants, the UTC
+// offset follows: "02:30 +02:00", then "02:30 +01:00".
+func clock(t time.Time) string {
+	t = t.In(rome)
+	return t.Format(withFold(t, "15:04"))
+}
+
+// withFold appends the UTC offset to a layout ending in the time of day when
+// t falls in a repeated hour.
+func withFold(t time.Time, layout string) string {
+	ts := t.Unix()
+	i := sort.Search(len(romeFolds), func(i int) bool { return romeFolds[i][1] > ts })
+	if i < len(romeFolds) && romeFolds[i][0] <= ts {
+		return layout + " -07:00"
+	}
+	return layout
+}
+
+// romeFolds lists, in order, the unix ranges [from, to) whose Europe/Rome
+// wall times repeat: around each change to a smaller offset, the span of the
+// change on both sides.
+var romeFolds = func() [][2]int64 {
+	var folds [][2]int64
+	for t := time.Date(1970, 1, 1, 0, 0, 0, 0, rome); t.Year() < 2200; {
+		_, end := t.ZoneBounds()
+		if end.IsZero() {
+			break
+		}
+		if !end.After(t) { // ZoneBounds returns end == t on 31 Dec of leap years from 1996
+			t = t.Add(time.Hour)
+			continue
+		}
+		_, before := t.Zone()
+		_, after := end.Zone()
+		if d := int64(before - after); d > 0 {
+			folds = append(folds, [2]int64{end.Unix() - d, end.Unix() + d})
+		}
+		t = end
+	}
+	return folds
+}()
 
 // parseTime is parseTimeAt now.
 func parseTime(s string) (time.Time, error) { return parseTimeAt(s, time.Now()) }
@@ -119,14 +182,18 @@ func sanitize(s string) string {
 type wrapper struct {
 	nonce       string
 	transcripts bool
-	capText     int // detailed mode: most runes of a body or transcript, 0 for no cap
+	capText     int       // detailed mode: most runes of a body or transcript, 0 for no cap
+	now         time.Time // times omit now's year
 }
 
-func newWrapper() wrapper {
+func newWrapper(now time.Time) wrapper {
 	buf := make([]byte, 6)
 	_, _ = rand.Read(buf)
-	return wrapper{nonce: hex.EncodeToString(buf)}
+	return wrapper{nonce: hex.EncodeToString(buf), now: now}
 }
+
+// ts is fmtTS as of the response's now.
+func (w wrapper) ts(ts int64) string { return fmtTS(ts, w.now) }
 
 func (w wrapper) wrap(s string) string {
 	s = sanitize(s)

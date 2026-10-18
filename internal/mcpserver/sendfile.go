@@ -91,7 +91,7 @@ func (s *Server) sendFile(ctx context.Context, _ *mcp.CallToolRequest, in sendFi
 	}
 	// File names and paths can come from a sender (files in the media
 	// folder): they, and errors quoting them, are wrapped.
-	w := newWrapper()
+	w := newWrapper(s.now())
 	f, err := outgoing.Prepare(ctx, policy, in.Path, kind)
 	if err != nil {
 		return errResult("Not sent: %s", w.wrap(err.Error()))
@@ -187,8 +187,8 @@ func (s *Server) requestHistory(ctx context.Context, _ *mcp.CallToolRequest, in 
 	if err := s.recordHistoryRequest(ctx, c.ID); err != nil {
 		s.logger().Warn("record history request", "err", err)
 	}
-	w := newWrapper()
-	oldest := fmtTS(anchor.Timestamp.Unix())
+	w := newWrapper(s.now())
+	oldest := w.ts(anchor.Timestamp.Unix())
 	return textResult(fmt.Sprintf("Asked the phone for up to %d messages of %s (%s) older than %s, the oldest stored one. "+
 		"This is asynchronous: the phone must be online, and the messages arrive in the background, usually within a minute. "+
 		"Check later with whatsapp_read_chat chat=%s before=%q. If nothing older arrives, the phone has no older history for this chat.",
@@ -211,7 +211,7 @@ func (s *Server) historyQuota(ctx context.Context, chatID int64) (string, error)
 	}
 	if !last.IsZero() && now.Sub(last) < historyPerChatEvery {
 		return fmt.Sprintf("Not requested: older history of this chat was asked for at %s; ask again after %s (at most one request per chat every 10 minutes).",
-			fmtTS(last.Unix()), fmtTS(last.Add(historyPerChatEvery).Unix())), nil
+			fmtTS(last.Unix(), now), fmtTS(last.Add(historyPerChatEvery).Unix(), now)), nil
 	}
 	day, n, err := s.historyDay(ctx)
 	if err != nil {

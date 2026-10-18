@@ -171,7 +171,7 @@ func detailed(f string) bool { return f == "detailed" }
 type statusIn struct{}
 
 func (s *Server) status(ctx context.Context, _ *mcp.CallToolRequest, _ statusIn) (*mcp.CallToolResult, error) {
-	st := s.WA.Status()
+	st, now := s.WA.Status(), s.now()
 	d, err := s.loadFresh(ctx)
 	if err != nil {
 		return nil, err
@@ -201,7 +201,7 @@ func (s *Server) status(ctx context.Context, _ *mcp.CallToolRequest, _ statusIn)
 	if st.State == wa.StateLoggedOut && st.Paired() {
 		fmt.Fprintf(&b, "Logged out by WhatsApp. %s\n", s.relinkSteps())
 	}
-	fmt.Fprintf(&b, "Connection: %s since %s", st.State, fmtTS(st.Since.Unix()))
+	fmt.Fprintf(&b, "Connection: %s since %s", st.State, fmtTS(st.Since.Unix(), now))
 	if st.Detail != "" {
 		fmt.Fprintf(&b, " (%s)", st.Detail)
 	}
@@ -209,14 +209,14 @@ func (s *Server) status(ctx context.Context, _ *mcp.CallToolRequest, _ statusIn)
 		fmt.Fprintf(&b, ", replaying %d missed events", st.OfflinePending)
 	}
 	if st.BannedUntil.After(s.now()) {
-		fmt.Fprintf(&b, "\nTemporary ban: until %s (%s) - sends are refused until then", fmtTS(st.BannedUntil.Unix()), st.BanReason)
+		fmt.Fprintf(&b, "\nTemporary ban: until %s (%s) - sends are refused until then", fmtTS(st.BannedUntil.Unix(), now), st.BanReason)
 	}
 	if st.StorageError != "" {
 		fmt.Fprintf(&b, "\nStorage: ERROR since %s - new messages are not acked or saved; WhatsApp redelivers them once writes work (%s)",
-			fmtTS(st.StorageErrorAt.Unix()), clip(st.StorageError, 200))
+			fmtTS(st.StorageErrorAt.Unix(), now), clip(st.StorageError, 200))
 	}
-	fmt.Fprintf(&b, "\nDaemon running since: %s\n", fmtTS(st.StartedAt.Unix()))
-	fmt.Fprintf(&b, "Newest stored message: %s\n", orNever(fmtTS(stats.NewestTS)))
+	fmt.Fprintf(&b, "\nDaemon running since: %s\n", fmtTS(st.StartedAt.Unix(), now))
+	fmt.Fprintf(&b, "Newest stored message: %s\n", orNever(fmtTS(stats.NewestTS, now)))
 
 	b.WriteString("Offline gaps (daemon not connected):")
 	switch {
@@ -230,20 +230,20 @@ func (s *Server) status(ctx context.Context, _ *mcp.CallToolRequest, _ statusIn)
 	for _, g := range gaps[max(0, len(gaps)-maxStatusGaps):] {
 		to := "still open"
 		if !g.To.IsZero() {
-			to = fmtTS(g.To.Unix())
+			to = fmtTS(g.To.Unix(), now)
 		}
-		fmt.Fprintf(&b, "- %s -> %s (%s)\n", fmtTS(g.From.Unix()), to, g.Reason)
+		fmt.Fprintf(&b, "- %s -> %s (%s)\n", fmtTS(g.From.Unix(), now), to, g.Reason)
 	}
 
 	fmt.Fprintf(&b, "History: %d messages in %d chats, %d persons, %d media files", stats.Messages, stats.Chats, stats.Persons, stats.Media)
 	if stats.OldestTS != 0 {
-		fmt.Fprintf(&b, ", from %s to %s", fmtTS(stats.OldestTS), fmtTS(stats.NewestTS))
+		fmt.Fprintf(&b, ", from %s to %s", fmtTS(stats.OldestTS, now), fmtTS(stats.NewestTS, now))
 	}
 	fmt.Fprintf(&b, "; %d chats have no human name yet\n", stats.UnnamedChats)
 	if histAt.IsZero() {
 		b.WriteString("History sync: none received yet\n")
 	} else {
-		fmt.Fprintf(&b, "History sync: last blob %s (%s)\n", fmtTS(histAt.Unix()), histState)
+		fmt.Fprintf(&b, "History sync: last blob %s (%s)\n", fmtTS(histAt.Unix(), now), histState)
 	}
 	if imported != "" {
 		fmt.Fprintf(&b, "Legacy import: %s\n", imported)
@@ -272,7 +272,7 @@ func (s *Server) status(ctx context.Context, _ *mcp.CallToolRequest, _ statusIn)
 	if len(events) > 0 {
 		b.WriteString("Recent connection events:\n")
 		for _, e := range events {
-			line := fmt.Sprintf("%s %s", fmtTS(e.TS.Unix()), e.Event)
+			line := fmt.Sprintf("%s %s", fmtTS(e.TS.Unix(), now), e.Event)
 			if e.Detail != "" {
 				line += " (" + clip(e.Detail, 120) + ")"
 			}
@@ -299,9 +299,9 @@ func phoneHealth(seen, now time.Time) string {
 	days := int(now.Sub(seen).Hours() / 24)
 	if now.Sub(seen) >= phoneWarnAfter {
 		return fmt.Sprintf("Phone: WARNING - last active %s, %d days ago. WhatsApp unlinks this device after 14 days "+
-			"without the phone online: open WhatsApp on the phone now.", fmtTS(seen.Unix()), days)
+			"without the phone online: open WhatsApp on the phone now.", fmtTS(seen.Unix(), now), days)
 	}
-	return fmt.Sprintf("Phone: last active %s (%d days ago); on-demand history and media re-upload need it online.", fmtTS(seen.Unix()), days)
+	return fmt.Sprintf("Phone: last active %s (%d days ago); on-demand history and media re-upload need it online.", fmtTS(seen.Unix(), now), days)
 }
 
 func orNever(s string) string {
@@ -370,7 +370,7 @@ func (s *Server) listChats(ctx context.Context, _ *mcp.CallToolRequest, in listC
 	if err != nil {
 		return nil, err
 	}
-	w := newWrapper()
+	w := newWrapper(s.now())
 	full := detailed(in.ResponseFormat)
 
 	var b strings.Builder
@@ -385,7 +385,7 @@ func (s *Server) listChats(ctx context.Context, _ *mcp.CallToolRequest, in listC
 	fmt.Fprintf(&b, "%d chats, newest first:\n", len(chats))
 	for i := range chats {
 		c := &chats[i]
-		fmt.Fprintf(&b, "%s %s · %s · %s", chatID(c.ID), w.chatName(c), c.Kind, orNever(fmtTS(c.LastMessageAt)))
+		fmt.Fprintf(&b, "%s %s · %s · %s", chatID(c.ID), w.chatName(c), c.Kind, orNever(w.ts(c.LastMessageAt)))
 		if c.Unread > 0 {
 			fmt.Fprintf(&b, " · %d unread", c.Unread)
 		}

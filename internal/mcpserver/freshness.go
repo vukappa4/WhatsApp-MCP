@@ -75,6 +75,13 @@ func (s *Server) freshLine(d freshData, from, to int64) string {
 	now := s.now()
 	st := s.WA.Status()
 	lastEvent := d.LastEventAt
+	// The newest time carries its year: other times omit now's year.
+	dated := func(t time.Time) string {
+		if t.IsZero() {
+			return "never"
+		}
+		return fmtTS(t.Unix(), time.Time{})
+	}
 	var parts []string
 	stale := false
 	switch st.State {
@@ -82,25 +89,25 @@ func (s *Server) freshLine(d freshData, from, to int64) string {
 		parts = append(parts, "connected since "+fmtShort(st.Since, now))
 		switch {
 		case st.OfflinePending == wa.OfflineUnknown:
-			parts = append(parts, "REPLAYING missed messages, newest data "+fmtShort(lastEvent, now))
+			parts = append(parts, "REPLAYING missed messages, newest data "+dated(lastEvent))
 			stale = true
 		case st.OfflinePending > 0:
-			parts = append(parts, fmt.Sprintf("CATCHING UP on %d missed events, newest data %s", st.OfflinePending, fmtShort(lastEvent, now)))
+			parts = append(parts, fmt.Sprintf("CATCHING UP on %d missed events, newest data %s", st.OfflinePending, dated(lastEvent)))
 			stale = true
 		default:
-			parts = append(parts, "synced up to "+fmtShort(now, now))
+			parts = append(parts, "synced up to "+dated(now))
 		}
 	case wa.StateNotPaired:
 		parts = append(parts, "NOT PAIRED - whatsapp_status says how to link")
-		parts = append(parts, "data up to "+fmtShort(lastEvent, now))
+		parts = append(parts, "data up to "+dated(lastEvent))
 		stale = true
 	case wa.StateConnecting:
 		parts = append(parts, "CONNECTING since "+fmtShort(st.Since, now))
-		parts = append(parts, "data up to "+fmtShort(lastEvent, now))
+		parts = append(parts, "data up to "+dated(lastEvent))
 		stale = true
 	case wa.StateReconnecting:
 		parts = append(parts, "RECONNECTING after system sleep since "+fmtShort(st.Since, now))
-		parts = append(parts, "data up to "+fmtShort(lastEvent, now))
+		parts = append(parts, "data up to "+dated(lastEvent))
 		stale = true
 	default:
 		reason := string(st.State)
@@ -108,7 +115,7 @@ func (s *Server) freshLine(d freshData, from, to int64) string {
 			reason += ": " + st.Detail
 		}
 		parts = append(parts, fmt.Sprintf("DISCONNECTED since %s (%s)", fmtShort(st.Since, now), reason))
-		parts = append(parts, "data up to "+fmtShort(lastEvent, now))
+		parts = append(parts, "data up to "+dated(lastEvent))
 		stale = true
 	}
 

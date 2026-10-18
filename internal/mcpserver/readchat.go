@@ -52,7 +52,7 @@ func (s *Server) resolveChat(ctx context.Context, arg string) (*store.ChatRow, s
 	if err != nil {
 		return nil, err.Error()
 	}
-	w := newWrapper()
+	w := newWrapper(s.now())
 	switch len(cands) {
 	case 1:
 		return &cands[0], ""
@@ -76,7 +76,7 @@ func candidateList(w wrapper, chats []store.ChatRow) string {
 	var b strings.Builder
 	for i := range chats {
 		c := &chats[i]
-		fmt.Fprintf(&b, "- %s %s (%s, last message %s)\n", chatID(c.ID), w.chatName(c), c.Kind, orNever(fmtTS(c.LastMessageAt)))
+		fmt.Fprintf(&b, "- %s %s (%s, last message %s)\n", chatID(c.ID), w.chatName(c), c.Kind, orNever(w.ts(c.LastMessageAt)))
 	}
 	return b.String()
 }
@@ -223,7 +223,7 @@ func (s *Server) readChat(ctx context.Context, _ *mcp.CallToolRequest, in readCh
 	// Render, then keep the response under its budget: messages beyond it
 	// are left to the cursor (the oldest ones when reading back from the
 	// newest, the newest ones when reading forward or around a message).
-	w := newWrapper()
+	w := newWrapper(s.now())
 	full := detailed(in.ResponseFormat)
 	if full && limit > 1 {
 		w.capText = maxDetailedText
@@ -311,7 +311,7 @@ func (s *Server) readChat(ctx context.Context, _ *mcp.CallToolRequest, in readCh
 		}
 		return textResult(b.String()), nil
 	}
-	fmt.Fprintf(&b, ". %d messages, %s to %s.\n", len(msgs), fmtTS(msgs[0].TS), fmtTS(msgs[len(msgs)-1].TS))
+	fmt.Fprintf(&b, ". %d messages, %s to %s.\n", len(msgs), w.ts(msgs[0].TS), w.ts(msgs[len(msgs)-1].TS))
 	if chat.Kind != "dm" {
 		b.WriteString(w.participants(msgs))
 	}
@@ -324,8 +324,7 @@ func (s *Server) readChat(ctx context.Context, _ *mcp.CallToolRequest, in readCh
 
 	day := ""
 	for i := range msgs {
-		t := local(msgs[i].TS)
-		if d := t.Format("Mon 2 Jan 2006 (UTC-07:00)"); d != day {
+		if d := fmtDay(msgs[i].TS, w.now); d != day {
 			day = d
 			fmt.Fprintf(&b, "── %s ──\n", d)
 		}
@@ -359,7 +358,7 @@ func (w wrapper) participants(msgs []store.MessageRow) string {
 // line renders one transcript line.
 func (w wrapper) line(m *store.MessageRow, full bool) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s %s ", local(m.TS).Format("15:04"), messageID(m.ID))
+	fmt.Fprintf(&b, "%s %s ", clock(local(m.TS)), messageID(m.ID))
 	b.WriteString(w.sender(m) + ":")
 	if m.Forwarded {
 		b.WriteString(" [forwarded]")
@@ -394,7 +393,7 @@ func (w wrapper) line(m *store.MessageRow, full bool) string {
 	}
 	if m.EditedAt != 0 {
 		if full {
-			fmt.Fprintf(&b, " [edited %s]", fmtTS(m.EditedAt))
+			fmt.Fprintf(&b, " [edited %s]", w.ts(m.EditedAt))
 		} else {
 			b.WriteString(" [edited]")
 		}

@@ -167,7 +167,7 @@ func (s *Server) searchMessages(ctx context.Context, _ *mcp.CallToolRequest, in 
 	if err != nil {
 		return nil, err
 	}
-	w := newWrapper()
+	w := newWrapper(s.now())
 	full := detailed(in.ResponseFormat)
 
 	var b strings.Builder
@@ -272,10 +272,10 @@ func (s *Server) describeSearch(ctx context.Context, w wrapper, c cursor, q stor
 		parts = append(parts, "with "+c.Media+" media")
 	}
 	if q.After != 0 {
-		parts = append(parts, "after "+fmtTS(q.After))
+		parts = append(parts, "after "+w.ts(q.After))
 	}
 	if q.Before != 0 {
-		parts = append(parts, "before "+fmtTS(q.Before))
+		parts = append(parts, "before "+w.ts(q.Before))
 	}
 	return strings.Join(parts, " "), nil
 }
@@ -289,10 +289,10 @@ func (w wrapper) hitBlock(n int, chat *store.ChatRow, h *store.SearchHit, before
 	if chat != nil {
 		name, kind = w.chatName(chat), " ("+chat.Kind+")"
 	}
-	day := local(h.TS).Format("Mon 2 Jan 2006 (UTC-07:00)")
+	day := fmtDay(h.TS, w.now)
 	fmt.Fprintf(&b, "#%d %s %s%s · %s\n", n, chatID(h.ChatID), name, kind, day)
 	ctxLine := func(m *store.MessageRow) {
-		if d := local(m.TS).Format("Mon 2 Jan 2006 (UTC-07:00)"); d != day {
+		if d := fmtDay(m.TS, w.now); d != day {
 			day = d
 			fmt.Fprintf(&b, "  ── %s ──\n", d)
 		}
@@ -316,7 +316,7 @@ func (w wrapper) hitBlock(n int, chat *store.ChatRow, h *store.SearchHit, before
 	hw := w
 	hw.transcripts = true // the hit may have matched in its transcript
 	b.WriteString(prefix + hw.cutLine(&m, full, maxHitText, h.TextExcerpt) + note + "\n")
-	day = local(h.TS).Format("Mon 2 Jan 2006 (UTC-07:00)")
+	day = fmtDay(h.TS, w.now)
 	for i := range after {
 		ctxLine(&after[i])
 	}

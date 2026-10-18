@@ -400,6 +400,10 @@ func TestSendIdempotency(t *testing.T) {
 	if isErr || !strings.Contains(first, "Stored as m_") {
 		t.Fatal(first)
 	}
+	// The result is stored and replayed later, so its time keeps the year.
+	if !regexp.MustCompile(` at \d{1,2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}( [+-]\d{2}:\d{2})? \(WhatsApp server time\)`).MatchString(first) {
+		t.Fatalf("send time lacks the year:\n%s", first)
+	}
 	again, isErr := call(t, e.cs, toolSendMessage, args)
 	if isErr || len(e.fake.sends()) != 1 || !strings.Contains(again, "Not sent again") || !strings.Contains(again, first) {
 		t.Fatalf("retry:\n%s", again)

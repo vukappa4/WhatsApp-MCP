@@ -220,12 +220,12 @@ func (s *Server) resolvePerson(ctx context.Context, arg, param string) (*store.P
 	case len(ms) == 1, ms[0].score >= scorePrefix && ms[1].score < ms[0].score:
 		return &ms[0].PersonCandidate, "", nil
 	}
-	w := newWrapper()
+	w := newWrapper(s.now())
 	n := min(len(ms), 8)
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s %q matches %d people:\n", param, arg, len(ms))
 	for _, m := range ms[:n] {
-		fmt.Fprintf(&b, "- %s %s (%s, last interaction %s)\n", personID(m.ID), w.label(&m.PersonRef), nameSource(&m.PersonCandidate), orNever(fmtTS(m.LastAt)))
+		fmt.Fprintf(&b, "- %s %s (%s, last interaction %s)\n", personID(m.ID), w.label(&m.PersonRef), nameSource(&m.PersonCandidate), orNever(w.ts(m.LastAt)))
 	}
 	if len(ms) > n {
 		fmt.Fprintf(&b, "...and %d more.\n", len(ms)-n)
@@ -308,7 +308,7 @@ func (s *Server) searchPeople(ctx context.Context, _ *mcp.CallToolRequest, in se
 	if full {
 		maxGroups = 10
 	}
-	w := newWrapper()
+	w := newWrapper(s.now())
 	if len(ms) == 1 {
 		fmt.Fprintf(&b, "1 person matches %q:\n", query)
 	} else {
@@ -397,7 +397,7 @@ func (w wrapper) personBlock(m *personMatch, a *store.PersonActivity, full bool)
 	}
 
 	if a.LastAt != 0 {
-		fmt.Fprintf(&b, "   last interaction: %s in %s\n", fmtTS(a.LastAt), chatID(a.LastChatID))
+		fmt.Fprintf(&b, "   last interaction: %s in %s\n", w.ts(a.LastAt), chatID(a.LastChatID))
 	} else {
 		b.WriteString("   last interaction: none stored\n")
 	}
@@ -407,12 +407,12 @@ func (w wrapper) personBlock(m *personMatch, a *store.PersonActivity, full bool)
 	}
 	var chats []string
 	if a.DM != nil {
-		chats = append(chats, fmt.Sprintf("%s DM (%s, last %s)", chatID(a.DM.Chat.ID), count(a.DM.Messages, "message"), orNever(fmtTS(a.DM.LastAt))))
+		chats = append(chats, fmt.Sprintf("%s DM (%s, last %s)", chatID(a.DM.Chat.ID), count(a.DM.Messages, "message"), orNever(w.ts(a.DM.LastAt))))
 	}
 	for i := range a.Groups {
 		g := &a.Groups[i]
 		chats = append(chats, fmt.Sprintf("%s %s %s (%d from %s, last %s)", chatID(g.Chat.ID), w.chatName(&g.Chat), g.Chat.Kind,
-			g.Messages, who, fmtTS(g.LastAt)))
+			g.Messages, who, w.ts(g.LastAt)))
 	}
 	if len(chats) == 0 {
 		b.WriteString("   chats: none stored\n")

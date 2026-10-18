@@ -260,7 +260,7 @@ func (s *Server) nameRecipient(ctx context.Context, arg string) (*recipient, str
 			return nil, "", err
 		}
 	}
-	w := newWrapper()
+	w := newWrapper(s.now())
 	switch {
 	case len(exact) == 1 && len(groups) == 0:
 		return s.personRecipient(ctx, &exact[0].PersonRef)
@@ -296,7 +296,7 @@ func personLine(w wrapper, m *personMatch) string {
 		phone = people.FormatPhone(m.Phone)
 	}
 	return fmt.Sprintf("- %s %s, %s (%s, last interaction %s)\n", personID(m.ID), w.name(&m.PersonRef), phone,
-		nameSource(&m.PersonCandidate), orNever(fmtTS(m.LastAt)))
+		nameSource(&m.PersonCandidate), orNever(w.ts(m.LastAt)))
 }
 
 // groupsNamed returns the groups whose name equals name, ignoring case and accents.
@@ -412,7 +412,7 @@ func (s *Server) sendBlocked() string {
 	const tail = " Nothing was queued."
 	if st.BannedUntil.After(s.now()) {
 		return fmt.Sprintf("Not sent: WhatsApp temporarily banned this account (%s) until %s. Sends are refused until then: "+
-			"sending during a ban risks a permanent one.%s", st.BanReason, fmtTS(st.BannedUntil.Unix()), tail)
+			"sending during a ban risks a permanent one.%s", st.BanReason, fmtTS(st.BannedUntil.Unix(), s.now()), tail)
 	}
 	switch st.State {
 	case wa.StateConnected:
@@ -427,7 +427,7 @@ func (s *Server) sendBlocked() string {
 		detail = ", " + st.Detail
 	}
 	return fmt.Sprintf("Not sent: WhatsApp is %s since %s%s.%s Try again when whatsapp_status shows connected.",
-		st.State, fmtTS(st.Since.Unix()), detail, tail)
+		st.State, fmtTS(st.Since.Unix(), s.now()), detail, tail)
 }
 
 // precheck verifies that a phone number without a stored chat has a
@@ -532,7 +532,7 @@ func (s *Server) deliver(ctx context.Context, w wrapper, r *recipient, msg *waE2
 	if out.ChatID != "" {
 		fmt.Fprintf(&b, " in %s", out.ChatID)
 	}
-	fmt.Fprintf(&b, " at %s (WhatsApp server time).", fmtTS(resp.Timestamp.Unix()))
+	fmt.Fprintf(&b, " at %s (WhatsApp server time).", fmtTS(resp.Timestamp.Unix(), time.Time{}))
 	if out.MessageID != "" {
 		fmt.Fprintf(&b, " Stored as %s.", out.MessageID)
 	} else {
@@ -602,20 +602,20 @@ func (s *Server) idemLookup(ctx context.Context, key, fp string) (*mcp.CallToolR
 		return nil, "", err
 	}
 	if rec.Fingerprint != fp {
-		return nil, fmt.Sprintf("idempotency_key %q was already used at %s for a different send: use a new key for a new message", key, fmtTS(at.Unix())), nil
+		return nil, fmt.Sprintf("idempotency_key %q was already used at %s for a different send: use a new key for a new message", key, fmtTS(at.Unix(), s.now())), nil
 	}
 	if rec.Out.Unconfirmed {
 		if resolved, err := resolveUnconfirmed(ctx, s.DB, key, &rec); err != nil {
 			return nil, "", err
 		} else if resolved {
 			return textResult(fmt.Sprintf("Not sent again: idempotency_key %q was used at %s and that message was delivered. Earlier result:\n%s",
-				key, fmtTS(at.Unix()), rec.Text)), "", nil
+				key, fmtTS(at.Unix(), s.now()), rec.Text)), "", nil
 		}
 		res, _ := errResult("Not sent again: idempotency_key %q was used at %s and WhatsApp did not confirm that send. "+
-			"Check with whatsapp_read_chat whether it arrived; to send anyway, use a new key.", key, fmtTS(at.Unix()))
+			"Check with whatsapp_read_chat whether it arrived; to send anyway, use a new key.", key, fmtTS(at.Unix(), s.now()))
 		return res, "", nil
 	}
-	return textResult(fmt.Sprintf("Not sent again: idempotency_key %q already sent this at %s. Earlier result:\n%s", key, fmtTS(at.Unix()), rec.Text)), "", nil
+	return textResult(fmt.Sprintf("Not sent again: idempotency_key %q already sent this at %s. Earlier result:\n%s", key, fmtTS(at.Unix(), s.now()), rec.Text)), "", nil
 }
 
 func (s *Server) idemSave(ctx context.Context, key, fp string, res *mcp.CallToolResult, out *sendResult) error {
@@ -649,7 +649,7 @@ func resolveUnconfirmed(ctx context.Context, db *store.DB, key string, rec *idem
 	rec.Out.Unconfirmed = false
 	rec.Out.MessageID, rec.Out.ChatID = messageID(m.ID), chatID(m.ChatID)
 	rec.Text = fmt.Sprintf("Sent to %s in %s at %s (WhatsApp did not confirm in time; the message was stored later as %s).",
-		rec.Out.Recipient, rec.Out.ChatID, fmtTS(m.TS), rec.Out.MessageID)
+		rec.Out.Recipient, rec.Out.ChatID, fmtTS(m.TS, time.Time{}), rec.Out.MessageID)
 	b, err := json.Marshal(rec)
 	if err != nil {
 		return false, err
@@ -757,5 +757,5 @@ func (s *Server) sendMessage(ctx context.Context, _ *mcp.CallToolRequest, in sen
 	if ci != nil {
 		what = "the reply to " + in.ReplyTo
 	}
-	return s.deliver(ctx, newWrapper(), r, m, nil, what, idem{in.IdempotencyKey, fp})
+	return s.deliver(ctx, newWrapper(s.now()), r, m, nil, what, idem{in.IdempotencyKey, fp})
 }

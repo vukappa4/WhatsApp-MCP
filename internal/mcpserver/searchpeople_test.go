@@ -89,7 +89,7 @@ func TestSearchPeople(t *testing.T) {
 		t.Fatalf("person ids = %v:\n%s", got, text)
 	}
 	for _, want := range []string{"~Marco (+39 333 111 1111)", "~Marco (+39 333 222 2222)", "not saved, name from their WhatsApp profile",
-		"DM (", "Calcetto</untrusted_wa", "last interaction: 2026-"} {
+		"DM (", "Calcetto</untrusted_wa", "last interaction: 12 Oct 12:00 in c_"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("people result lacks %q:\n%s", want, text)
 		}

@@ -112,7 +112,7 @@ func (s *Server) getMedia(ctx context.Context, _ *mcp.CallToolRequest, in getMed
 		return nil, err
 	}
 	j := res.Job
-	w := newWrapper()
+	w := newWrapper(s.now())
 	full := detailed(in.ResponseFormat)
 
 	var b strings.Builder
@@ -134,7 +134,7 @@ func (s *Server) getMedia(ctx context.Context, _ *mcp.CallToolRequest, in getMed
 	if chat, ok, err := store.ChatByID(ctx, s.DB, msg.ChatID); err == nil && ok {
 		parts = append(parts, fmt.Sprintf("in %s %s", chatID(chat.ID), w.chatName(&chat)))
 	}
-	parts = append(parts, fmtTS(msg.TS))
+	parts = append(parts, w.ts(msg.TS))
 	b.WriteString(strings.Join(parts, " · ") + "\n")
 	if msg.Text != "" {
 		b.WriteString("Caption: " + w.wrap(clip(msg.Text, 800)) + "\n")
