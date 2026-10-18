@@ -162,11 +162,8 @@ func TestFillLastAt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Every person twice: more candidates than one chunk of FillLastAt.
+	// Every person twice: a repeated person gets its LastAt too.
 	all = append(all, all...)
-	if len(all) <= 500 {
-		t.Fatalf("%d candidates do not cross a chunk", len(all))
-	}
 	if err := store.FillLastAt(ctx, db, all); err != nil {
 		t.Fatal(err)
 	}

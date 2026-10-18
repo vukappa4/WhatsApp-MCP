@@ -184,17 +184,17 @@ func attachLast(ctx context.Context, e Execer, chats []ChatRow) error {
 		return nil
 	}
 	idx := make(map[int64]int, len(chats))
-	ph := make([]string, len(chats))
-	args := make([]any, 0, 2*len(chats))
+	ids, lastAt := make([]int64, len(chats)), make([]int64, len(chats))
 	for i, c := range chats {
 		idx[c.ID] = i
-		ph[i] = "(?, ?)"
-		args = append(args, c.ID, c.LastMessageAt)
+		ids[i], lastAt[i] = c.ID, c.LastMessageAt
 	}
-	rows, err := e.QueryContext(ctx, `WITH page(chat_id, last_at) AS (VALUES `+strings.Join(ph, ", ")+`)
+	// Parallel arrays: reading a number at a key of an array argument
+	// costs less than taking apart a JSON tuple per row.
+	rows, err := e.QueryContext(ctx, `WITH page(chat_id, last_at) AS (SELECT value, ?2 ->> key FROM json_each(?1))
 		SELECT `+messageColumns+` FROM page JOIN messages m ON m.id = (SELECT l.id FROM messages l
 			WHERE l.chat_id = page.chat_id AND l.ts <= page.last_at ORDER BY l.ts DESC, l.id DESC LIMIT 1)
-		`+messageJoinsOnM, args...)
+		`+messageJoinsOnM, jsonArg(ids), jsonArg(lastAt))
 	if err != nil {
 		return err
 	}
@@ -409,24 +409,23 @@ func ReadAround(ctx context.Context, e Execer, anchors []Anchor, n int) (before,
 	if len(anchors) == 0 || n <= 0 {
 		return before, after, nil
 	}
-	ph := make([]string, len(anchors))
-	args := make([]any, 0, 4*len(anchors)+1)
+	chats, ts, ids := make([]int64, len(anchors)), make([]int64, len(anchors)), make([]int64, len(anchors))
 	for i, a := range anchors {
-		ph[i] = "(?, ?, ?, ?)"
-		args = append(args, i, a.ChatID, a.TS, a.ID)
+		chats[i], ts[i], ids[i] = a.ChatID, a.TS, a.ID
 	}
-	args = append(args, n)
+	args := []any{jsonArg(chats), jsonArg(ts), jsonArg(ids), n}
 	window := func(dir int, op, order string) string {
 		return fmt.Sprintf(`SELECT a.k, %d, m.id FROM a JOIN messages m ON m.id IN (SELECT x.id FROM messages x
 			WHERE x.chat_id = a.chat_id AND (x.ts %s a.ts OR (x.ts = a.ts AND x.id %s a.id))
-			ORDER BY x.ts %s, x.id %s LIMIT ?%d)`, dir, op, op, order, order, len(args))
+			ORDER BY x.ts %s, x.id %s LIMIT ?4)`, dir, op, op, order, order)
 	}
 	type keyed struct {
 		k, dir int
 		m      MessageRow
 	}
 	var out []keyed
-	err = eachRow(ctx, e, `WITH a(k, chat_id, ts, id) AS (VALUES `+strings.Join(ph, ", ")+`),
+	// k is the anchor's index; the arrays are parallel, as in attachLast.
+	err = eachRow(ctx, e, `WITH a(k, chat_id, ts, id) AS (SELECT key, value, ?2 ->> key, ?3 ->> key FROM json_each(?1)),
 		w(k, dir, id) AS (`+window(0, "<", "DESC")+` UNION ALL `+window(1, ">", "ASC")+`)
 		SELECT w.k, w.dir, `+messageColumns+` FROM w JOIN messages m ON m.id = w.id `+messageJoinsOnM, args,
 		func(rows *sql.Rows) error {
@@ -482,8 +481,8 @@ func ChatsByID(ctx context.Context, e Execer, ids []int64) (map[int64]ChatRow, e
 	if len(ids) == 0 {
 		return out, nil
 	}
-	in, args := idList(ids)
-	err := eachRow(ctx, e, `SELECT `+chatColumns+` FROM chats c LEFT JOIN persons p ON p.id = c.person_id WHERE c.id IN (`+in+`)`, args,
+	err := eachRow(ctx, e, `SELECT `+chatColumns+` FROM json_each(?) v JOIN chats c ON c.id = v.value
+		LEFT JOIN persons p ON p.id = c.person_id`, []any{jsonSet(ids)},
 		func(rows *sql.Rows) error {
 			c, err := scanChat(rows)
 			if err != nil {
@@ -510,16 +509,13 @@ func attachReactions(ctx context.Context, e Execer, msgs []MessageRow) error {
 		return nil
 	}
 	idx := make(map[int64]int, len(msgs))
-	ph := make([]string, len(msgs))
-	args := make([]any, len(msgs))
+	ids := make([]int64, len(msgs))
 	for i, m := range msgs {
 		idx[m.ID] = i
-		ph[i] = "?"
-		args[i] = m.ID
+		ids[i] = m.ID
 	}
 	rows, err := e.QueryContext(ctx, `SELECT r.message_id, r.emoji, r.ts, p.id, p.display_name, p.name_source, COALESCE(p.phone_e164, ''), p.is_me
-		FROM reactions r JOIN persons p ON p.id = r.person_id
-		WHERE r.message_id IN (`+strings.Join(ph, ",")+`) ORDER BY r.ts`, args...)
+		FROM json_each(?) v JOIN reactions r ON r.message_id = v.value JOIN persons p ON p.id = r.person_id ORDER BY r.ts`, jsonSet(ids))
 	if err != nil {
 		return err
 	}

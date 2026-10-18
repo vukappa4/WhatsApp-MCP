@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"slices"
 	"strings"
 	"unicode"
 )
@@ -64,32 +66,28 @@ func AllPersonNames(ctx context.Context, e Execer) ([]PersonCandidate, error) {
 	return queryPersons(ctx, e, nameColumns, `p.display_name != '' OR p.phone_e164 IS NOT NULL`)
 }
 
-// FillLastAt sets LastAt on every candidate. A short query can match most
-// of a large account, so it asks in chunks well below SQLite's limit of
-// 32766 variables per statement.
+// FillLastAt sets LastAt on every candidate in one query.
 func FillLastAt(ctx context.Context, e Execer, cs []PersonCandidate) error {
-	const chunk = 500
-	for len(cs) > 0 {
-		part := cs[:min(len(cs), chunk)]
-		cs = cs[len(part):]
-		ids := make([]int64, len(part))
-		for i := range part {
-			ids[i] = part[i].ID
-		}
-		in, args := idList(ids)
-		last := make(map[int64]int64, len(part))
-		err := eachRow(ctx, e, `SELECT p.id, `+lastAtColumn+` FROM persons p WHERE p.id IN (`+in+`)`, args, func(rows *sql.Rows) error {
+	if len(cs) == 0 {
+		return nil
+	}
+	ids := make([]int64, len(cs))
+	for i := range cs {
+		ids[i] = cs[i].ID
+	}
+	last := make(map[int64]int64, len(cs))
+	err := eachRow(ctx, e, `SELECT p.id, `+lastAtColumn+` FROM json_each(?) v JOIN persons p ON p.id = v.value`, []any{jsonSet(ids)},
+		func(rows *sql.Rows) error {
 			var id, at int64
 			err := rows.Scan(&id, &at)
 			last[id] = at
 			return err
 		})
-		if err != nil {
-			return err
-		}
-		for i := range part {
-			part[i].LastAt = last[part[i].ID]
-		}
+	if err != nil {
+		return err
+	}
+	for i := range cs {
+		cs[i].LastAt = last[cs[i].ID]
 	}
 	return nil
 }
@@ -108,12 +106,7 @@ func PersonsByJID(ctx context.Context, e Execer, jids ...string) ([]PersonCandid
 	if len(jids) == 0 {
 		return nil, nil
 	}
-	ph := strings.TrimSuffix(strings.Repeat("?,", len(jids)), ",")
-	args := make([]any, len(jids))
-	for i, j := range jids {
-		args[i] = j
-	}
-	return queryCandidates(ctx, e, `p.id IN (SELECT person_id FROM jids WHERE jid IN (`+ph+`))`, args...)
+	return queryCandidates(ctx, e, `p.id IN (SELECT person_id FROM jids WHERE jid IN (SELECT value FROM json_each(?)))`, jsonArg(jids))
 }
 
 // PersonsByPhone returns persons whose primary number is exactly +digits or
@@ -219,7 +212,7 @@ func GetPeopleActivity(ctx context.Context, e Execer, personIDs []int64, maxGrou
 	if len(personIDs) == 0 {
 		return out, nil
 	}
-	in, args := idList(personIDs)
+	args := []any{jsonSet(personIDs)}
 	// Map values are not addressable: work on pointers, copy out at the end.
 	acts := make(map[int64]*PersonActivity, len(personIDs))
 	act := func(id int64) *PersonActivity {
@@ -231,7 +224,8 @@ func GetPeopleActivity(ctx context.Context, e Execer, personIDs []int64, maxGrou
 		return a
 	}
 
-	err := eachRow(ctx, e, `SELECT person_id, jid, kind FROM jids WHERE person_id IN (`+in+`) ORDER BY person_id, kind DESC, jid`, args,
+	err := eachRow(ctx, e, `SELECT j.person_id, j.jid, j.kind FROM json_each(?) v JOIN jids j ON j.person_id = v.value
+		ORDER BY j.person_id, j.kind DESC, j.jid`, args,
 		func(rows *sql.Rows) error {
 			var id int64
 			var j JIDRow
@@ -246,10 +240,11 @@ func GetPeopleActivity(ctx context.Context, e Execer, personIDs []int64, maxGrou
 		return nil, err
 	}
 
-	err = eachRow(ctx, e, `SELECT jl.person_id, n.pn, jp.person_id FROM number_links n
-		JOIN jids jl ON jl.jid = n.lid
+	err = eachRow(ctx, e, `SELECT jl.person_id, n.pn, jp.person_id FROM json_each(?) v
+		JOIN jids jl ON jl.person_id = v.value
+		JOIN number_links n ON n.lid = jl.jid
 		JOIN jids jp ON jp.jid = n.pn AND jp.person_id != jl.person_id
-		WHERE jl.person_id IN (`+in+`) ORDER BY jl.person_id, n.seen_at DESC, n.pn`, args,
+		ORDER BY jl.person_id, n.seen_at DESC, n.pn`, args,
 		func(rows *sql.Rows) error {
 			var id int64
 			var pn string
@@ -268,7 +263,7 @@ func GetPeopleActivity(ctx context.Context, e Execer, personIDs []int64, maxGrou
 	}
 
 	err = eachRow(ctx, e, `SELECT `+chatColumns+`, c.person_id, (SELECT COUNT(*) FROM messages WHERE chat_id = c.id)
-		FROM chats c LEFT JOIN persons p ON p.id = c.person_id WHERE c.kind = 'dm' AND c.person_id IN (`+in+`)`, args,
+		FROM json_each(?) v JOIN chats c ON c.kind = 'dm' AND c.person_id = v.value LEFT JOIN persons p ON p.id = c.person_id`, args,
 		func(rows *sql.Rows) error {
 			var id int64
 			var dm ChatActivity
@@ -289,8 +284,8 @@ func GetPeopleActivity(ctx context.Context, e Execer, personIDs []int64, maxGrou
 	// Every group the person wrote in, most recent first, with its chat row.
 	err = eachRow(ctx, e, `SELECT `+chatColumns+`, g.pid, g.n, g.last FROM (
 			SELECT m.sender_person_id AS pid, m.chat_id AS cid, COUNT(*) AS n, MAX(m.ts) AS last
-			FROM messages m JOIN chats c ON c.id = m.chat_id
-			WHERE m.sender_person_id IN (`+in+`) AND c.kind != 'dm'
+			FROM json_each(?) v JOIN messages m ON m.sender_person_id = v.value JOIN chats c ON c.id = m.chat_id
+			WHERE c.kind != 'dm'
 			GROUP BY m.sender_person_id, m.chat_id) g
 		JOIN chats c ON c.id = g.cid LEFT JOIN persons p ON p.id = c.person_id
 		ORDER BY g.pid, g.last DESC, g.cid DESC`, args,
@@ -321,13 +316,36 @@ func GetPeopleActivity(ctx context.Context, e Execer, personIDs []int64, maxGrou
 	return out, nil
 }
 
-// idList returns the placeholders and arguments for "IN (...)" over ids.
-func idList(ids []int64) (string, []any) {
-	args := make([]any, len(ids))
-	for i, id := range ids {
-		args[i] = id
+// jsonArg encodes v as one JSON argument, read in SQL with json_each(?):
+// a list of any length keeps the query text, and so its cached statement,
+// the same.
+func jsonArg(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(err) // v is always a slice of numbers or strings
 	}
-	return strings.TrimSuffix(strings.Repeat("?,", len(ids)), ","), args
+	return string(b)
+}
+
+// oneOf returns the condition that col is one of vals, and its argument.
+// One value gives "col = ?", which seeks an index and keeps its order and
+// tests a row about twice as fast as a list; more give one JSON list. The
+// text tells one value from several, never how many.
+func oneOf(col string, vals []string) (string, any) {
+	if len(vals) == 1 {
+		return col + " = ?", vals[0]
+	}
+	return col + " IN (SELECT value FROM json_each(?))", jsonArg(vals)
+}
+
+// jsonSet is jsonArg of the distinct ids. A query joins json_each(?) on
+// them instead of testing IN (SELECT value FROM json_each(?)): the join
+// skips building a temporary index of the list, and distinct ids make it
+// match each row once, as IN does.
+func jsonSet(ids []int64) string {
+	s := slices.Clone(ids)
+	slices.Sort(s)
+	return jsonArg(slices.Compact(s))
 }
 
 // eachRow runs a query and calls fn for every row.
@@ -466,10 +484,9 @@ func (q SearchQuery) where() (string, []any) {
 		args = append(args, q.Before)
 	}
 	if len(q.Kinds) > 0 {
-		where = append(where, "m.kind IN ("+strings.TrimSuffix(strings.Repeat("?,", len(q.Kinds)), ",")+")")
-		for _, k := range q.Kinds {
-			args = append(args, k)
-		}
+		cond, arg := oneOf("m.kind", q.Kinds)
+		where = append(where, cond)
+		args = append(args, arg)
 	}
 	switch q.FromMe {
 	case 1:

@@ -7,8 +7,9 @@ import (
 	"sync"
 )
 
-// stmtCacheSize bounds the prepared statements a DB keeps. A query with a
-// variable number of placeholders takes one entry per length.
+// stmtCacheSize bounds the prepared statements a DB keeps. Query texts
+// never depend on list lengths (lists go in as one JSON argument, see
+// jsonArg), so the read tools use a fixed set of statements well below it.
 const stmtCacheSize = 128
 
 // stmtCache keeps prepared statements by query text and evicts the least

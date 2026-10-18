@@ -111,6 +111,13 @@ type fxPerson struct {
 // counter of SQL statements it runs (queries and execs).
 func fixtureDB(tb testing.TB) (*store.DB, *atomic.Int64) {
 	tb.Helper()
+	return fixtureDBPreparing(tb, nil)
+}
+
+// fixtureDBPreparing is fixtureDB that also records into prepared every
+// query text the pool prepares, when prepared is not nil.
+func fixtureDBPreparing(tb testing.TB, prepared *preparedTexts) (*store.DB, *atomic.Int64) {
+	tb.Helper()
 	fixture.once.Do(func() { fixture.dir, fixture.err = buildFixture() })
 	if fixture.err != nil {
 		tb.Fatalf("build fixture: %v", fixture.err)
@@ -123,7 +130,7 @@ func fixtureDB(tb testing.TB) (*store.DB, *atomic.Int64) {
 	drv := probe.Driver()
 	probe.Close()
 	n := new(atomic.Int64)
-	sdb := sql.OpenDB(countingConnector{dsn: store.DSN(path), drv: drv, n: n})
+	sdb := sql.OpenDB(countingConnector{dsn: store.DSN(path), drv: drv, n: n, prepared: prepared})
 	sdb.SetMaxOpenConns(8)
 	tb.Cleanup(func() { sdb.Close() })
 	return &store.DB{DB: sdb, Path: path}, n
@@ -134,12 +141,18 @@ func fixtureDB(tb testing.TB) (*store.DB, *atomic.Int64) {
 func fixtureServer(tb testing.TB) (*Server, *atomic.Int64) {
 	tb.Helper()
 	db, n := fixtureDB(tb)
+	return serveFixture(tb, db), n
+}
+
+// serveFixture is fixtureServer on db, a pool on the fixture.
+func serveFixture(tb testing.TB, db *store.DB) *Server {
+	tb.Helper()
 	mgr := media.New(media.Options{DB: db, Root: filepath.Join(fixture.dir, "media"), Source: &mediaSource{},
 		Transcriber: textTranscriber{}, Now: func() time.Time { return fxNow }})
 	tb.Cleanup(mgr.Stop)
 	return &Server{DB: db, WA: fixedStatus{State: wa.StateConnected, Since: fxEnd.Add(-26 * time.Hour), StartedAt: fxEnd.Add(-26 * time.Hour),
 		AccountPN: fxMe, AccountLID: fxMeLID}, Media: mgr, Profile: "dev", DataDir: "x", Version: "test",
-		Now: func() time.Time { return fxNow }}, n
+		Now: func() time.Time { return fxNow }}
 }
 
 func buildFixture() (dir string, err error) {
@@ -439,11 +452,39 @@ func fillFixture(ctx context.Context, db *store.DB, mediaRoot string) error {
 }
 
 // countingConnector opens SQLite connections that count every query and
-// exec, so benchmarks report SQL statements per tool call.
+// exec, so benchmarks report SQL statements per tool call, and record every
+// prepared query text in prepared when it is not nil.
 type countingConnector struct {
-	dsn string
-	drv driver.Driver
-	n   *atomic.Int64
+	dsn      string
+	drv      driver.Driver
+	n        *atomic.Int64
+	prepared *preparedTexts
+}
+
+// preparedTexts is the set of distinct query texts prepared on a pool.
+type preparedTexts struct {
+	mu    sync.Mutex
+	texts map[string]bool
+}
+
+func (p *preparedTexts) add(q string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.texts == nil {
+		p.texts = map[string]bool{}
+	}
+	p.texts[q] = true
+}
+
+// snapshot returns a copy of the set.
+func (p *preparedTexts) snapshot() map[string]bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make(map[string]bool, len(p.texts))
+	for q := range p.texts {
+		out[q] = true
+	}
+	return out
 }
 
 func (c countingConnector) Connect(context.Context) (driver.Conn, error) {
@@ -451,14 +492,15 @@ func (c countingConnector) Connect(context.Context) (driver.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &countingConn{Conn: conn, n: c.n}, nil
+	return &countingConn{Conn: conn, n: c.n, prepared: c.prepared}, nil
 }
 
 func (c countingConnector) Driver() driver.Driver { return c.drv }
 
 type countingConn struct {
 	driver.Conn
-	n *atomic.Int64
+	n        *atomic.Int64
+	prepared *preparedTexts
 }
 
 func (c *countingConn) QueryContext(ctx context.Context, q string, args []driver.NamedValue) (driver.Rows, error) {
@@ -472,6 +514,9 @@ func (c *countingConn) ExecContext(ctx context.Context, q string, args []driver.
 }
 
 func (c *countingConn) PrepareContext(ctx context.Context, q string) (driver.Stmt, error) {
+	if c.prepared != nil {
+		c.prepared.add(q)
+	}
 	st, err := c.Conn.(driver.ConnPrepareContext).PrepareContext(ctx, q)
 	if err != nil {
 		return nil, err

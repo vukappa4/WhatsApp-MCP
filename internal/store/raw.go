@@ -155,10 +155,9 @@ func ListRaw(ctx context.Context, e Execer, f RawFilter) ([]RawEvent, error) {
 	q := `SELECT id, kind, dedupe_key, received_at, payload, ingested_at IS NOT NULL, attempts, error, COALESCE(attempted_at, 0) FROM raw_events WHERE id > ?`
 	args := []any{f.AfterID}
 	if len(f.Kinds) > 0 {
-		q += ` AND kind IN (` + strings.TrimSuffix(strings.Repeat("?,", len(f.Kinds)), ",") + `)`
-		for _, k := range f.Kinds {
-			args = append(args, k)
-		}
+		cond, arg := oneOf("kind", f.Kinds)
+		q += ` AND ` + cond
+		args = append(args, arg)
 	}
 	if f.PendingOnly {
 		q += ` AND ingested_at IS NULL`
@@ -203,10 +202,9 @@ func CountPendingRaw(ctx context.Context, e Execer, kinds ...string) (int, error
 	q := `SELECT COUNT(*) FROM raw_events WHERE ingested_at IS NULL`
 	var args []any
 	if len(kinds) > 0 {
-		q += ` AND kind IN (` + strings.TrimSuffix(strings.Repeat("?,", len(kinds)), ",") + `)`
-		for _, k := range kinds {
-			args = append(args, k)
-		}
+		cond, arg := oneOf("kind", kinds)
+		q += ` AND ` + cond
+		args = append(args, arg)
 	}
 	var n int
 	err := e.QueryRowContext(ctx, q, args...).Scan(&n)
