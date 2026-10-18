@@ -76,6 +76,7 @@ func installCmd(args []string) error {
 	}
 	fmt.Printf("Daemon running from %s (pid %d), MCP on http://127.0.0.1:%d/mcp\n", dst, pid, cfg.Port)
 	removeLeftovers(dst)
+	checkClaudeSettings(cfg, dst, os.Stdout)
 	return nil
 }
 
@@ -191,10 +192,7 @@ func setupClaudeCmd(args []string) error {
 	if !ok {
 		return fmt.Errorf("%s not found: run `whatsapp-mcp install --profile %s` first", exe, cfg.Profile)
 	}
-	hookExe := exe
-	if prod, ok := installedExe(config.ProfileProd); ok {
-		hookExe = prod
-	}
+	hookExe := hookExeFor(exe)
 	token, err := cfg.EnsureToken()
 	if err != nil {
 		return err
@@ -210,6 +208,40 @@ func setupClaudeCmd(args []string) error {
 	fmt.Printf("Settings %s: read tools allowed, send-gate hooks run %s\n", settings, hookExe)
 	fmt.Println("Restart Claude Code to load them.")
 	return nil
+}
+
+// hookExeFor is the binary the send-gate hooks run when exe registers
+// them: prod's installed binary whenever prod is installed, so the shared
+// hooks outlive an uninstalled dev. An update replaces that binary in
+// place: the hooks keep running the same path.
+func hookExeFor(exe string) string {
+	if prod, ok := installedExe(config.ProfileProd); ok {
+		return prod
+	}
+	return exe
+}
+
+// checkClaudeSettings tells the user when the Claude Code settings the
+// profile was registered in differ from what this version registers:
+// install and update never rewrite them, setup-claude does. It only reads.
+func checkClaudeSettings(cfg *config.Config, exe string, out io.Writer) {
+	dir, err := claudecode.ConfigDir()
+	if err != nil {
+		return
+	}
+	drift, err := claudecode.Check(filepath.Join(dir, "settings.json"), hookExeFor(exe), mcpServerName(cfg.Profile))
+	if err != nil {
+		fmt.Fprintf(out, "Could not check the Claude Code settings in %s: %v\n", dir, err)
+		return
+	}
+	if len(drift) == 0 {
+		return
+	}
+	fmt.Fprintf(out, "Claude Code settings in %s are older than this version: run `whatsapp-mcp setup-claude --profile %s` "+
+		"under every Claude config folder you use, then restart Claude Code.\n", dir, cfg.Profile)
+	for _, d := range drift {
+		fmt.Fprintln(out, "  "+d)
+	}
 }
 
 // selfPath is the running binary's absolute path with links resolved.

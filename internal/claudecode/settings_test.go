@@ -286,3 +286,79 @@ func TestEditKeepsFileMode(t *testing.T) {
 		t.Errorf("mode after rewrite = %o, want 644", got)
 	}
 }
+
+// Check reads a registration and names what differs from what this version
+// registers, without changing the file. A file never registered, or
+// registered for another profile only, has nothing to report.
+func TestCheck(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "settings.json")
+	check := func(exe, server string) []string {
+		t.Helper()
+		before, _ := os.ReadFile(file)
+		drift, err := Check(file, exe, server)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if after, _ := os.ReadFile(file); string(after) != string(before) {
+			t.Fatal("Check changed the file")
+		}
+		return drift
+	}
+	if d := check(exe, "whatsapp"); d != nil {
+		t.Fatalf("missing file: %v", d)
+	}
+	if err := os.WriteFile(file, []byte(`{"permissions": {"allow": ["Bash(ls)"]}, "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "lint"}]}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if d := check(exe, "whatsapp"); d != nil {
+		t.Fatalf("never registered: %v", d)
+	}
+	if err := Register(file, exe, "whatsapp"); err != nil {
+		t.Fatal(err)
+	}
+	if d := check(exe, "whatsapp"); d != nil {
+		t.Fatalf("fresh registration: %v", d)
+	}
+	if d := check(exe, "whatsapp-dev"); d != nil {
+		t.Fatalf("dev never registered here: %v", d)
+	}
+	if d := check(`C:\other\whatsapp-mcp.exe`, "whatsapp"); len(d) != 2 {
+		t.Fatalf("hooks on another binary: %v", d)
+	}
+
+	// The same registration with its keys in another order is the same.
+	b, _ := os.ReadFile(file)
+	var v map[string]any
+	if err := json.Unmarshal(b, &v); err != nil {
+		t.Fatal(err)
+	}
+	sorted, _ := json.Marshal(v) // encoding/json sorts the keys
+	if err := os.WriteFile(file, sorted, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if d := check(exe, "whatsapp"); d != nil {
+		t.Fatalf("reordered keys: %v", d)
+	}
+
+	// An earlier version: a narrower matcher, a missing read tool rule.
+	older := strings.Replace(string(sorted), "whatsapp_send_.*|", "whatsapp_send_message|", 1)
+	older = strings.Replace(older, `,"mcp__whatsapp__whatsapp_get_media"`, "", 1)
+	if older == string(sorted) || strings.Contains(older, "get_media") {
+		t.Fatalf("test edit did not apply: %s", older)
+	}
+	if err := os.WriteFile(file, []byte(older), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d := check(exe, "whatsapp")
+	if len(d) != 2 || !strings.Contains(d[0], "PreToolUse") || d[1] != "no allow rule for mcp__whatsapp__whatsapp_get_media" {
+		t.Fatalf("older registration: %q", d)
+	}
+
+	if err := os.WriteFile(file, []byte(`{"hooks": `), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Check(file, exe, "whatsapp"); err == nil {
+		t.Fatal("invalid JSON accepted")
+	}
+}

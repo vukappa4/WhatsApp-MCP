@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/vukappa4/whatsapp-mcp/internal/claudecode"
 	"github.com/vukappa4/whatsapp-mcp/internal/config"
 	"github.com/vukappa4/whatsapp-mcp/internal/store"
 )
@@ -119,5 +121,57 @@ func TestHookSubcommandsEndToEnd(t *testing.T) {
 	// A misregistered gate blocks instead of passing.
 	if _, code := run("pre-toll", pre); code != 2 {
 		t.Fatalf("unknown hook exit %d, want 2", code)
+	}
+}
+
+// The hook subcommands are a permanent contract: update never rewrites the
+// settings.json setup-claude wrote, so a binary must run the hooks every
+// earlier version registered, hook user-prompt and hook pre-tool, and the
+// ones this version registers. Both exit 0 on valid input; an unknown
+// subcommand exits 2 and would block every prompt or send.
+func TestRegisteredHookSubcommandsExist(t *testing.T) {
+	dir := t.TempDir()
+	tempAppDir(t, dir)
+	file := filepath.Join(dir, "settings.json")
+	if err := claudecode.Register(file, filepath.Join(dir, exeName), "whatsapp"); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var s struct {
+		Hooks map[string][]struct {
+			Hooks []struct{ Args []string }
+		}
+	}
+	if err := json.Unmarshal(b, &s); err != nil {
+		t.Fatal(err)
+	}
+	inputs := map[string]map[string]any{
+		"user-prompt": {"session_id": "sess-1", "hook_event_name": "UserPromptSubmit", "prompt": "ciao", "cwd": dir},
+		"pre-tool": {"session_id": "sess-1", "hook_event_name": "PreToolUse", "tool_name": "mcp__whatsapp__whatsapp_send_message",
+			"tool_input": map[string]any{"to": "p_1", "text": "ciao"}, "tool_use_id": "toolu_1", "cwd": dir},
+	}
+	registered := [][]string{{"hook", "user-prompt"}, {"hook", "pre-tool"}}
+	for _, groups := range s.Hooks {
+		for _, g := range groups {
+			for _, h := range g.Hooks {
+				registered = append(registered, h.Args)
+			}
+		}
+	}
+	if len(registered) != 4 {
+		t.Fatalf("registered hooks: %v", registered)
+	}
+	for _, args := range registered {
+		if len(args) != 2 || args[0] != "hook" || inputs[args[1]] == nil {
+			t.Fatalf("hook args %v: not a known subcommand", args)
+		}
+		in, _ := json.Marshal(inputs[args[1]])
+		var out bytes.Buffer
+		if code := hookCmd(args[1:], bytes.NewReader(in), &out); code != 0 {
+			t.Errorf("hook %s exit %d: %s", args[1], code, out.String())
+		}
 	}
 }

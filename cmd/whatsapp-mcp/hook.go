@@ -14,6 +14,9 @@ import (
 // it prints an "ask" decision for anything it cannot check, and exits 2
 // (Claude Code blocks the call) when it cannot even print that. An unknown
 // subcommand exits 2 too: a misregistered gate blocks instead of passing.
+// The two names are permanent: update replaces the binary but never the
+// settings.json that setup-claude wrote, so every future binary runs the
+// hooks every earlier one registered.
 func hookCmd(args []string, stdin io.Reader, stdout io.Writer) int {
 	if len(args) != 1 {
 		return 2

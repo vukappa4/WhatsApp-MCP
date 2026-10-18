@@ -4,12 +4,14 @@
 package claudecode
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -160,6 +162,91 @@ func Unregister(file, server, keepExe string) error {
 		}
 		return nil
 	})
+}
+
+// Check compares the settings file at file with what Register writes for
+// exe and server, without changing anything, and describes each
+// difference: a hook not as this version registers it (arguments,
+// matcher, timeout, failure mode or binary) and a read tool without its
+// allow rule. A file without any whatsapp-mcp hook was never registered:
+// it has no differences. Allow rules count only when the file has some of
+// server's.
+func Check(file, exe, server string) ([]string, error) {
+	b, err := os.ReadFile(file)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	root, err := parseObject(b)
+	if err != nil {
+		return nil, fmt.Errorf("%s is not valid JSON: %w", file, err)
+	}
+	hs, _ := root.vals["hooks"].(*object)
+	if hs == nil {
+		return nil, nil
+	}
+	// ours holds, per event, the matcher groups with a whatsapp-mcp hook.
+	ours := map[string][]any{}
+	for _, ev := range hs.keys {
+		l, _ := hs.vals[ev].([]any)
+		for _, g := range l {
+			group, ok := g.(*object)
+			if !ok {
+				continue
+			}
+			inner, _ := group.vals["hooks"].([]any)
+			if slices.ContainsFunc(inner, isOurHook) {
+				ours[ev] = append(ours[ev], group)
+			}
+		}
+	}
+	if len(ours) == 0 {
+		return nil, nil
+	}
+	var drift []string
+	want := hookGroups(exe)
+	for _, ev := range hookEvents {
+		if !slices.ContainsFunc(ours[ev], func(g any) bool { return sameJSON(g, want[ev]) }) {
+			drift = append(drift, fmt.Sprintf("the %s hook is not the one this version registers", ev))
+		}
+	}
+	for _, ev := range hs.keys {
+		if _, ok := ours[ev]; ok && !slices.Contains(hookEvents, ev) {
+			drift = append(drift, fmt.Sprintf("a whatsapp-mcp hook runs on %s, which this version does not use", ev))
+		}
+	}
+	perms, _ := root.vals["permissions"].(*object)
+	var allow []any
+	if perms != nil {
+		allow, _ = perms.vals["allow"].([]any)
+	}
+	registered := slices.ContainsFunc(allow, func(r any) bool {
+		s, _ := r.(string)
+		return strings.HasPrefix(s, "mcp__"+server+"__")
+	})
+	for _, r := range allowRules(server) {
+		if registered && !slices.Contains(allow, any(r)) {
+			drift = append(drift, "no allow rule for "+r)
+		}
+	}
+	return drift, nil
+}
+
+// sameJSON reports whether two values encode to the same JSON, whatever
+// the key order.
+func sameJSON(a, b any) bool {
+	var va, vb any
+	ea, err := encode(a)
+	if err != nil || json.Unmarshal(ea, &va) != nil {
+		return false
+	}
+	eb, err := encode(b)
+	if err != nil || json.Unmarshal(eb, &vb) != nil {
+		return false
+	}
+	return reflect.DeepEqual(va, vb)
 }
 
 // withoutOurHooks is the event's list of matcher groups with every hook
