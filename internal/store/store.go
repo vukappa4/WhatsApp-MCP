@@ -35,10 +35,12 @@ func uriPath(path string) string {
 	return (&url.URL{Path: filepath.ToSlash(path)}).EscapedPath()
 }
 
-// DB is data.db.
+// DB is data.db. QueryContext and QueryRowContext reuse prepared
+// statements; transactions and ExecContext prepare every time.
 type DB struct {
 	*sql.DB
-	Path string
+	Path  string
+	stmts stmtCache
 }
 
 // Open opens data.db and applies pending migrations.

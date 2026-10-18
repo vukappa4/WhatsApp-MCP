@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"strings"
 	"unicode"
 )
@@ -495,9 +494,12 @@ func SearchMessages(ctx context.Context, e Execer, q SearchQuery) (hits []Search
 			args = append(args, q.AnchorTS, q.AnchorTS, q.AnchorID)
 		}
 	} else if q.Offset > 0 {
-		paging = fmt.Sprintf(" OFFSET %d", q.Offset)
+		paging = " OFFSET ?"
 	}
 	args = append(args, q.Limit+1)
+	if paging != "" {
+		args = append(args, q.Offset)
+	}
 	rows, err := e.QueryContext(ctx, `SELECT `+messageColumns+`, `+excerpts+` `+q.from()+` `+messageJoinsOnM+
 		` WHERE `+where+` ORDER BY `+order+` LIMIT ?`+paging, args...)
 	if err != nil {
