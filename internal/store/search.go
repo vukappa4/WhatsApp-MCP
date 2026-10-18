@@ -38,17 +38,23 @@ func queryPersons(ctx context.Context, e Execer, columns, where string, args ...
 	withLastAt := strings.HasSuffix(columns, lastAtColumn)
 	for rows.Next() {
 		var c PersonCandidate
-		dest := []any{&c.ID, &c.Name, &c.Source, &c.Phone, &c.IsMe, &c.Saved,
-			&c.FullName, &c.FirstName, &c.BusinessName, &c.PushName}
-		if withLastAt {
-			dest = append(dest, &c.LastAt)
-		}
-		if err := rows.Scan(dest...); err != nil {
+		if err := scanCandidate(rows, &c, withLastAt); err != nil {
 			return nil, err
 		}
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// scanCandidate scans nameColumns, then lastAtColumn when withLastAt, after
+// the destinations in lead.
+func scanCandidate(rows *sql.Rows, c *PersonCandidate, withLastAt bool, lead ...any) error {
+	dest := append(lead, &c.ID, &c.Name, &c.Source, &c.Phone, &c.IsMe, &c.Saved,
+		&c.FullName, &c.FirstName, &c.BusinessName, &c.PushName)
+	if withLastAt {
+		dest = append(dest, &c.LastAt)
+	}
+	return rows.Scan(dest...)
 }
 
 // AllPersonNames returns every person that has a name or a phone number,
@@ -117,11 +123,50 @@ func PersonsByPhone(ctx context.Context, e Execer, digits string) ([]PersonCandi
 		"+"+digits, digits+"@s.whatsapp.net")
 }
 
-// PersonsByFormerPhone returns persons whose LID once had the number +digits
-// that another person holds now.
-func PersonsByFormerPhone(ctx context.Context, e Execer, digits string) ([]PersonCandidate, error) {
-	return queryCandidates(ctx, e, `p.id IN (SELECT jl.person_id FROM number_links n JOIN jids jl ON jl.jid = n.lid WHERE n.pn = ?1)
-		AND p.id NOT IN (SELECT person_id FROM jids WHERE jid = ?1)`, digits+"@s.whatsapp.net")
+// NumberMatch says how a person matched a whole number. The values are the
+// literals PersonsByNumber selects.
+type NumberMatch int
+
+const (
+	MatchPhone  NumberMatch = 1 // the primary number or a phone JID
+	MatchFormer NumberMatch = 2 // a number their LID once had that another person holds now
+	MatchLID    NumberMatch = 3 // the LID
+)
+
+// NumberCandidate is a person matched by a whole number.
+type NumberCandidate struct {
+	PersonCandidate
+	Match NumberMatch
+}
+
+// PersonsByNumber matches a whole number in one query: persons whose
+// primary number is +digits or who own the phone JID digits@s.whatsapp.net
+// (MatchPhone), persons whose LID once had that number while another person
+// holds it now (MatchFormer), and the owner of the LID lid@lid (MatchLID).
+// A person appears once per way it matches.
+func PersonsByNumber(ctx context.Context, e Execer, digits, lid string) ([]NumberCandidate, error) {
+	cols := nameColumns + `, ` + lastAtColumn
+	rows, err := e.QueryContext(ctx, `SELECT 1, `+cols+` FROM persons p
+		WHERE p.phone_e164 = ?1 OR p.id IN (SELECT person_id FROM jids WHERE jid = ?2)
+		UNION ALL SELECT 2, `+cols+` FROM persons p
+		WHERE p.id IN (SELECT jl.person_id FROM number_links n JOIN jids jl ON jl.jid = n.lid WHERE n.pn = ?2)
+		AND p.id NOT IN (SELECT person_id FROM jids WHERE jid = ?2)
+		UNION ALL SELECT 3, `+cols+` FROM persons p
+		WHERE p.id IN (SELECT person_id FROM jids WHERE jid = ?3)`,
+		"+"+digits, digits+"@s.whatsapp.net", lid+"@lid")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []NumberCandidate
+	for rows.Next() {
+		var c NumberCandidate
+		if err := scanCandidate(rows, &c.PersonCandidate, true, &c.Match); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }
 
 // PersonsByPhonePart returns persons whose number contains digits.

@@ -622,6 +622,30 @@ func TestStatusCapsGaps(t *testing.T) {
 	}
 }
 
+// whatsapp_status states the last history sync blob with its progress and
+// the legacy import summary, and leaves the import line out without one.
+func TestStatusShowsHistorySyncAndImport(t *testing.T) {
+	db := seed(t)
+	ctx := context.Background()
+	cs := connect(t, db)
+	text, _ := call(t, cs, toolStatus, nil)
+	if !strings.Contains(text, "History sync: none received yet\n") || strings.Contains(text, "Legacy import") {
+		t.Fatalf("fresh database:\n%s", text)
+	}
+	for k, v := range map[string]string{store.KeyHistorySyncAt: strconv.FormatInt(t0.Unix(), 10),
+		store.KeyHistorySyncState: "RECENT 40%", store.KeyImportLegacy: "12 fake messages imported"} {
+		if err := store.SetState(ctx, db, k, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	text, _ = call(t, cs, toolStatus, nil)
+	for _, want := range []string{`\nHistory sync: last blob [^\n]+ \(RECENT 40%\)\n`, `\nLegacy import: 12 fake messages imported\n`} {
+		if !regexp.MustCompile(want).MatchString(text) {
+			t.Fatalf("status lacks %s:\n%s", want, text)
+		}
+	}
+}
+
 // Trimming a long page around a message keeps that message, cutting both sides.
 func TestReadChatAroundKeepsAnchor(t *testing.T) {
 	db := seed(t)

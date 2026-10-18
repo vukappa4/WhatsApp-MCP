@@ -187,8 +187,6 @@ func (s *Server) status(ctx context.Context, _ *mcp.CallToolRequest, _ statusIn)
 		return nil, err
 	}
 	histAt := d.HistorySyncAt
-	histState, _, _ := store.GetState(ctx, s.DB, store.KeyHistorySyncState)
-	imported, _, _ := store.GetState(ctx, s.DB, store.KeyImportLegacy)
 
 	var b strings.Builder
 	b.WriteString(fresh + "\n")
@@ -243,10 +241,10 @@ func (s *Server) status(ctx context.Context, _ *mcp.CallToolRequest, _ statusIn)
 	if histAt.IsZero() {
 		b.WriteString("History sync: none received yet\n")
 	} else {
-		fmt.Fprintf(&b, "History sync: last blob %s (%s)\n", fmtTS(histAt.Unix(), now), histState)
+		fmt.Fprintf(&b, "History sync: last blob %s (%s)\n", fmtTS(histAt.Unix(), now), stats.HistorySyncState)
 	}
-	if imported != "" {
-		fmt.Fprintf(&b, "Legacy import: %s\n", imported)
+	if stats.LegacyImport != "" {
+		fmt.Fprintf(&b, "Legacy import: %s\n", stats.LegacyImport)
 	}
 	if s.Media != nil {
 		ms, err := s.Media.Status(ctx)

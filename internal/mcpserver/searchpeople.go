@@ -121,22 +121,18 @@ func (s *Server) matchPeople(ctx context.Context, query string) ([]personMatch, 
 		}
 	case phoneDigits(q) != "":
 		raw := onlyDigits(q)
-		cs, err := store.PersonsByPhone(ctx, s.DB, phoneDigits(q))
+		// A bare long number may also be a LID.
+		ns, err := store.PersonsByNumber(ctx, s.DB, phoneDigits(q), raw)
 		if err != nil {
 			return nil, err
 		}
-		add(cs, scorePhone)
-		if cs, err = store.PersonsByFormerPhone(ctx, s.DB, phoneDigits(q)); err != nil {
-			return nil, err
+		score := map[store.NumberMatch]int{store.MatchPhone: scorePhone, store.MatchFormer: scoreFormer, store.MatchLID: scoreID}
+		for _, n := range ns {
+			add([]store.PersonCandidate{n.PersonCandidate}, score[n.Match])
 		}
-		add(cs, scoreFormer)
-		// A bare long number may also be a LID.
-		if cs, err = store.PersonsByJID(ctx, s.DB, raw+"@lid"); err != nil {
-			return nil, err
-		}
-		add(cs, scoreID)
 		if len(byScore) == 0 {
-			if cs, err = store.PersonsByPhonePart(ctx, s.DB, raw); err != nil {
+			cs, err := store.PersonsByPhonePart(ctx, s.DB, raw)
+			if err != nil {
 				return nil, err
 			}
 			add(cs, scorePhonePart)

@@ -541,9 +541,11 @@ type Stats struct {
 	Persons, Chats, Messages, Media int
 	OldestTS, NewestTS              int64
 	UnnamedChats                    int
+	HistorySyncState, LegacyImport  string // the KeyHistorySyncState and KeyImportLegacy values, "" when missing
 }
 
-// GetStats counts persons, chats and messages and the covered time range.
+// GetStats counts persons, chats and messages, the covered time range, and
+// reads the history sync and legacy import state.
 func GetStats(ctx context.Context, e Execer) (Stats, error) {
 	var s Stats
 	err := e.QueryRowContext(ctx, `SELECT
@@ -551,7 +553,9 @@ func GetStats(ctx context.Context, e Execer) (Stats, error) {
 		COALESCE((SELECT MIN(ts) FROM messages), 0), COALESCE((SELECT MAX(ts) FROM messages), 0),
 		(SELECT COUNT(*) FROM chats c LEFT JOIN persons p ON p.id = c.person_id
 			WHERE ((c.kind = 'dm' AND p.name_source IN ('', 'phone')) OR (c.kind != 'dm' AND c.name = ''))
-			AND EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id))`).
-		Scan(&s.Persons, &s.Chats, &s.Messages, &s.Media, &s.OldestTS, &s.NewestTS, &s.UnnamedChats)
+			AND EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id)),
+		COALESCE((SELECT value FROM sync_state WHERE key = ?), ''), COALESCE((SELECT value FROM sync_state WHERE key = ?), '')`,
+		KeyHistorySyncState, KeyImportLegacy).
+		Scan(&s.Persons, &s.Chats, &s.Messages, &s.Media, &s.OldestTS, &s.NewestTS, &s.UnnamedChats, &s.HistorySyncState, &s.LegacyImport)
 	return s, err
 }

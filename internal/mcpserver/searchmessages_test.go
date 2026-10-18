@@ -1,6 +1,7 @@
 package mcpserver
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -79,6 +80,16 @@ func TestSearchMessages(t *testing.T) {
 	text, _ = search(map[string]any{"query": "perche", "from": "niccolo"})
 	if !strings.Contains(text, "from p_") || !strings.Contains(text, "Niccolò D'Amico (+39 333 555 5555)") {
 		t.Fatalf("resolved sender not restated:\n%s", text)
+	}
+	// A cursor page restates the sender the same way as the first page.
+	text, _ = search(map[string]any{"query": "perche", "from": "niccolo", "limit": 1})
+	from := regexp.MustCompile(`from p_\d+ Niccolò D'Amico \(\+39 333 555 5555\)`).FindString(text)
+	cur := cursorIn(nextCursor, text)
+	if from == "" || cur == "" {
+		t.Fatalf("first page of 1 lacks the sender or a cursor:\n%s", text)
+	}
+	if text, _ = search(map[string]any{"cursor": cur}); !strings.Contains(text, from) {
+		t.Fatalf("cursor page does not restate %q:\n%s", from, text)
 	}
 	text, _ = search(map[string]any{"query": "perche", "in_chat": "Calcetto"})
 	if !strings.Contains(text, `Search "perche" in c_`) || !strings.Contains(text, "Calcetto</untrusted_wa") ||

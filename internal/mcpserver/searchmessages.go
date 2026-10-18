@@ -34,6 +34,7 @@ const (
 
 func (s *Server) searchMessages(ctx context.Context, _ *mcp.CallToolRequest, in searchMessagesIn) (*mcp.CallToolResult, error) {
 	c := cursor{Tool: toolSearchMessages}
+	var sender *store.PersonCandidate // the resolved from person on a first page
 	if in.Cursor != "" {
 		var err error
 		if c, err = decodeCursor(in.Cursor, toolSearchMessages); err != nil {
@@ -60,7 +61,7 @@ func (s *Server) searchMessages(ctx context.Context, _ *mcp.CallToolRequest, in 
 			if p == nil {
 				return errResult("%s", msg)
 			}
-			c.Person = p.ID
+			c.Person, sender = p.ID, p
 		}
 		if in.InChat != "" {
 			chat, msg := s.resolveChat(ctx, in.InChat)
@@ -172,7 +173,7 @@ func (s *Server) searchMessages(ctx context.Context, _ *mcp.CallToolRequest, in 
 
 	var b strings.Builder
 	b.WriteString(fresh + "\n")
-	desc, err := s.describeSearch(ctx, w, c, q, chats)
+	desc, err := s.describeSearch(ctx, w, c, q, sender, chats)
 	if err != nil {
 		return nil, err
 	}
@@ -236,8 +237,9 @@ func (s *Server) searchMessages(ctx context.Context, _ *mcp.CallToolRequest, in 
 }
 
 // describeSearch restates the query and the resolved filters, so a wrong
-// person or chat pick is visible. chats holds the in_chat chat when it exists.
-func (s *Server) describeSearch(ctx context.Context, w wrapper, c cursor, q store.SearchQuery, chats map[int64]store.ChatRow) (string, error) {
+// person or chat pick is visible. sender is the from person when the caller
+// already has it; chats holds the in_chat chat when it exists.
+func (s *Server) describeSearch(ctx context.Context, w wrapper, c cursor, q store.SearchQuery, sender *store.PersonCandidate, chats map[int64]store.ChatRow) (string, error) {
 	var parts []string
 	if c.Query != "" {
 		parts = append(parts, fmt.Sprintf("Search %q", c.Query))
@@ -245,9 +247,14 @@ func (s *Server) describeSearch(ctx context.Context, w wrapper, c cursor, q stor
 		parts = append(parts, "Messages")
 	}
 	if q.PersonID != 0 {
-		p, found, err := store.PersonCandidateByID(ctx, s.DB, q.PersonID)
-		if err != nil {
-			return "", err
+		p, found := store.PersonCandidate{}, false
+		if sender != nil {
+			p, found = *sender, true
+		} else {
+			var err error
+			if p, found, err = store.PersonCandidateByID(ctx, s.DB, q.PersonID); err != nil {
+				return "", err
+			}
 		}
 		if found {
 			parts = append(parts, "from "+personID(p.ID)+" "+w.label(&p.PersonRef))
