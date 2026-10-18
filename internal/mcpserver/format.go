@@ -181,7 +181,7 @@ func parseShown(s string, now time.Time) (time.Time, bool) {
 					// Parsed as year 0, a leap year: rebuild in now's year
 					// and reject 29 Feb when that year has none.
 					loc := rome
-					if clock != " 15:04" && clock != "" {
+					if strings.HasSuffix(clock, "-07:00") {
 						loc = fixedZone(t)
 					}
 					y := time.Date(now.In(rome).Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), 0, 0, loc)
@@ -189,6 +189,11 @@ func parseShown(s string, now time.Time) (time.Time, bool) {
 						return time.Time{}, false
 					}
 					t = y
+				}
+				// time.Parse ignores the weekday: a wrong one means the
+				// caller has another day in mind.
+				if day != "2 Jan" && !strings.EqualFold(s[:3], t.Weekday().String()[:3]) {
+					return time.Time{}, false
 				}
 				return t, true
 			}
@@ -218,6 +223,8 @@ func sanitize(s string) string {
 		case r == 0x200D: // ZWJ joins emoji sequences
 		case unicode.Is(unicode.Cf, r): // ZWSP, LRM/RLM, LRE..RLO, isolates, BOM, soft hyphen, tag chars...
 			continue
+		case r == 0x2065 || r >= 0xFFF0 && r <= 0xFFF8 || r >= 0xE0000 && r <= 0xE0FFF && !unicode.Is(unicode.Mn, r):
+			continue // unassigned, but Unicode reserves them to render as nothing
 		case r == 0x2028 || r == 0x2029:
 			r = '\n'
 		}
