@@ -7,9 +7,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"runtime"
@@ -70,7 +72,7 @@ type ghRelease struct {
 }
 
 // fakeGitHub serves one release like the GitHub API (latest and by tag)
-// and its downloads, and records every path asked for.
+// and its downloads at GitHub's paths, and records every path asked for.
 type fakeGitHub struct {
 	srv     *httptest.Server
 	mu      sync.Mutex
@@ -131,6 +133,7 @@ func (g *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		files[release.ChecksumsName] = checksums(sums)
 	}
 	api := "/repos/" + releaseRepo + "/releases/"
+	dl := "/" + releaseRepo + "/releases/download/" + rel.Tag + "/"
 	switch {
 	case strings.HasPrefix(r.URL.Path, api) && status != 0:
 		for k, v := range headers {
@@ -145,11 +148,11 @@ func (g *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		assets := []asset{}
 		for n, b := range files {
-			assets = append(assets, asset{n, g.srv.URL + "/download/" + rel.Tag + "/" + n, len(b)})
+			assets = append(assets, asset{n, g.srv.URL + dl + n, len(b)})
 		}
 		json.NewEncoder(w).Encode(map[string]any{"tag_name": rel.Tag, "prerelease": rel.Prerelease, "draft": false,
 			"html_url": "https://github.com/" + releaseRepo + "/releases/tag/" + rel.Tag, "assets": assets})
-	case strings.HasPrefix(r.URL.Path, "/download/"+rel.Tag+"/") && files[path.Base(r.URL.Path)] != nil:
+	case strings.HasPrefix(r.URL.Path, dl) && files[path.Base(r.URL.Path)] != nil:
 		w.Write(files[path.Base(r.URL.Path)])
 	default:
 		http.NotFound(w, r)
@@ -262,7 +265,7 @@ func TestUpdateInstallsVerifiedRelease(t *testing.T) {
 	want := []string{
 		fmt.Sprintf("Profile unit-test-update: installed v0.2.0 (%s). Latest release: v0.3.0.\n", e.installed),
 		fmt.Sprintf("Downloading %s v0.3.0 (%d MB)...\n", e.asset, (len(e.bin)+500_000)/1_000_000),
-		"SHA-256 verified against checksums.txt.\nInstalling v0.3.0 with the new binary:\nDaemon running from ",
+		"SHA-256 verified against checksums.txt.\nInstalling v0.3.0 with the new binary. Do not close this window until it ends:\nDaemon running from ",
 		"Updated profile unit-test-update: v0.2.0 -> v0.3.0.\n",
 	}
 	for _, w := range want {
@@ -278,9 +281,9 @@ func TestUpdateInstallsVerifiedRelease(t *testing.T) {
 	}
 }
 
-// --data-dir and --debug reach the install; stale download folders of
-// killed updates go, recent ones (another update running) stay.
-func TestUpdateForwardsFlagsAndCleansStaleDownloads(t *testing.T) {
+// --debug reaches the install; stale download folders of killed updates
+// go, recent ones (another update running) stay.
+func TestUpdateForwardsDebugAndCleansStaleDownloads(t *testing.T) {
 	e := newUpdateEnv(t, "v0.2.0", "v0.3.0")
 	stale, recent := filepath.Join(e.root, "update-111"), filepath.Join(e.root, "update-222")
 	for _, d := range []string{stale, recent} {
@@ -292,15 +295,37 @@ func TestUpdateForwardsFlagsAndCleansStaleDownloads(t *testing.T) {
 	if err := os.Chtimes(stale, old, old); err != nil {
 		t.Fatal(err)
 	}
-	e.o.c = common{dataDir: filepath.Join(e.root, "elsewhere"), debug: true}
+	e.o.c = common{debug: true}
 	if err := e.run(); err != nil {
 		t.Fatalf("%v\n%s", err, e.out.String())
 	}
-	if got, want := e.installArgs(t), "install --profile unit-test-update --data-dir "+filepath.Join(e.root, "elsewhere")+" --debug"; got != want {
+	if got, want := e.installArgs(t), "install --profile unit-test-update --debug"; got != want {
 		t.Errorf("install ran as %q, want %q", got, want)
 	}
 	if l := e.leftovers(); len(l) != 1 || l[0] != recent {
 		t.Errorf("download folders = %v, want only %s", l, recent)
+	}
+}
+
+// The installed daemon always runs on the profile's own data dir, so
+// update refuses --data-dir before anything else.
+func TestUpdateRefusesDataDir(t *testing.T) {
+	e := newUpdateEnv(t, "v0.2.0", "v0.3.0")
+	dir := filepath.Join(e.root, "elsewhere")
+	cfg, err := config.New(testProfile, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.o.cfg, e.o.c = cfg, common{dataDir: dir}
+	for _, check := range []bool{false, true} {
+		e.o.Check = check
+		err := e.run()
+		if err == nil || err.Error() != "update does not take --data-dir: it updates the installed profile, whose daemon always uses unit-test-update's own data dir" {
+			t.Fatalf("--check %v: err = %v", check, err)
+		}
+	}
+	if len(e.gh.requested()) != 0 || e.installArgs(t) != "" {
+		t.Fatal("went further than the flags")
 	}
 }
 
@@ -400,7 +425,7 @@ func TestUpdateRefusesBadDownloads(t *testing.T) {
 		e.gh.set(ghRelease{Tag: "v0.3.0", Files: map[string][]byte{e.asset: bad}, Sums: map[string][]byte{e.asset: e.bin}})
 		err := e.run()
 		if err == nil || !strings.HasPrefix(err.Error(), e.asset+": SHA-256 ") ||
-			!strings.HasSuffix(err.Error(), ": the download is corrupted or was tampered with. Nothing was installed.") {
+			!strings.HasSuffix(err.Error(), ": the download is corrupted or was altered on the way. Nothing was installed.") {
 			t.Fatalf("err = %v", err)
 		}
 		if e.installArgs(t) != "" || len(e.leftovers()) != 0 {
@@ -480,22 +505,110 @@ func TestUpdateNotInstalled(t *testing.T) {
 	}
 }
 
-// A pair, reingest or unlink holding the profile (no daemon.pid) would
-// make install wait minutes for nothing: update refuses before asking
-// GitHub.
+// A pair, reingest or unlink holding the profile while no daemon runs
+// would make install wait minutes for nothing: update refuses before
+// asking GitHub. daemon.pid counts only when it names a running
+// whatsapp-mcp binary: it outlives a daemon killed hard.
 func TestUpdateRefusesWhileAnotherCommandHoldsTheProfile(t *testing.T) {
-	e := newUpdateEnv(t, "v0.2.0", "v0.3.0")
-	lock, err := instance.Acquire(string(testProfile))
+	for _, tc := range []struct {
+		name string
+		pid  func(t *testing.T) int // 0: no daemon.pid
+		runs bool
+	}{
+		{"no daemon.pid", nil, false},
+		{"dead pid", func(t *testing.T) int {
+			cmd := sleeper(t, "whatsapp-mcp.exe", "1ms")
+			if err := cmd.Wait(); err != nil {
+				t.Fatal(err)
+			}
+			return cmd.Process.Pid
+		}, false},
+		{"pid of another program", func(t *testing.T) int { return sleeper(t, "other.exe", "1m").Process.Pid }, false},
+		{"running daemon", func(t *testing.T) int { return sleeper(t, "whatsapp-mcp.exe", "1m").Process.Pid }, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newUpdateEnv(t, "v0.2.0", "v0.3.0")
+			if tc.pid != nil {
+				pid := strconv.Itoa(tc.pid(t))
+				if err := os.WriteFile(filepath.Join(e.o.cfg.DataDir, "daemon.pid"), []byte(pid), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			lock, err := instance.Acquire(string(testProfile))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer lock.Release()
+			err = e.run()
+			if tc.runs {
+				if err != nil || e.installArgs(t) == "" {
+					t.Fatalf("with the daemon running: %v\n%s", err, e.out.String())
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "holds profile unit-test-update: let it finish") {
+				t.Fatalf("err = %v", err)
+			}
+			if len(e.gh.requested()) != 0 {
+				t.Fatal("asked GitHub")
+			}
+		})
+	}
+}
+
+// sleeper starts a copy of this test binary called name that sleeps for d,
+// and kills it when the test ends.
+func sleeper(t *testing.T, name, d string) *exec.Cmd {
+	t.Helper()
+	self, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer lock.Release()
-	if err := e.run(); err == nil || !strings.Contains(err.Error(), "holds profile unit-test-update: let it finish") {
-		t.Fatalf("err = %v", err)
+	exe := filepath.Join(t.TempDir(), name)
+	if err := copyFile(self, exe); err != nil {
+		t.Fatal(err)
 	}
-	if len(e.gh.requested()) != 0 {
-		t.Fatal("asked GitHub")
+	cmd := exec.Command(exe)
+	cmd.Env = append(os.Environ(), "WHATSAPP_MCP_TEST_SLEEP="+d)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	return cmd
+}
+
+// A Ctrl-C while the downloaded binary reports its version ends the probe
+// too: update says it was interrupted, not that the binary is wrong.
+func TestUpdateInterruptedDuringVersionProbe(t *testing.T) {
+	e := newUpdateEnv(t, "v0.2.0", "v0.3.0")
+	t.Setenv("WHATSAPP_MCP_TEST_FAKE_VERSION", "v0.0.9") // what a probe cut short could report
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	e.o.Out = cancelOn{&e.out, "SHA-256 verified", cancel}
+	err := update(ctx, e.o)
+	if err == nil || err.Error() != "interrupted: nothing was installed" {
+		t.Fatalf("err = %v\n%s", err, e.out.String())
+	}
+	if e.installArgs(t) != "" || len(e.leftovers()) != 0 {
+		t.Fatal("install ran or the download stayed")
+	}
+}
+
+// cancelOn writes to w and calls cancel once a write contains s.
+type cancelOn struct {
+	w      io.Writer
+	s      string
+	cancel func()
+}
+
+func (c cancelOn) Write(b []byte) (int, error) {
+	if strings.Contains(string(b), c.s) {
+		c.cancel()
+	}
+	return c.w.Write(b)
 }
 
 // GitHub's rate limit and an unreachable GitHub say what to do.
@@ -507,13 +620,16 @@ func TestUpdateGitHubFailures(t *testing.T) {
 	e.gh.mu.Unlock()
 	err := e.run()
 	want := "GitHub's API rate limit is reached (60 requests an hour per network without login). Try again after 15:42, or download " +
-		e.asset + " from https://github.com/vukappa4/WhatsApp-MCP/releases/latest and run its install --profile unit-test-update."
-	if err == nil || !strings.HasPrefix(err.Error(), want) {
+		e.asset + " of https://github.com/vukappa4/WhatsApp-MCP/releases/latest and check its SHA-256 as " +
+		"https://github.com/vukappa4/WhatsApp-MCP/blob/main/INSTALL.md#2-download says, then run its install --profile unit-test-update."
+	if err == nil || err.Error() != want {
 		t.Fatalf("err = %v\nwant %s", err, want)
 	}
-	if runtime.GOOS == "darwin" && !strings.Contains(err.Error(), "curl -LO https://github.com/vukappa4/WhatsApp-MCP/releases/latest/download/"+e.asset) {
-		t.Fatalf("no curl hint on macOS: %v", err)
+	e.o.Tag = "v0.3.0"
+	if err := e.run(); err == nil || !strings.Contains(err.Error(), " of https://github.com/vukappa4/WhatsApp-MCP/releases/tag/v0.3.0 and check its SHA-256 as ") {
+		t.Fatalf("--version: %v", err)
 	}
+	e.o.Tag = ""
 	e.gh.srv.Close()
 	if err := e.run(); err == nil || !strings.HasPrefix(err.Error(), "contact GitHub: ") || !strings.HasSuffix(err.Error(), ". Behind a proxy, set HTTPS_PROXY.") {
 		t.Fatalf("closed server: %v", err)

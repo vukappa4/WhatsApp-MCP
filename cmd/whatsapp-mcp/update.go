@@ -30,12 +30,16 @@ var releaseAPIBase = "https://api.github.com"
 
 const releaseRepo = "vukappa4/WhatsApp-MCP"
 
+// installDownloadStep is INSTALL.md's step that downloads a release binary
+// and checks its SHA-256 by hand.
+const installDownloadStep = "https://github.com/" + releaseRepo + "/blob/main/INSTALL.md#2-download"
+
 // updateOptions is one update run; tests fill it directly.
 type updateOptions struct {
 	cfg     *config.Config
 	c       common
 	Check   bool   // report only
-	Force   bool   // install whatever the installed version is
+	Force   bool   // install over a build from source, the same version or a newer one
 	Tag     string // install this release instead of the latest
 	APIBase string
 	HTTP    *http.Client // nil: release.NewHTTP
@@ -48,7 +52,7 @@ func updateCmd(args []string) error {
 	var o updateOptions
 	cfg, c, err := flags("update", args, func(fs *flag.FlagSet) {
 		fs.BoolVar(&o.Check, "check", false, "only report whether a newer release exists")
-		fs.BoolVar(&o.Force, "force", false, "install even a build from source, the same version or an older one")
+		fs.BoolVar(&o.Force, "force", false, "also replace a build from source, the same version, or a newer one with the latest release")
 		fs.StringVar(&o.Tag, "version", "", "install this release tag (v0.2.0, v0.3.0-rc.1) instead of the latest")
 	})
 	if err != nil {
@@ -66,6 +70,12 @@ func updateCmd(args []string) error {
 // one running this update) and restarts the daemon.
 func update(ctx context.Context, o updateOptions) error {
 	out, p := o.Out, o.cfg.Profile
+	// The installed daemon always runs on the profile's own data dir: with
+	// another, update would find no daemon there, and install would wait
+	// for one that never starts.
+	if o.c.dataDir != "" {
+		return fmt.Errorf("update does not take --data-dir: it updates the installed profile, whose daemon always uses %s's own data dir", p)
+	}
 	asset, err := release.AssetName(runtime.GOOS, runtime.GOARCH)
 	if err != nil {
 		return fmt.Errorf("update supports Windows and macOS: %w", err)
@@ -87,13 +97,11 @@ func update(ctx context.Context, o updateOptions) error {
 			cur = v
 		}
 	}
-	// A pair, reingest, unlink or import-legacy holds the profile without a
-	// daemon.pid: install would wait minutes for a daemon that is not there,
-	// then fail.
-	if ok && !o.Check && instance.Held(string(p)) {
-		if _, err := daemonPID(o.cfg); err != nil {
-			return fmt.Errorf("another whatsapp-mcp command (pair, reingest, unlink or import-legacy) holds profile %s: let it finish, then update", p)
-		}
+	// A pair, reingest, unlink or import-legacy holds the profile while no
+	// daemon runs: install would wait minutes for a daemon that is not
+	// there, then fail.
+	if ok && !o.Check && instance.Held(string(p)) && !daemonRuns(o.cfg) {
+		return fmt.Errorf("another whatsapp-mcp command (pair, reingest, unlink or import-legacy) holds profile %s: let it finish, then update", p)
 	}
 
 	client := &release.Client{APIBase: o.APIBase, Repo: releaseRepo, HTTP: o.HTTP,
@@ -198,8 +206,13 @@ func update(ctx context.Context, o updateOptions) error {
 		return err
 	}
 	// Run it before touching anything: a binary for another architecture,
-	// one macOS refuses to run, or a mislabelled asset stops here.
-	if got, err := installedVersion(newExe); err != nil || got != r.Tag {
+	// one macOS refuses to run, or a mislabelled asset stops here. A Ctrl-C
+	// also reaches the probe, which then fails: say what happened.
+	got, err := installedVersion(newExe)
+	if ctx.Err() != nil {
+		return errors.New("interrupted: nothing was installed")
+	}
+	if err != nil || got != r.Tag {
 		if err != nil {
 			got = err.Error()
 		}
@@ -210,7 +223,7 @@ func update(ctx context.Context, o updateOptions) error {
 		fmt.Fprintf(out, "Installing %s, older than the installed %s. If %s changed the database, %s will not start and install fails after 3 minutes: then run update again to go back.\n",
 			r.Tag, cur, cur, r.Tag)
 	}
-	fmt.Fprintf(out, "Installing %s with the new binary:\n", r.Tag)
+	fmt.Fprintf(out, "Installing %s with the new binary. Do not close this window until it ends:\n", r.Tag)
 	if err := handOver(newExe, o); err != nil {
 		return fmt.Errorf("the new binary's install failed (%w): its output above says how far it got", err)
 	}
@@ -219,6 +232,18 @@ func update(ctx context.Context, o updateOptions) error {
 		fmt.Fprintln(out, notes)
 	}
 	return nil
+}
+
+// daemonRuns reports whether the profile's daemon.pid names a running
+// whatsapp-mcp binary. The file outlives a daemon that was killed hard, and
+// its pid may since belong to any process.
+func daemonRuns(cfg *config.Config) bool {
+	pid, err := daemonPID(cfg)
+	if err != nil || pid <= 0 || !processAlive(pid) {
+		return false
+	}
+	img, err := processImage(pid)
+	return err == nil && isDaemonImage(img)
 }
 
 // describeVersion names a version that is not a release.
@@ -239,9 +264,9 @@ func githubError(ctx context.Context, err error, asset, tag string, p config.Pro
 	}
 	var rl *release.RateLimitError
 	var ne *release.NetError
-	page, dl := "releases/latest", "releases/latest/download/"
+	page := "releases/latest"
 	if tag != "" {
-		page, dl = "releases/tag/"+tag, "releases/download/"+tag+"/"
+		page = "releases/tag/" + tag
 	}
 	switch {
 	case errors.As(err, &rl):
@@ -249,13 +274,9 @@ func githubError(ctx context.Context, err error, asset, tag string, p config.Pro
 		if !rl.Reset.IsZero() {
 			when = "after " + rl.Reset.Local().Format("15:04")
 		}
-		msg := fmt.Sprintf("GitHub's API rate limit is reached (60 requests an hour per network without login). Try again %s, "+
-			"or download %s from https://github.com/%s/%s and run its install --profile %s.", when, asset, releaseRepo, page, p)
-		if runtime.GOOS == "darwin" {
-			msg += fmt.Sprintf(" On macOS download it with curl, as Gatekeeper blocks a browser download: "+
-				"curl -LO https://github.com/%s/%s%s && chmod +x %s && ./%s install --profile %s", releaseRepo, dl, asset, asset, asset, p)
-		}
-		return errors.New(msg)
+		return fmt.Errorf("GitHub's API rate limit is reached (60 requests an hour per network without login). Try again %s, "+
+			"or download %s of https://github.com/%s/%s and check its SHA-256 as %s says, then run its install --profile %s.",
+			when, asset, releaseRepo, page, installDownloadStep, p)
 	case errors.As(err, &ne):
 		return fmt.Errorf("%w. Behind a proxy, set HTTPS_PROXY.", err)
 	case errors.Is(err, release.ErrNoRelease):
@@ -288,15 +309,14 @@ func installedVersion(exe string) (string, error) {
 }
 
 // handOver runs the new binary's install for the profile, in this
-// terminal, and waits for it. Ctrl-C does not interrupt it: the install
-// runs in its own process group, so the interrupt reaches only this
-// process, which says to wait. A stopped install could leave the old
-// daemon stopped and, on macOS, the LaunchAgent unloaded.
+// terminal, and waits for it. A stopped install could leave the old daemon
+// stopped and, on macOS, the LaunchAgent unloaded, so the install runs in
+// its own process group: Ctrl-C reaches only this process, which says to
+// wait. That is all the group shields: on Windows Ctrl-Break and closing
+// the console window still end the install, and on macOS closing the
+// terminal window can. Hence the message not to close the window.
 func handOver(newExe string, o updateOptions) error {
 	args := []string{"install", "--profile", string(o.cfg.Profile)}
-	if o.c.dataDir != "" {
-		args = append(args, "--data-dir", o.c.dataDir)
-	}
 	if o.c.debug {
 		args = append(args, "--debug")
 	}
@@ -315,7 +335,7 @@ func handOver(newExe string, o updateOptions) error {
 		for {
 			select {
 			case <-sig:
-				fmt.Fprintln(o.Out, "install is still running, wait for it")
+				fmt.Fprintln(o.Out, "install is still running: wait for it to end, and do not close this window")
 			case <-done:
 				return
 			}

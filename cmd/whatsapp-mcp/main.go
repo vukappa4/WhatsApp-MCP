@@ -65,7 +65,8 @@ Usage:
                                                     (SHA-256 verified against its checksums.txt) and restart the
                                                     daemon; --check only reports, --version installs that release
                                                     (also a prerelease or an older one), --force also replaces a
-                                                    build from source or the same version
+                                                    build from source, the same version, or a newer one with the
+                                                    latest release
   whatsapp-mcp uninstall     [--profile prod|dev]   remove the autostart and the installed binary, stop the daemon (data kept)
   whatsapp-mcp setup-claude  [--profile prod|dev] [--remove]
                                                     register the installed daemon with Claude Code: the MCP server
@@ -75,11 +76,11 @@ Usage:
                                                     run it once per config dir
   whatsapp-mcp hook user-prompt                     Claude Code UserPromptSubmit hook (JSON on stdin)
   whatsapp-mcp hook pre-tool                        Claude Code PreToolUse hook for the send tools
-  whatsapp-mcp version                              print the version: the release tag (v0.2.0) or dev
+  whatsapp-mcp version | --version | -v             print the version: the release tag (v0.2.0) or dev
 
 Common flags:
   --profile   prod (default) or dev
-  --data-dir  override <app dir>/<profile>
+  --data-dir  override <app dir>/<profile> (not for update)
   --debug     verbose logging
 
 App dir: %LOCALAPPDATA%\WhatsAppMCP on Windows, ~/Library/Application Support/WhatsAppMCP on macOS.
@@ -754,7 +755,7 @@ func stopDaemon(cfg *config.Config, timeout time.Duration, out io.Writer) error 
 	case errors.Is(ierr, errors.ErrUnsupported):
 	case ierr != nil:
 		return fmt.Errorf("cannot check pid %d from daemon.pid before killing it: %w", pid, ierr)
-	case !strings.HasPrefix(strings.ToLower(filepath.Base(img)), "whatsapp-mcp"):
+	case !isDaemonImage(img):
 		return fmt.Errorf("pid %d in daemon.pid is %s, not the daemon: not killing it", pid, img)
 	}
 	p, ferr := os.FindProcess(pid)
@@ -782,6 +783,12 @@ func postStop(port int, token string) error {
 		return fmt.Errorf("stop endpoint answered %s", resp.Status)
 	}
 	return nil
+}
+
+// isDaemonImage reports whether the executable path img is a whatsapp-mcp
+// binary: the installed one, a release asset or a copy moved aside.
+func isDaemonImage(img string) bool {
+	return strings.HasPrefix(strings.ToLower(filepath.Base(img)), "whatsapp-mcp")
 }
 
 // daemonPID reads the pid the running daemon wrote at startup.

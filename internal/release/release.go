@@ -14,10 +14,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 )
 
@@ -28,9 +28,20 @@ const (
 	apiTimeout    = 30 * time.Second // whole API call, body included
 	headerTimeout = 30 * time.Second // wait for response headers
 	stallTimeout  = 60 * time.Second // a download receiving no bytes for this long is cancelled
+	totalTimeout  = 15 * time.Minute // a download not finished by then is cancelled
 	maxJSON       = 1 << 20
 	maxChecksums  = 64 << 10
+	maxAsset      = 200 << 20 // a release binary is about 40 MB
 )
+
+// githubAPI is GitHub's API. Its release assets download from github.com,
+// which redirects to one of downloadHosts.
+const githubAPI = "https://api.github.com"
+
+// downloadHosts are the hosts GitHub serves release assets from: github.com
+// redirects a download to release-assets.githubusercontent.com, and before
+// that to objects.githubusercontent.com.
+var downloadHosts = []string{"github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"}
 
 // ErrNoRelease means the repository has no published release.
 var ErrNoRelease = errors.New("the repository has no published release")
@@ -71,17 +82,20 @@ func (e *StatusError) Error() string { return fmt.Sprintf("GET %s: %s", e.URL, e
 type ChecksumError struct{ Name, Got, Want, Source string }
 
 func (e *ChecksumError) Error() string {
-	return fmt.Sprintf("%s: SHA-256 %s, %s says %s: the download is corrupted or was tampered with", e.Name, e.Got, e.Source, e.Want)
+	return fmt.Sprintf("%s: SHA-256 %s, %s says %s: the download is corrupted or was altered on the way", e.Name, e.Got, e.Source, e.Want)
 }
 
-// Client reads the releases of Repo (owner/name) from the GitHub API at APIBase.
+// Client reads the releases of Repo (owner/name) from the GitHub API at
+// APIBase. It takes only assets under the repository's release downloads
+// and follows redirects only to GitHub's hosts. Any APIBase but GitHub's is
+// a test server, which then also serves the downloads.
 type Client struct {
 	APIBase   string // https://api.github.com
 	Repo      string
 	UserAgent string
 	HTTP      *http.Client // nil: NewHTTP(30s)
 
-	stall time.Duration // tests shorten the stall timeout
+	stall, total time.Duration // tests shorten the stall and total timeouts
 }
 
 // NewHTTP is a client on a copy of the default transport, so HTTPS_PROXY
@@ -93,11 +107,57 @@ func NewHTTP(header time.Duration) *http.Client {
 	return &http.Client{Transport: tr}
 }
 
+// http is the client's HTTP client with its redirect policy.
 func (c *Client) http() *http.Client {
 	if c.HTTP == nil {
 		c.HTTP = NewHTTP(headerTimeout)
 	}
-	return c.HTTP
+	hc := *c.HTTP
+	hc.CheckRedirect = c.checkRedirect
+	return &hc
+}
+
+// downloadBase is where the release downloads of APIBase's repositories
+// are: github.com for GitHub's API, the server itself for a test server.
+func (c *Client) downloadBase() string {
+	base := strings.TrimRight(c.APIBase, "/")
+	if base == githubAPI {
+		return "https://github.com"
+	}
+	return base
+}
+
+// downloadPrefix starts the URL of every asset of the release tagged tag.
+func (c *Client) downloadPrefix(tag string) string {
+	return c.downloadBase() + "/" + c.Repo + "/releases/download/" + tag + "/"
+}
+
+// checkRedirect follows at most 10 redirects, each to APIBase's own host
+// (GitHub's API redirects a renamed repository) or over HTTPS to one of
+// downloadHosts. A test server's downloads are on APIBase's host.
+func (c *Client) checkRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	if !c.allowedRedirect(req.URL) {
+		return fmt.Errorf("refusing a redirect to %s://%s: not a GitHub host", req.URL.Scheme, req.URL.Host)
+	}
+	return nil
+}
+
+func (c *Client) allowedRedirect(u *url.URL) bool {
+	if api, err := url.Parse(c.APIBase); err == nil && u.Scheme == api.Scheme && strings.EqualFold(u.Host, api.Host) {
+		return true
+	}
+	if u.Scheme != "https" || u.Port() != "" {
+		return false
+	}
+	for _, h := range downloadHosts {
+		if strings.EqualFold(u.Hostname(), h) {
+			return true
+		}
+	}
+	return false
 }
 
 // Release is a published release.
@@ -163,6 +223,9 @@ func (c *Client) ByTag(ctx context.Context, tag string) (*Release, error) {
 	if se := (*StatusError)(nil); errors.As(err, &se) && se.Code == http.StatusNotFound {
 		return nil, fmt.Errorf("%s: %w", tag, ErrNotFound)
 	}
+	if err == nil && r.Tag != tag {
+		return nil, fmt.Errorf("asked GitHub for release %s, it answered with %s", tag, r.Tag)
+	}
 	return r, err
 }
 
@@ -191,7 +254,11 @@ func (c *Client) release(ctx context.Context, path string) (*Release, error) {
 		return nil, fmt.Errorf("GET %s: the answer names no tag", url)
 	}
 	r := &Release{Tag: in.TagName, Prerelease: in.Prerelease, Draft: in.Draft, HTMLURL: in.HTMLURL}
+	prefix := c.downloadPrefix(in.TagName)
 	for _, a := range in.Assets {
+		if len(a.URL) <= len(prefix) || !strings.EqualFold(a.URL[:len(prefix)], prefix) {
+			return nil, fmt.Errorf("GET %s: asset %s downloads from %s, not from %s", url, a.Name, a.URL, prefix)
+		}
 		r.Assets = append(r.Assets, Asset{Name: a.Name, URL: a.URL, Size: a.Size, Digest: a.Digest})
 	}
 	return r, nil
@@ -318,11 +385,15 @@ func parseChecksums(b []byte) (map[string]string, error) {
 
 // Download writes asset a to dst, a new file (mode 0700) it creates, and
 // checks it: exactly a.Size bytes, SHA-256 wantSHA, and GitHub's digest of
-// the asset when the release has one. A download receiving nothing for 60
-// seconds is cancelled. On any failure dst is removed.
+// the asset when the release has one. It refuses an asset listed larger
+// than 200 MB, and cancels a download receiving nothing for 60 seconds or
+// not finished within 15 minutes. On any failure dst is removed.
 func (c *Client) Download(ctx context.Context, a Asset, dst, wantSHA string) (err error) {
 	if a.Size <= 0 {
 		return fmt.Errorf("%s: the release lists no size", a.Name)
+	}
+	if a.Size > maxAsset {
+		return fmt.Errorf("%s: the release lists %d bytes, more than the %d MB a release binary may have", a.Name, a.Size, maxAsset>>20)
 	}
 	want := strings.ToLower(wantSHA)
 	if b, herr := hex.DecodeString(want); herr != nil || len(b) != sha256.Size {
@@ -342,18 +413,26 @@ func (c *Client) Download(ctx context.Context, a Asset, dst, wantSHA string) (er
 		}
 	}()
 
-	stall := c.stall
+	stall, total := c.stall, c.total
 	if stall == 0 {
 		stall = stallTimeout
 	}
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	var stalled atomic.Bool
-	watchdog := time.AfterFunc(stall, func() { stalled.Store(true); cancel() })
+	if total == 0 {
+		total = totalTimeout
+	}
+	errStalled, errTooLong := errors.New("stalled"), errors.New("too long")
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	ctx, cancelTotal := context.WithTimeoutCause(ctx, total, errTooLong)
+	defer cancelTotal()
+	watchdog := time.AfterFunc(stall, func() { cancel(errStalled) })
 	defer watchdog.Stop()
 	failed := func(err error) error {
-		if stalled.Load() {
+		switch context.Cause(ctx) {
+		case errStalled:
 			return fmt.Errorf("download %s: nothing received for %s", a.Name, stall)
+		case errTooLong:
+			return fmt.Errorf("download %s: not finished within %s", a.Name, total)
 		}
 		var ne *NetError
 		if errors.As(err, &ne) {

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	neturl "net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,9 +23,11 @@ func client(srv *httptest.Server) *Client {
 	return &Client{APIBase: srv.URL, Repo: repo, UserAgent: "whatsapp-mcp/test (+https://github.com/vukappa4/WhatsApp-MCP)"}
 }
 
+// latestJSON is GitHub's answer for release v0.3.0, its downloads under
+// base (%[1]s).
 const latestJSON = `{"tag_name":"v0.3.0","prerelease":false,"draft":false,"html_url":"https://github.com/vukappa4/WhatsApp-MCP/releases/tag/v0.3.0",
-"assets":[{"name":"whatsapp-mcp_windows_amd64.exe","browser_download_url":"https://example.invalid/v0.3.0/whatsapp-mcp_windows_amd64.exe","size":37,"digest":"sha256:ab"},
-{"name":"checksums.txt","browser_download_url":"https://example.invalid/v0.3.0/checksums.txt","size":10,"digest":null}],"body":"notes"}`
+"assets":[{"name":"whatsapp-mcp_windows_amd64.exe","browser_download_url":"%[1]s/vukappa4/WhatsApp-MCP/releases/download/v0.3.0/whatsapp-mcp_windows_amd64.exe","size":37,"digest":"sha256:ab"},
+{"name":"checksums.txt","browser_download_url":"%[1]s/vukappa4/WhatsApp-MCP/releases/download/v0.3.0/checksums.txt","size":10,"digest":null}],"body":"notes"}`
 
 // Latest asks the documented endpoint with GitHub's headers, a user agent
 // naming the program, and no credentials even when GITHUB_TOKEN is set.
@@ -33,7 +36,7 @@ func TestLatest(t *testing.T) {
 	var got *http.Request
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got = r
-		fmt.Fprint(w, latestJSON)
+		fmt.Fprintf(w, latestJSON, "http://"+r.Host)
 	}))
 	defer srv.Close()
 	r, err := client(srv).Latest(context.Background())
@@ -49,7 +52,7 @@ func TestLatest(t *testing.T) {
 		t.Fatalf("release %+v", r)
 	}
 	a, ok := r.Asset("whatsapp-mcp_windows_amd64.exe")
-	if !ok || a.Size != 37 || a.Digest != "sha256:ab" || a.URL != "https://example.invalid/v0.3.0/whatsapp-mcp_windows_amd64.exe" {
+	if !ok || a.Size != 37 || a.Digest != "sha256:ab" || a.URL != srv.URL+"/vukappa4/WhatsApp-MCP/releases/download/v0.3.0/whatsapp-mcp_windows_amd64.exe" {
 		t.Fatalf("asset %+v", a)
 	}
 	if c, _ := r.Asset(ChecksumsName); c.Digest != "" {
@@ -79,6 +82,105 @@ func TestByTagAndNotFound(t *testing.T) {
 	}
 	if _, err := c.Latest(context.Background()); !errors.Is(err, ErrNoRelease) {
 		t.Fatalf("no release: %v", err)
+	}
+}
+
+// ByTag refuses an answer for another release than the one asked for.
+func TestByTagRefusesAnotherRelease(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"tag_name":"v0.4.0","assets":[]}`)
+	}))
+	defer srv.Close()
+	if r, err := client(srv).ByTag(context.Background(), "v0.3.0"); err == nil || err.Error() != "asked GitHub for release v0.3.0, it answered with v0.4.0" {
+		t.Fatalf("ByTag = %+v, %v", r, err)
+	}
+}
+
+// Every asset must download from the repository's release downloads for
+// the release's tag: on GitHub https://github.com/<repo>/releases/download/<tag>/.
+func TestAssetsMustBeTheReleasesDownloads(t *testing.T) {
+	gh := &Client{APIBase: "https://api.github.com", Repo: repo}
+	if got, want := gh.downloadPrefix("v0.3.0"), "https://github.com/vukappa4/WhatsApp-MCP/releases/download/v0.3.0/"; got != want {
+		t.Fatalf("GitHub's download prefix = %s, want %s", got, want)
+	}
+	for name, url := range map[string]string{
+		"other host":   "https://example.invalid/vukappa4/WhatsApp-MCP/releases/download/v0.3.0/x.exe",
+		"other repo":   "{base}/someone/WhatsApp-MCP/releases/download/v0.3.0/x.exe",
+		"other tag":    "{base}/vukappa4/WhatsApp-MCP/releases/download/v0.2.0/x.exe",
+		"not download": "{base}/vukappa4/WhatsApp-MCP/archive/v0.3.0/x.exe",
+		"prefix only":  "{base}/vukappa4/WhatsApp-MCP/releases/download/v0.3.0/",
+		"https":        "https://{host}/vukappa4/WhatsApp-MCP/releases/download/v0.3.0/x.exe",
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				u := strings.NewReplacer("{base}", "http://"+r.Host, "{host}", r.Host).Replace(url)
+				fmt.Fprintf(w, `{"tag_name":"v0.3.0","assets":[{"name":"x.exe","browser_download_url":%q,"size":1}]}`, u)
+			}))
+			defer srv.Close()
+			if r, err := client(srv).Latest(context.Background()); err == nil || !strings.Contains(err.Error(), "asset x.exe downloads from ") {
+				t.Fatalf("Latest = %+v, %v", r, err)
+			}
+		})
+	}
+}
+
+// Redirects go only to GitHub's API and download hosts over HTTPS, or to
+// the test server APIBase names.
+func TestRedirects(t *testing.T) {
+	gh := &Client{APIBase: "https://api.github.com", Repo: repo}
+	for u, want := range map[string]bool{
+		"https://github.com/vukappa4/WhatsApp-MCP/releases/download/v1.0.0/x":                    true,
+		"https://release-assets.githubusercontent.com/github-production-release-asset/1/2?sig=x": true,
+		"https://objects.githubusercontent.com/github-production-release-asset-2e65be/1/2":       true,
+		"https://api.github.com/repositories/1/releases/latest":                                  true,
+		"https://GitHub.com/x":                          true,
+		"http://github.com/x":                           false,
+		"http://release-assets.githubusercontent.com/x": false,
+		"https://github.com:8443/x":                     false,
+		"https://github.com.evil.example/x":             false,
+		"https://evil.example/x":                        false,
+		"https://raw.githubusercontent.com/x":           false,
+		"https://uploads.github.com/x":                  false,
+	} {
+		pu, err := neturl.Parse(u)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := gh.allowedRedirect(pu); got != want {
+			t.Errorf("redirect to %s allowed = %v, want %v", u, got, want)
+		}
+	}
+
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ok":
+			hits++
+			w.Write([]byte("x"))
+		case "/" + repo + "/releases/download/v1.0.0/same":
+			http.Redirect(w, r, "/ok", http.StatusFound)
+		case "/" + repo + "/releases/download/v1.0.0/away":
+			http.Redirect(w, r, r.URL.Query().Get("to"), http.StatusFound)
+		}
+	}))
+	defer srv.Close()
+	c := client(srv)
+	base := srv.URL + "/" + repo + "/releases/download/v1.0.0/"
+	if err := c.Download(context.Background(), Asset{Name: "x", URL: base + "same", Size: 1}, filepath.Join(t.TempDir(), "x"), sha([]byte("x"))); err != nil || hits != 1 {
+		t.Fatalf("redirect on the test server: %v, %d hits", err, hits)
+	}
+	for _, to := range []string{"https://evil.example/x", "http://github.com/x", "http://localhost:1/x"} {
+		dst := filepath.Join(t.TempDir(), "x")
+		err := c.Download(context.Background(), Asset{Name: "x", URL: base + "away?to=" + neturl.QueryEscape(to), Size: 1}, dst, sha([]byte("x")))
+		if err == nil || !strings.Contains(err.Error(), "refusing a redirect to ") {
+			t.Errorf("redirect to %s: %v", to, err)
+		}
+		if _, serr := os.Stat(dst); !errors.Is(serr, os.ErrNotExist) {
+			t.Errorf("refused redirect left %s", dst)
+		}
+	}
+	if hits != 1 {
+		t.Fatalf("a refused redirect reached the server: %d hits", hits)
 	}
 }
 
@@ -218,12 +320,13 @@ func TestDownload(t *testing.T) {
 	}{
 		{"ok", serve(body), int64(len(body)), good, "", ""},
 		{"ok with digest", serve(body), int64(len(body)), strings.ToUpper(good), "sha256:" + strings.ToUpper(good), ""},
-		{"sha mismatch", serve(flipped), int64(len(body)), good, "", "checksums.txt says " + good + ": the download is corrupted or was tampered with"},
+		{"sha mismatch", serve(flipped), int64(len(body)), good, "", "checksums.txt says " + good + ": the download is corrupted or was altered on the way"},
 		{"short body", serve(body[:len(body)-1]), int64(len(body)), good, "", "the release lists"},
 		{"long body", serve(append(body, 'x')), int64(len(body)), good, "", "the release lists"},
 		{"digest mismatch", serve(body), int64(len(body)), good, "sha256:" + sha([]byte("other")), "GitHub's digest of the asset says"},
 		{"404", func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) }, int64(len(body)), good, "", "404"},
 		{"no size", serve(body), 0, good, "", "no size"},
+		{"over 200 MB", serve(body), 200<<20 + 1, good, "", "the release lists 209715201 bytes, more than the 200 MB a release binary may have"},
 		{"bad want", serve(body), int64(len(body)), "abc", "", "not a SHA-256"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -264,8 +367,8 @@ func TestDownloadRefusesExistingFile(t *testing.T) {
 	}
 }
 
-// A download that stops sending is cancelled after the stall timeout, not
-// after the total time: a slow but moving one goes on.
+// A download that stops sending is cancelled after the stall timeout; a
+// slow but moving one goes on until the total timeout.
 func TestDownloadStall(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release)
@@ -304,6 +407,21 @@ func TestDownloadStall(t *testing.T) {
 	dst = filepath.Join(t.TempDir(), "g")
 	if err := c.Download(context.Background(), Asset{Name: "g", URL: url, Size: 20}, dst, sha(body)); err != nil {
 		t.Fatalf("slow but moving download: %v", err)
+	}
+
+	// The same download is cancelled once the total time passes.
+	c.total = 300 * time.Millisecond
+	dst = filepath.Join(t.TempDir(), "h")
+	start = time.Now()
+	err = c.Download(context.Background(), Asset{Name: "h", URL: url, Size: 20}, dst, sha(body))
+	if err == nil || err.Error() != "download h: not finished within 300ms" {
+		t.Fatalf("err = %v", err)
+	}
+	if took := time.Since(start); took > 5*time.Second {
+		t.Fatalf("total timeout hit after %s", took)
+	}
+	if _, serr := os.Stat(dst); !errors.Is(serr, os.ErrNotExist) {
+		t.Fatalf("cancelled download left %s", dst)
 	}
 }
 

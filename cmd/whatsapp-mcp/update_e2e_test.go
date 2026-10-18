@@ -32,6 +32,9 @@ func TestUpdateE2E(t *testing.T) {
 	if err != nil {
 		t.Skip(err)
 	}
+	// A test killed by go test -timeout runs no Cleanup: say up front how
+	// to put a normal build back.
+	fmt.Fprintln(os.Stderr, recoveryHint(filepath.Join(os.TempDir(), "whatsapp-mcp-recover"+filepath.Ext(exeName))))
 	root, err := config.AppDir()
 	if err != nil {
 		t.Fatal(err)
@@ -69,7 +72,7 @@ func TestUpdateE2E(t *testing.T) {
 		t.Logf("$ %s %s\n%s(%v)", filepath.Base(exe), strings.Join(args, " "), b, err)
 		return string(b), err
 	}
-	stamp := func(v string) string { return "-s -w -X main.version=" + v + " -X main.releaseAPIBase=" + gh.srv.URL }
+	stamp := func(v string) string { return "-X main.version=" + v + " -X main.releaseAPIBase=" + gh.srv.URL }
 	newBin := build(filepath.Join("new", asset), stamp("v0.0.2"))
 	oldBin := build(filepath.Join("old", exeName), stamp("v0.0.1"))
 	newBytes, err := os.ReadFile(newBin)
@@ -141,7 +144,7 @@ func TestUpdateE2E(t *testing.T) {
 	gh.set(ghRelease{Tag: "v0.0.3", Files: map[string][]byte{asset: bad}, Sums: map[string][]byte{asset: newBytes}})
 	sha := fileSHA(devExe)
 	out, err = run(devExe, "update", "--profile", string(p))
-	if err == nil || !strings.Contains(out, "checksums.txt says") || !strings.Contains(out, "tampered with. Nothing was installed.") {
+	if err == nil || !strings.Contains(out, "checksums.txt says") || !strings.Contains(out, "altered on the way. Nothing was installed.") {
 		t.Fatalf("tampered update: %v", err)
 	}
 	if fileSHA(devExe) != sha {
@@ -153,6 +156,18 @@ func TestUpdateE2E(t *testing.T) {
 	if l, _ := filepath.Glob(filepath.Join(root, "update-*")); len(l) != 0 {
 		t.Errorf("download folders left: %v", l)
 	}
+}
+
+// recoveryHint is how to reinstall a normal build of dev, built to exe,
+// after TestUpdateE2E was killed before its Cleanup ran.
+func recoveryHint(exe string) string {
+	h := "TestUpdateE2E: if this test is killed before it ends, dev keeps a test build that asks a dead fake GitHub. " +
+		"Reinstall a normal build of dev from the repository root:\n"
+	if runtime.GOOS == "windows" {
+		h += fmt.Sprintf("  PowerShell: $env:CGO_ENABLED = \"0\"; go build -o \"%s\" ./cmd/whatsapp-mcp; & \"%s\" install --profile dev\n", exe, exe)
+	}
+	sh := filepath.ToSlash(exe)
+	return h + fmt.Sprintf("  sh: CGO_ENABLED=0 go build -o '%s' ./cmd/whatsapp-mcp && '%s' install --profile dev", sh, sh)
 }
 
 // fileSHA is the file's SHA-256, "" when it cannot be read.

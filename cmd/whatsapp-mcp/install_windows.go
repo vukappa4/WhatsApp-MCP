@@ -67,6 +67,18 @@ func waitExit(pid int, d time.Duration) {
 	_, _ = windows.WaitForSingleObject(h, uint32(d.Milliseconds()))
 }
 
+// processAlive reports whether process pid runs. A process that ended
+// stays openable while a handle to it is open: it is signalled.
+func processAlive(pid int) bool {
+	h, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(pid))
+	if err != nil {
+		return false
+	}
+	defer windows.CloseHandle(h)
+	ev, err := windows.WaitForSingleObject(h, 0)
+	return err == nil && ev == uint32(windows.WAIT_TIMEOUT)
+}
+
 // processImage is the full path of a running process's executable.
 func processImage(pid int) (string, error) {
 	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
