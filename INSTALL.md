@@ -50,7 +50,7 @@ curl -fLO "$u/checksums.txt"
 if grep -qxF "$(shasum -a 256 whatsapp-mcp | cut -d' ' -f1)  $a" checksums.txt; then echo "SHA-256 OK"; chmod +x whatsapp-mcp; ./whatsapp-mcp version; else echo "SHA-256 MISMATCH"; fi
 ```
 
-Worked when it prints `SHA-256 OK` and then the release version, like `v0.2.0`. On `SHA-256 MISMATCH`, delete the folder and stop: the download is corrupted or was tampered with. If Microsoft Defender removes the file or blocks it from running, stop and tell the user. Do not turn Defender off to get past it.
+Worked when it prints `SHA-256 OK` and then the release version, like `v0.2.0`. On `SHA-256 MISMATCH`, delete the folder and stop: the download is corrupted or was altered on the way. If Microsoft Defender removes the file or blocks it from running, stop and tell the user. Do not turn Defender off to get past it.
 
 Run steps 3 and 4 from this folder. They use the Windows name `.\whatsapp-mcp.exe`: on macOS write `./whatsapp-mcp`.
 
@@ -186,12 +186,13 @@ macOS:
 "$HOME/Library/Application Support/WhatsAppMCP/bin/whatsapp-mcp" update
 ```
 
-It compares the installed program's version with the latest release, downloads the release's binary for this computer, checks its SHA-256 against the release's `checksums.txt`, then runs the downloaded binary's `install`: it replaces the installed program and restarts the daemon. The pairing and the messages stay. Worked when it prints `Updated profile prod: <old> -> <new>.` or `Already up to date: <version>.`
+It compares the installed program's version with the latest release, downloads the release's binary for this computer, checks its SHA-256 against the release's `checksums.txt`, then runs the downloaded binary's `install`: it replaces the installed program and restarts the daemon. Do not close the window while that `install` runs: Ctrl-C does not stop it, but closing the window can, and may leave the daemon stopped. The pairing and the messages stay. Worked when it prints `Updated profile prod: <old> -> <new>.` or `Already up to date: <version>.`
 
 - `update --check` only reports: `Update available: <old> -> <new> ...` or `Already up to date: ...`.
 - `update --version v0.3.0` installs that release, also a prerelease or an older one. Before an older one it warns: if the newer version changed the database, the older one does not start and `install` fails after 3 minutes; then run `update` again to go back.
-- `update --force` replaces an install built from source (its `version` prints `dev`) or one too old to have a `version` command, and reinstalls the same version to repair it. Without `--force`, `update` refuses those and prints the command to run.
-- `update` makes one call to GitHub's API. GitHub allows 60 calls an hour per network without login: past that, `update` says when to try again. Behind a proxy, set `HTTPS_PROXY`.
+- `update --force` replaces an install built from source (its `version` prints `dev`) or one too old to have a `version` command, reinstalls the same version to repair it, and goes back to the latest release from a newer installed version. Without `--force`, `update` refuses the first two and prints the command to run, and leaves a newer version alone.
+- `update` makes one call to GitHub's API. GitHub allows 60 calls an hour per network without login: past that, `update` says when to try again, or download the release by hand as in step 2 and run its `install`. Behind a proxy, set `HTTPS_PROXY`.
+- `update` works on the installed profile, whose daemon always uses the profile's own data folder: it refuses `--data-dir`.
 - On macOS, `update` ends with a reminder: a Full Disk Access entry for the program stops applying after an update. If the user had added one (step 7), they remove it, add it again, then run `install` with the installed program.
 - `update` never changes the Claude Code settings. When they are older than the program, `install` prints `Claude Code settings in <folder> are older than this version: run ...`. Only then, run `setup-claude` again as in step 5, once for every Claude config folder the user uses, and tell the user to restart Claude Code.
 
