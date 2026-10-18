@@ -488,6 +488,9 @@ func TestUserPromptFiles(t *testing.T) {
 	}
 }
 
+// aceRe matches an allow ACE in SDDL and captures its SID token.
+var aceRe = regexp.MustCompile(`\(A;[^;]*;[^;]*;[^;]*;[^;]*;([^)]+)\)`)
+
 // The flag dir and files grant access to the user only.
 func TestFlagsAreUserOnly(t *testing.T) {
 	if runtime.GOOS != "windows" {
@@ -505,8 +508,14 @@ func TestFlagsAreUserOnly(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.HasPrefix(sddl, "D:P") || strings.Count(sddl, "(A;") != 1 || !strings.Contains(sddl, sid) {
+		aces := aceRe.FindAllStringSubmatch(sddl, -1)
+		if !strings.HasPrefix(sddl, "D:P") || strings.Count(sddl, "(") != 1 || len(aces) != 1 {
 			t.Errorf("%s: DACL %s, want one ACE for %s", p, sddl, sid)
+			continue
+		}
+		// SDDL writes some SIDs as aliases, like LA when the user is the built-in Administrator.
+		if got, err := canonicalSID(aces[0][1]); err != nil || got != sid {
+			t.Errorf("%s: DACL %s grants %s (%v), want %s", p, sddl, got, err, sid)
 		}
 	}
 }

@@ -15,3 +15,5 @@ func restrictToUser(path string, dir bool) error {
 func currentUserSID() (string, error) { return "", nil }
 
 func fileDACL(string) (string, error) { return "", nil }
+
+func canonicalSID(token string) (string, error) { return token, nil }

@@ -48,3 +48,13 @@ func fileDACL(path string) (string, error) {
 	}
 	return sd.String(), nil
 }
+
+// canonicalSID turns an SDDL SID token, which may be an alias like LA for
+// the built-in Administrator, into its S-1-... form (tests).
+func canonicalSID(token string) (string, error) {
+	sid, err := windows.StringToSid(token)
+	if err != nil {
+		return "", err
+	}
+	return sid.String(), nil
+}
