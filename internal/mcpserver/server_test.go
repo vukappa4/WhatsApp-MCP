@@ -417,6 +417,57 @@ func TestParseTime(t *testing.T) {
 	}
 }
 
+// TestParseShownTime proves every time and day header the server prints
+// parses back to the instant it names.
+func TestParseShownTime(t *testing.T) {
+	now := time.Date(2026, 10, 17, 23, 30, 0, 0, time.UTC) // 01:30 on 18 October in Rome
+	for in, want := range map[string]string{
+		"12 Oct 01:32":             "2026-10-11T23:32:00Z",
+		"12 oct 01:32":             "2026-10-11T23:32:00Z",
+		"3 Feb 09:05":              "2026-02-03T08:05:00Z",
+		"12 Oct 2025 01:32":        "2025-10-11T23:32:00Z",
+		"25 Oct 02:30 +02:00":      "2026-10-25T00:30:00Z",
+		"25 Oct 02:30 +01:00":      "2026-10-25T01:30:00Z",
+		"27 Oct 2024 02:30 +01:00": "2024-10-27T01:30:00Z",
+		"Tue 6 Oct":                "2026-10-05T22:00:00Z",
+		"Mon 6 Oct 2025":           "2025-10-05T22:00:00Z",
+		"6 Oct":                    "2026-10-05T22:00:00Z",
+		"6 Jan 2025":               "2025-01-05T23:00:00Z",
+		"02:30 +01:00":             "2026-10-18T01:30:00Z",
+	} {
+		got, err := parseTimeAt(in, now)
+		if err != nil || got.UTC().Format(time.RFC3339) != want {
+			t.Errorf("parseTimeAt(%q) = %v, %v; want %s", in, got.UTC(), err, want)
+		}
+	}
+	for _, in := range []string{"29 Feb", "31 Sep 10:00", "6 Foo", "Tue 6"} {
+		if _, err := parseTimeAt(in, now); err == nil {
+			t.Errorf("parseTimeAt(%q) accepted", in)
+		}
+	}
+	// Round trip: what fmtTS and fmtDay print parses back, across a year and
+	// both sides of a daylight saving fold.
+	for _, ts := range []int64{
+		time.Date(2026, 10, 25, 0, 30, 0, 0, time.UTC).Unix(),
+		time.Date(2026, 10, 25, 1, 30, 0, 0, time.UTC).Unix(),
+		time.Date(2025, 12, 31, 22, 59, 0, 0, time.UTC).Unix(),
+		time.Date(2026, 3, 29, 1, 15, 0, 0, time.UTC).Unix(),
+	} {
+		for _, n := range []time.Time{now, {}} {
+			shown := fmtTS(ts, n)
+			got, err := parseTimeAt(shown, now)
+			if err != nil || got.Unix() != ts {
+				t.Errorf("parseTimeAt(fmtTS(%d)) = parseTimeAt(%q) = %v, %v", ts, shown, got.UTC(), err)
+			}
+		}
+		day := fmtDay(ts, now)
+		got, err := parseTimeAt(day, now)
+		if y, m, d := local(ts).Date(); err != nil || !got.Equal(time.Date(y, m, d, 0, 0, 0, 0, rome)) {
+			t.Errorf("parseTimeAt(fmtDay(%d)) = parseTimeAt(%q) = %v, %v", ts, day, got, err)
+		}
+	}
+}
+
 func TestFmtTS(t *testing.T) {
 	now := time.Date(2026, 10, 18, 16, 10, 0, 0, time.UTC) // 18:10 in Rome
 	at := func(y int, m time.Month, d, h, min int) int64 {

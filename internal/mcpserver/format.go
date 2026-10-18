@@ -119,7 +119,8 @@ func parseTime(s string) (time.Time, error) { return parseTimeAt(s, time.Now()) 
 
 // parseTimeAt accepts ISO 8601 with any offset, written +02:00, +0200 or +02.
 // Values without an offset, and bare dates, are Europe/Rome; a time alone
-// (09:00, 9:05, 09:00:30) is that time today in Europe/Rome, as of now.
+// (09:00, 9:05, 09:00:30) is that time today in Europe/Rome, as of now. It
+// also accepts every form the server shows (see parseShown).
 func parseTimeAt(s string, now time.Time) (time.Time, error) {
 	s = strings.TrimSpace(s)
 	for _, date := range []string{"2006-01-02T", "2006-01-02 "} {
@@ -136,13 +137,64 @@ func parseTimeAt(s string, now time.Time) (time.Time, error) {
 			return t, nil
 		}
 	}
-	for _, l := range []string{"15:04:05", "15:04"} {
+	for _, l := range []string{"15:04:05", "15:04", "15:04 -07:00"} {
 		if c, err := time.Parse(l, s); err == nil {
+			loc := rome
+			if strings.Contains(s, " ") {
+				loc = fixedZone(c)
+			}
 			y, m, d := now.In(rome).Date()
-			return time.Date(y, m, d, c.Hour(), c.Minute(), c.Second(), 0, rome), nil
+			return time.Date(y, m, d, c.Hour(), c.Minute(), c.Second(), 0, loc), nil
 		}
 	}
-	return time.Time{}, fmt.Errorf("cannot parse time %q: use ISO 8601, e.g. 2026-10-13T09:00:00+02:00, 2026-10-13, or 09:00 for today", s)
+	if t, ok := parseShown(s, now); ok {
+		return t, nil
+	}
+	return time.Time{}, fmt.Errorf("cannot parse time %q: use ISO 8601, e.g. 2026-10-13T09:00:00+02:00, 2026-10-13, or 09:00 for today, or a time as shown, e.g. 13 Oct 09:00", s)
+}
+
+// fixedZone is t's offset as a fixed zone. time.Parse maps an offset the
+// local zone uses to that zone, which would shift a date rebuilt in it.
+func fixedZone(t time.Time) *time.Location {
+	_, off := t.Zone()
+	return time.FixedZone("", off)
+}
+
+// parseShown accepts the forms fmtTS and fmtDay print, so a shown time can be
+// passed back: "13 Oct 10:40", "13 Oct 2025 10:40", "25 Oct 02:30 +01:00",
+// "Tue 13 Oct" (midnight). Without a year it is now's year in Europe/Rome.
+func parseShown(s string, now time.Time) (time.Time, bool) {
+	for _, day := range []string{"2 Jan", "Mon 2 Jan"} {
+		for _, year := range []string{" 2006", ""} {
+			for _, clock := range []string{" 15:04 -07:00", " 15:04", ""} {
+				var t time.Time
+				var err error
+				if strings.HasSuffix(clock, "-07:00") {
+					t, err = time.Parse(day+year+clock, s)
+				} else {
+					t, err = time.ParseInLocation(day+year+clock, s, rome)
+				}
+				if err != nil {
+					continue
+				}
+				if year == "" {
+					// Parsed as year 0, a leap year: rebuild in now's year
+					// and reject 29 Feb when that year has none.
+					loc := rome
+					if clock != " 15:04" && clock != "" {
+						loc = fixedZone(t)
+					}
+					y := time.Date(now.In(rome).Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), 0, 0, loc)
+					if y.Day() != t.Day() {
+						return time.Time{}, false
+					}
+					t = y
+				}
+				return t, true
+			}
+		}
+	}
+	return time.Time{}, false
 }
 
 // tagName matches the wrapper tag name in any case inside sender text, and
