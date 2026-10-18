@@ -286,50 +286,34 @@ func GetPeopleActivity(ctx context.Context, e Execer, personIDs []int64, maxGrou
 		return nil, err
 	}
 
-	var chatIDs []int64
-	err = eachRow(ctx, e, `SELECT m.sender_person_id, m.chat_id, COUNT(*), MAX(m.ts) FROM messages m JOIN chats c ON c.id = m.chat_id
-		WHERE m.sender_person_id IN (`+in+`) AND c.kind != 'dm'
-		GROUP BY m.sender_person_id, m.chat_id ORDER BY m.sender_person_id, MAX(m.ts) DESC, m.chat_id DESC`, args,
+	// Every group the person wrote in, most recent first, with its chat row.
+	err = eachRow(ctx, e, `SELECT `+chatColumns+`, g.pid, g.n, g.last FROM (
+			SELECT m.sender_person_id AS pid, m.chat_id AS cid, COUNT(*) AS n, MAX(m.ts) AS last
+			FROM messages m JOIN chats c ON c.id = m.chat_id
+			WHERE m.sender_person_id IN (`+in+`) AND c.kind != 'dm'
+			GROUP BY m.sender_person_id, m.chat_id) g
+		JOIN chats c ON c.id = g.cid LEFT JOIN persons p ON p.id = c.person_id
+		ORDER BY g.pid, g.last DESC, g.cid DESC`, args,
 		func(rows *sql.Rows) error {
 			var id int64
 			var g ChatActivity
-			if err := rows.Scan(&id, &g.Chat.ID, &g.Messages, &g.LastAt); err != nil {
+			c, err := scanChat(scanTail{rows, []any{&id, &g.Messages, &g.LastAt}})
+			if err != nil {
 				return err
 			}
+			g.Chat = c
 			a := act(id)
 			if a.GroupsTotal == 0 && g.LastAt > a.LastAt {
-				a.LastAt, a.LastChatID = g.LastAt, g.Chat.ID
+				a.LastAt, a.LastChatID = g.LastAt, c.ID
 			}
 			a.GroupsTotal++
 			if len(a.Groups) < maxGroups {
 				a.Groups = append(a.Groups, g)
-				chatIDs = append(chatIDs, g.Chat.ID)
 			}
 			return nil
 		})
 	if err != nil {
 		return nil, err
-	}
-
-	if len(chatIDs) > 0 {
-		in, args := idList(chatIDs)
-		chats := map[int64]ChatRow{}
-		err = eachRow(ctx, e, `SELECT `+chatColumns+` FROM chats c LEFT JOIN persons p ON p.id = c.person_id WHERE c.id IN (`+in+`)`, args,
-			func(rows *sql.Rows) error {
-				c, err := scanChat(rows)
-				chats[c.ID] = c
-				return err
-			})
-		if err != nil {
-			return nil, err
-		}
-		for _, a := range acts {
-			for i := range a.Groups {
-				if c, ok := chats[a.Groups[i].Chat.ID]; ok {
-					a.Groups[i].Chat = c
-				}
-			}
-		}
 	}
 	for id, a := range acts {
 		out[id] = *a
