@@ -18,7 +18,7 @@ type migration struct {
 
 // migrations is append-only. Entry i upgrades the schema to version i+1.
 // Never edit an applied entry: add a new one.
-var migrations = []migration{{sql: schemaV1}, {sql: schemaV2}, {sql: schemaV3}, {sql: schemaV4, noFK: true}, {sql: schemaV5}, {sql: schemaV6}, {sql: schemaV7}, {sql: schemaV8}, {sql: schemaV9}, {sql: schemaV10}, {sql: schemaV11}}
+var migrations = []migration{{sql: schemaV1}, {sql: schemaV2}, {sql: schemaV3}, {sql: schemaV4, noFK: true}, {sql: schemaV5}, {sql: schemaV6}, {sql: schemaV7}, {sql: schemaV8}, {sql: schemaV9}, {sql: schemaV10}, {sql: schemaV11}, {sql: schemaV12}}
 
 // SchemaVersion is the version a fresh database ends at.
 func SchemaVersion() int { return len(migrations) }
@@ -380,6 +380,17 @@ CREATE TRIGGER media_fts_transcript AFTER UPDATE OF transcript ON media BEGIN
 	INSERT INTO messages_fts(rowid, text, transcript)
 	SELECT id, text, COALESCE(new.transcript, '') FROM messages WHERE media_id = new.id;
 END;
+`
+
+// schemaV12: indexes for the exact-name chat lookup (FindChats), one per
+// name column, so it seeks instead of scanning every chat and person. Empty
+// names are left out: a lookup name is never empty.
+const schemaV12 = `
+CREATE INDEX chats_name ON chats(name COLLATE NOCASE) WHERE kind != 'dm';
+CREATE INDEX persons_full_name ON persons(full_name COLLATE NOCASE) WHERE full_name != '';
+CREATE INDEX persons_first_name ON persons(first_name COLLATE NOCASE) WHERE first_name != '';
+CREATE INDEX persons_push_name ON persons(push_name COLLATE NOCASE) WHERE push_name != '';
+CREATE INDEX persons_business_name ON persons(business_name COLLATE NOCASE) WHERE business_name != '';
 `
 
 // schemaV11: every observation that a LID had a phone number, with the time

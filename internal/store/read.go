@@ -240,7 +240,8 @@ func ChatByID(ctx context.Context, e Execer, id int64) (ChatRow, bool, error) {
 }
 
 // FindChats looks chats up by exact identity: person id, phone digits, or an
-// exact (case-insensitive) person or group name. Only chats that exist are returned.
+// exact (case-insensitive) person or group name. Only chats that exist are
+// returned; an empty name matches none.
 func FindChats(ctx context.Context, e Execer, personID int64, phoneDigits, exactName string) ([]ChatRow, error) {
 	var where string
 	var args []any
@@ -249,10 +250,18 @@ func FindChats(ctx context.Context, e Execer, personID int64, phoneDigits, exact
 		where, args = `c.kind = 'dm' AND c.person_id = ?`, []any{personID}
 	case phoneDigits != "":
 		where, args = `c.kind = 'dm' AND p.phone_e164 = ?`, []any{"+" + phoneDigits}
+	case exactName == "":
+		return nil, nil
 	default:
-		where = `(c.kind != 'dm' AND c.name = ?1 COLLATE NOCASE) OR (c.kind = 'dm' AND (p.display_name = ?1 COLLATE NOCASE
-			OR p.full_name = ?1 COLLATE NOCASE OR p.first_name = ?1 COLLATE NOCASE OR p.push_name = ?1 COLLATE NOCASE
-			OR p.business_name = ?1 COLLATE NOCASE))`
+		// One branch per name column, so each seeks its own index (schemaV12):
+		// SQLite scans every row for an OR across columns.
+		where = `c.id IN (SELECT id FROM chats WHERE kind != 'dm' AND name = ?1 COLLATE NOCASE
+			UNION SELECT id FROM chats WHERE kind = 'dm' AND person_id IN (
+				SELECT id FROM persons WHERE display_name = ?1 COLLATE NOCASE
+				UNION SELECT id FROM persons WHERE full_name != '' AND full_name = ?1 COLLATE NOCASE
+				UNION SELECT id FROM persons WHERE first_name != '' AND first_name = ?1 COLLATE NOCASE
+				UNION SELECT id FROM persons WHERE push_name != '' AND push_name = ?1 COLLATE NOCASE
+				UNION SELECT id FROM persons WHERE business_name != '' AND business_name = ?1 COLLATE NOCASE))`
 		args = []any{exactName}
 	}
 	return queryChats(ctx, e, where, args...)
