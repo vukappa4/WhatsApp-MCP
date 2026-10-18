@@ -13,15 +13,31 @@ Ask Claude things like "what did Marco say about Friday?", "summarize the family
 
 ## Install
 
-Requirements: Windows 10 or 11 (before Windows 11 24H2 the daemon may show a console window) or macOS 13 or later with [Homebrew](https://brew.sh), [Claude Code](https://claude.com/claude-code) 2.1.295 or later, and your phone with WhatsApp at hand.
+Requirements: Windows 10 or 11 (before Windows 11 24H2 the daemon may show a console window) or macOS 13 or later (Apple Silicon or Intel), [Claude Code](https://claude.com/claude-code) 2.1.295 or later, and your phone with WhatsApp at hand. Voice notes on macOS also need [Homebrew](https://brew.sh).
 
 The easy way: give Claude Code this link and ask it to install it.
 
 ```
-Install https://github.com/vukappa4/whatsapp-mcp for me
+Install https://github.com/vukappa4/WhatsApp-MCP for me
 ```
 
-Claude follows [INSTALL.md](INSTALL.md): it builds the program, links your phone with a QR code it opens in your browser, starts the daemon at login and connects it to Claude Code. You can follow the same steps by hand.
+Claude follows [INSTALL.md](INSTALL.md): it downloads the program for your computer from [GitHub Releases](https://github.com/vukappa4/WhatsApp-MCP/releases/latest) and checks its SHA-256, links your phone with a QR code it opens in your browser, starts the daemon at login and connects it to Claude Code. You can follow the same steps by hand, or [build from source](INSTALL.md#build-from-source).
+
+## Update
+
+Run the installed program's `update` command. Windows (PowerShell):
+
+```powershell
+& "$env:LOCALAPPDATA\WhatsAppMCP\bin\whatsapp-mcp.exe" update
+```
+
+macOS (Terminal):
+
+```sh
+"$HOME/Library/Application Support/WhatsAppMCP/bin/whatsapp-mcp" update
+```
+
+It downloads the latest release, checks its SHA-256 and restarts the daemon on it. Your pairing and messages stay. `update --check` only reports whether a newer release exists. See [INSTALL.md](INSTALL.md#update) for the other options and for moving an install built from source to releases.
 
 ## Privacy and security
 
