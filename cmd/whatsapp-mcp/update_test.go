@@ -29,7 +29,8 @@ import (
 
 // fakeBinary stands in for an installed or a release binary when
 // WHATSAPP_MCP_TEST_FAKE is set. version prints <exe>.fakeversion, failing
-// like a binary built before the version command when that file is empty;
+// like a binary built before the version command when that file is empty,
+// and failing with exit code N and message M when it holds "!N M";
 // without the file it prints WHATSAPP_MCP_TEST_FAKE_VERSION, the version
 // of the downloaded release. install writes its arguments to the file
 // WHATSAPP_MCP_TEST_FAKE_ARGV and exits with WHATSAPP_MCP_TEST_FAKE_EXIT.
@@ -47,6 +48,12 @@ func fakeBinary(args []string) int {
 		if v == "" {
 			fmt.Fprintln(os.Stderr, `unknown command "version"`)
 			return 2
+		}
+		if fail, ok := strings.CutPrefix(v, "!"); ok {
+			code, msg, _ := strings.Cut(fail, " ")
+			n, _ := strconv.Atoi(code)
+			fmt.Fprintln(os.Stderr, msg)
+			return n
 		}
 		fmt.Println(v)
 		return 0
@@ -308,20 +315,23 @@ func TestUpdateForwardsDebugAndCleansStaleDownloads(t *testing.T) {
 }
 
 // The installed daemon always runs on the profile's own data dir, so
-// update refuses --data-dir before anything else.
+// update refuses --data-dir before anything else, the folder included.
 func TestUpdateRefusesDataDir(t *testing.T) {
 	e := newUpdateEnv(t, "v0.2.0", "v0.3.0")
+	old := releaseAPIBase
+	releaseAPIBase = e.gh.srv.URL
+	t.Cleanup(func() { releaseAPIBase = old })
 	dir := filepath.Join(e.root, "elsewhere")
-	cfg, err := config.New(testProfile, dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	e.o.cfg, e.o.c = cfg, common{dataDir: dir}
-	for _, check := range []bool{false, true} {
-		e.o.Check = check
-		err := e.run()
-		if err == nil || err.Error() != "update does not take --data-dir: it updates the installed profile, whose daemon always uses unit-test-update's own data dir" {
-			t.Fatalf("--check %v: err = %v", check, err)
+	for _, args := range [][]string{
+		{"--profile", "dev", "--data-dir", dir},
+		{"--check", "--profile", "dev", "--data-dir", dir},
+	} {
+		err := updateCmd(args)
+		if err == nil || err.Error() != "update does not take --data-dir: it updates the installed profile, whose daemon always uses dev's own data dir" {
+			t.Fatalf("%v: err = %v", args, err)
+		}
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Fatalf("%v created %s (%v)", args, dir, err)
 		}
 	}
 	if len(e.gh.requested()) != 0 || e.installArgs(t) != "" {
@@ -378,6 +388,44 @@ func TestUpdateRefusesUncomparableWithoutForce(t *testing.T) {
 				t.Fatal("went further than the release lookup")
 			}
 			e.o.Force = true
+			if err := e.run(); err != nil {
+				t.Fatalf("--force: %v\n%s", err, e.out.String())
+			}
+			if e.installArgs(t) != "install --profile unit-test-update" {
+				t.Fatal("--force did not install")
+			}
+		})
+	}
+}
+
+// A version probe of the installed binary that fails for another reason
+// than a missing version command (an antivirus block, a crash) says so
+// instead of calling the binary older than the version command; update
+// still refuses without --force.
+func TestUpdateReportsAFailedVersionProbe(t *testing.T) {
+	for _, tc := range []struct{ fake, says string }{
+		{"!1 Operation did not complete successfully because the file contains a virus", `exit status 1: "Operation did not complete successfully because the file contains a virus"`},
+		{"!2 flag provided but not defined: -x", `exit status 2: "flag provided but not defined: -x"`},
+		{"!3", "exit status 3"},
+	} {
+		t.Run(tc.says, func(t *testing.T) {
+			e := newUpdateEnv(t, tc.fake, "v0.3.0")
+			err := e.run()
+			want := "the installed binary does not tell its version (run " + e.installed + " version: " + tc.says + "): " +
+				"run `whatsapp-mcp update --force --profile unit-test-update` to replace it with release v0.3.0"
+			if err == nil || err.Error() != want {
+				t.Fatalf("err = %v\nwant %s", err, want)
+			}
+			if e.installArgs(t) != "" || len(e.gh.requested()) != 1 {
+				t.Fatal("went further than the release lookup")
+			}
+			e.o.Check = true
+			e.out.Reset()
+			if err := e.run(); err != nil || e.out.String() != fmt.Sprintf("Profile unit-test-update: installed unknown (%s). Latest release: v0.3.0.\n", e.installed)+
+				"T"+want[1:]+".\n" {
+				t.Fatalf("--check: %v\n%s", err, e.out.String())
+			}
+			e.o.Check, e.o.Force = false, true
 			if err := e.run(); err != nil {
 				t.Fatalf("--force: %v\n%s", err, e.out.String())
 			}

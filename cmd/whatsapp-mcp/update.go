@@ -50,12 +50,21 @@ type updateOptions struct {
 // updateCmd replaces the profile's installed binary with a GitHub release.
 func updateCmd(args []string) error {
 	var o updateOptions
-	cfg, c, err := flags("update", args, func(fs *flag.FlagSet) {
+	cfg, c, err := parseFlags("update", args, func(fs *flag.FlagSet) {
 		fs.BoolVar(&o.Check, "check", false, "only report whether a newer release exists")
 		fs.BoolVar(&o.Force, "force", false, "also replace a build from source, the same version, or a newer one with the latest release")
 		fs.StringVar(&o.Tag, "version", "", "install this release tag (v0.2.0, v0.3.0-rc.1) instead of the latest")
 	})
 	if err != nil {
+		return err
+	}
+	// The installed daemon always runs on the profile's own data dir: with
+	// another, update would find no daemon there, and install would wait
+	// for one that never starts. Refused before any folder is created.
+	if c.dataDir != "" {
+		return fmt.Errorf("update does not take --data-dir: it updates the installed profile, whose daemon always uses %s's own data dir", cfg.Profile)
+	}
+	if err := cfg.EnsureDirs(); err != nil {
 		return err
 	}
 	o.cfg, o.c, o.APIBase, o.Out, o.Err = cfg, c, releaseAPIBase, os.Stdout, os.Stderr
@@ -70,12 +79,6 @@ func updateCmd(args []string) error {
 // one running this update) and restarts the daemon.
 func update(ctx context.Context, o updateOptions) error {
 	out, p := o.Out, o.cfg.Profile
-	// The installed daemon always runs on the profile's own data dir: with
-	// another, update would find no daemon there, and install would wait
-	// for one that never starts.
-	if o.c.dataDir != "" {
-		return fmt.Errorf("update does not take --data-dir: it updates the installed profile, whose daemon always uses %s's own data dir", p)
-	}
 	asset, err := release.AssetName(runtime.GOOS, runtime.GOARCH)
 	if err != nil {
 		return fmt.Errorf("update supports Windows and macOS: %w", err)
@@ -89,11 +92,16 @@ func update(ctx context.Context, o updateOptions) error {
 	if !ok && !o.Check {
 		return fmt.Errorf("profile %s is not installed: run `whatsapp-mcp install --profile %s` first", p, p)
 	}
+	// cur stays unknown when the installed binary does not tell its
+	// version; probeErr then says why.
 	cur := "unknown"
+	var probeErr error
 	if ok {
 		if self, err := selfPath(); err == nil && sameFile(self, installed) {
 			cur = version
-		} else if v, err := installedVersion(installed); err == nil {
+		} else if v, err := installedVersion(installed); err != nil {
+			probeErr = err
+		} else {
 			cur = v
 		}
 	}
@@ -139,8 +147,12 @@ func update(ctx context.Context, o updateOptions) error {
 	downgrade := false
 	if cv, err := release.ParseVersion(cur); err != nil {
 		if !o.Force {
-			msg := fmt.Sprintf("the installed binary is version %s, which cannot be compared with releases: run `%s --force --profile %s` to replace it with release %s",
-				describeVersion(cur), again, p, r.Tag)
+			what := "is version " + describeVersion(cur) + ", which cannot be compared with releases"
+			if probeErr != nil {
+				what = fmt.Sprintf("does not tell its version (%v)", probeErr)
+			}
+			msg := fmt.Sprintf("the installed binary %s: run `%s --force --profile %s` to replace it with release %s",
+				what, again, p, r.Tag)
 			if o.Check {
 				fmt.Fprintln(out, strings.ToUpper(msg[:1])+msg[1:]+".")
 				return nil
@@ -285,16 +297,31 @@ func githubError(ctx context.Context, err error, asset, tag string, p config.Pro
 	return err
 }
 
+// versionProbeTimeout bounds a run of a binary's version command.
+const versionProbeTimeout = 15 * time.Second
+
 // installedVersion runs exe version: a release tag, or dev for a build
-// from source. A binary built before the version command exits non-zero:
-// unknown.
+// from source. A binary built before the version command exits with code
+// 2 and `unknown command "version"`: unknown. Any other failure (blocked
+// by an antivirus, a crash, no answer) is an error.
 func installedVersion(exe string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), versionProbeTimeout)
 	defer cancel()
 	b, err := exec.CommandContext(ctx, exe, "version").Output()
+	if ctx.Err() != nil {
+		return "", fmt.Errorf("run %s version: no answer within %s", exe, versionProbeTimeout)
+	}
 	var ee *exec.ExitError
-	if errors.As(err, &ee) && ctx.Err() == nil {
-		return "unknown", nil
+	if errors.As(err, &ee) {
+		said, _, _ := strings.Cut(string(bytes.TrimSpace(ee.Stderr)), "\n")
+		said = strings.TrimSpace(said)
+		if ee.ExitCode() == 2 && strings.HasPrefix(said, `unknown command "version"`) {
+			return "unknown", nil
+		}
+		if said == "" {
+			return "", fmt.Errorf("run %s version: %w", exe, err)
+		}
+		return "", fmt.Errorf("run %s version: %w: %q", exe, err, said)
 	}
 	if err != nil {
 		return "", fmt.Errorf("run %s version: %w", exe, err)

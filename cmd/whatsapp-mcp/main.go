@@ -150,7 +150,17 @@ type common struct {
 	debug            bool
 }
 
+// flags parses a command's flags and creates the profile's directories.
 func flags(name string, args []string, extra func(*flag.FlagSet)) (*config.Config, common, error) {
+	cfg, c, err := parseFlags(name, args, extra)
+	if err != nil {
+		return nil, c, err
+	}
+	return cfg, c, cfg.EnsureDirs()
+}
+
+// parseFlags parses a command's flags and creates nothing.
+func parseFlags(name string, args []string, extra func(*flag.FlagSet)) (*config.Config, common, error) {
 	var c common
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.StringVar(&c.profile, "profile", "prod", "prod or dev")
@@ -173,7 +183,7 @@ func flags(name string, args []string, extra func(*flag.FlagSet)) (*config.Confi
 	if err != nil {
 		return nil, c, err
 	}
-	return cfg, c, cfg.EnsureDirs()
+	return cfg, c, nil
 }
 
 // openLog writes to the rotated log file and, when one exists, the console.
