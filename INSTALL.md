@@ -4,6 +4,10 @@ These steps are written for an AI agent (Claude Code) installing WhatsApp MCP fo
 
 In Git Bash on Windows (Claude Code's Bash tool), Git Bash does not understand the backslashes and `$env:` of the PowerShell commands. Run the `winget` lines as given, and write the other lines in their macOS form with three changes: set the asset with `a=whatsapp-mcp_windows_amd64.exe` (`a=whatsapp-mcp_windows_arm64.exe` when `echo $PROCESSOR_ARCHITECTURE` prints `ARM64`) in place of the `sysctl` line, name the downloaded program `whatsapp-mcp.exe` (`./whatsapp-mcp.exe pair`), and run the installed program as `"$LOCALAPPDATA/WhatsAppMCP/bin/whatsapp-mcp.exe"`.
 
+## Long commands
+
+`install` and `update` can run for many minutes. Run them in the background, or in the foreground with a timeout of at least 30 minutes, and wait until they exit by themselves. `install` waits up to about 3 minutes for the old daemon to stop and up to 3 more for the new one to start, and on macOS up to about 6 more for launchd: about 12 minutes at worst (6 on Windows). `update` first downloads for up to 15 minutes, then runs `install`: about 29 minutes at worst (23 on Windows). Never stop them before they exit: stopped between stopping the old daemon and starting the new one, they leave the daemon stopped. Claude Code's tools end a foreground command after at most 10 minutes: run them in the background there.
+
 ## 1. Check the requirements
 
 - Windows 10 or 11, or macOS 13 or later (Apple Silicon or Intel). On Windows 11 before 24H2 and on Windows 10 the daemon may show a console window: tell the user.
@@ -75,7 +79,7 @@ If the page did not open, give the user the URL the command printed. Once the ph
 
 ## 4. Install the daemon
 
-Start this step only after `pair` has exited: while it runs it holds the profile, and `install` fails after waiting minutes for it.
+Start this step only after `pair` has exited: while it runs it holds the profile, and `install` fails after waiting minutes for it. Run `install` as [Long commands](#long-commands) says: in the background, and wait until it exits.
 
 ```powershell
 .\whatsapp-mcp.exe install
@@ -88,13 +92,13 @@ It copies the program to the app folder and starts it, then keeps it running and
 
 Worked when it prints `Daemon running from ...`.
 
-Every later command runs the installed program. Delete the download folder:
+Every later command runs the installed program. Delete the download folder (after a build from source there is none, and these commands do nothing):
 
 Windows:
 
 ```powershell
 cd $HOME
-Remove-Item -Recurse -Force "$env:TEMP\whatsapp-mcp"
+if (Test-Path "$env:TEMP\whatsapp-mcp") { Remove-Item -Recurse -Force "$env:TEMP\whatsapp-mcp" }
 ```
 
 macOS:
@@ -147,13 +151,13 @@ brew install ffmpeg whisper.cpp
 
 Without Homebrew (`brew --version` fails), the user installs it from https://brew.sh first: its installer asks for their password. After a fresh Homebrew install, run `eval "$(/opt/homebrew/bin/brew shellenv)"` (Intel Macs: `eval "$(/usr/local/bin/brew shellenv)"`) in the same shell before calling `brew`.
 
-The second `install` restarts the daemon so it finds ffmpeg.
+The second `install` restarts the daemon so it finds ffmpeg. Run it as [Long commands](#long-commands) says: in the background, and wait until it exits.
 
 ## 7. Finish
 
 Tell the user to restart Claude Code, then ask something like "what are my latest WhatsApp chats?". `& "$env:LOCALAPPDATA\WhatsAppMCP\bin\whatsapp-mcp.exe" status` shows pairing, daemon and data state at any time. Logs are in `%LOCALAPPDATA%\WhatsAppMCP\prod\logs\` (macOS: `~/Library/Application Support/WhatsAppMCP/prod/logs/`).
 
-On macOS, tell the user: the first time Claude sends a file from Desktop, Documents or Downloads, macOS may ask whether whatsapp-mcp may access that folder, and they allow it. If a send fails with "macOS may not have given whatsapp-mcp access", they add `~/Library/Application Support/WhatsAppMCP/bin/whatsapp-mcp` in System Settings > Privacy & Security > Full Disk Access (press +, then Cmd+Shift+G to type the path), then run `"$HOME/Library/Application Support/WhatsAppMCP/bin/whatsapp-mcp" install`. After every update macOS may ask again, and a Full Disk Access entry stops applying: the user removes it and adds it again.
+On macOS, tell the user: the first time Claude sends a file from Desktop, Documents or Downloads, macOS may ask whether whatsapp-mcp may access that folder, and they allow it. If a send fails with "macOS may not have given whatsapp-mcp access", they add `~/Library/Application Support/WhatsAppMCP/bin/whatsapp-mcp` in System Settings > Privacy & Security > Full Disk Access (press +, then Cmd+Shift+G to type the path), then run `"$HOME/Library/Application Support/WhatsAppMCP/bin/whatsapp-mcp" install` as [Long commands](#long-commands) says. After every update macOS may ask again, and a Full Disk Access entry stops applying: the user removes it and adds it again.
 
 ## Link again
 
@@ -164,7 +168,7 @@ WhatsApp unlinks this computer when the phone stays offline for more than 14 day
 & "$env:LOCALAPPDATA\WhatsAppMCP\bin\whatsapp-mcp.exe" pair
 ```
 
-Start `pair` right after `stop`, in the background as in step 3: the autostart starts the daemon again within minutes, and a `pair` started after that fails because another process holds the profile (run both again). The user scans the QR code with the same WhatsApp number as before: another number in the same profile mixes two accounts' messages. If `pair` says `profile already paired`, run `unlink` with the installed program, then `pair` again. The WhatsApp tools are unavailable until the last step. When `pair` has exited by itself (`History sync quiet ...`), finish with:
+Start `pair` right after `stop`, in the background as in step 3: the autostart starts the daemon again within minutes, and a `pair` started after that fails because another process holds the profile (run both again). The user scans the QR code with the same WhatsApp number as before: another number in the same profile mixes two accounts' messages. If `pair` says `profile already paired`, run `unlink` with the installed program, then `pair` again. The WhatsApp tools are unavailable until the last step. When `pair` has exited by itself (`History sync quiet ...`), finish with this `install`, run as [Long commands](#long-commands) says: in the background, and wait until it exits.
 
 ```powershell
 & "$env:LOCALAPPDATA\WhatsAppMCP\bin\whatsapp-mcp.exe" install
@@ -173,6 +177,8 @@ Start `pair` right after `stop`, in the background as in step 3: the autostart s
 Worked when it prints `Daemon running from ...` and `status` shows the account. The messages stored before stay.
 
 ## Update
+
+Run `update` as [Long commands](#long-commands) says: in the background, and wait until it exits.
 
 Windows:
 
@@ -190,15 +196,15 @@ It compares the installed program's version with the latest release, downloads t
 
 - `update --check` only reports: `Update available: <old> -> <new> ...` or `Already up to date: ...`.
 - `update --version v0.3.0` installs that release, also a prerelease or an older one. Before an older one it warns: if the newer version changed the database, the older one does not start and `install` fails after 3 minutes; then run `update` again to go back.
-- `update --force` replaces an install built from source (its `version` prints `dev`) or one too old to have a `version` command, reinstalls the same version to repair it, and goes back to the latest release from a newer installed version. Without `--force`, `update` refuses the first two and prints the command to run, and leaves a newer version alone.
+- `update --force` replaces an install it cannot compare with releases: one built from source (its `version` prints `dev`), one too old to have a `version` command, or one whose `version` fails (`update` then prints why, for example an antivirus block). It also reinstalls the same version to repair it, and goes back to the latest release from a newer installed version. Without `--force`, `update` refuses an install it cannot compare and prints the command to run, and leaves a newer version alone.
 - `update` makes one call to GitHub's API. GitHub allows 60 calls an hour per network without login: past that, `update` says when to try again, or download the release by hand as in step 2 and run its `install`. Behind a proxy, set `HTTPS_PROXY`.
 - `update` works on the installed profile, whose daemon always uses the profile's own data folder: it refuses `--data-dir`.
-- On macOS, `update` ends with a reminder: a Full Disk Access entry for the program stops applying after an update. If the user had added one (step 7), they remove it, add it again, then run `install` with the installed program.
+- On macOS, `update` ends with a reminder: a Full Disk Access entry for the program stops applying after an update. If the user had added one (step 7), they remove it, add it again, then run `install` with the installed program, as [Long commands](#long-commands) says.
 - `update` never changes the Claude Code settings. When they are older than the program, `install` prints `Claude Code settings in <folder> are older than this version: run ...`. Only then, run `setup-claude` again as in step 5, once for every Claude config folder the user uses, and tell the user to restart Claude Code.
 
 ### Move from a source install
 
-An install built from source with `go build` reports `dev`, or has no `version` and `update` commands at all when it was built before releases existed. Move it to releases once: download as in step 2, run `.\whatsapp-mcp.exe install` (macOS: `./whatsapp-mcp install`) from that folder, then delete the folder as in step 4. `install` replaces only the program: the same profile keeps its pairing and its messages, and the phone stays linked. When the installed program already has an `update` command, `update --force` does the same in one command. From then on `update` keeps it current. The source folder can be deleted.
+An install built from source with `go build` reports `dev`, or has no `version` and `update` commands at all when it was built before releases existed. Move it to releases once: download as in step 2, run `.\whatsapp-mcp.exe install` (macOS: `./whatsapp-mcp install`) from that folder as [Long commands](#long-commands) says, then delete the folder as in step 4. `install` replaces only the program: the same profile keeps its pairing and its messages, and the phone stays linked. When the installed program already has an `update` command, `update --force` does the same in one command. From then on `update` keeps it current. The source folder can be deleted.
 
 ## Build from source
 

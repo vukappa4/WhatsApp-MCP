@@ -37,7 +37,7 @@ macOS (Terminal):
 "$HOME/Library/Application Support/WhatsAppMCP/bin/whatsapp-mcp" update
 ```
 
-It downloads the latest release, checks its SHA-256 and restarts the daemon on it. Your pairing and messages stay. `update --check` only reports whether a newer release exists. See [INSTALL.md](INSTALL.md#update) for the other options and for moving an install built from source to releases.
+It downloads the latest release, checks its SHA-256 and restarts the daemon on it. Your pairing and messages stay. It can take many minutes, about half an hour at worst: let it run until it ends, since stopping it midway can leave the daemon stopped. `update --check` only reports whether a newer release exists. See [INSTALL.md](INSTALL.md#update) for the other options and for moving an install built from source to releases.
 
 ## Privacy and security
 
