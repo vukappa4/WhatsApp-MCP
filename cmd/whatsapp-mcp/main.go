@@ -60,6 +60,12 @@ Usage:
   whatsapp-mcp install       [--profile prod|dev]   copy this binary to <app dir>/bin (prod) or bin-dev (dev),
                                                     register the autostart (Windows: logon task; macOS:
                                                     LaunchAgent) and (re)start the daemon
+  whatsapp-mcp update        [--profile prod|dev] [--check] [--force] [--version <vX.Y.Z>]
+                                                    replace the installed binary with the latest GitHub release
+                                                    (SHA-256 verified against its checksums.txt) and restart the
+                                                    daemon; --check only reports, --version installs that release
+                                                    (also a prerelease or an older one), --force also replaces a
+                                                    build from source or the same version
   whatsapp-mcp uninstall     [--profile prod|dev]   remove the autostart and the installed binary, stop the daemon (data kept)
   whatsapp-mcp setup-claude  [--profile prod|dev] [--remove]
                                                     register the installed daemon with Claude Code: the MCP server
@@ -105,6 +111,8 @@ func main() {
 		err = setupTranscriptionCmd(args)
 	case "install":
 		err = installCmd(args)
+	case "update":
+		err = updateCmd(args)
 	case "uninstall":
 		err = uninstallCmd(args)
 	case "setup-claude":

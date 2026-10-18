@@ -21,14 +21,19 @@ import (
 )
 
 // TestMain doubles as a helper process: with WHATSAPP_MCP_TEST_SLEEP set the
-// test binary just sleeps, standing in for a running daemon exe. Outside
-// Windows the profile locks live in the app dir, so it moves to a temp dir:
-// the real prod and dev locks are never touched.
+// test binary just sleeps, standing in for a running daemon exe; with
+// WHATSAPP_MCP_TEST_FAKE set it stands in for an installed or a release
+// binary (fakeBinary). Outside Windows the profile locks live in the app
+// dir, so it moves to a temp dir: the real prod and dev locks are never
+// touched.
 func TestMain(m *testing.M) {
 	if d := os.Getenv("WHATSAPP_MCP_TEST_SLEEP"); d != "" {
 		dur, _ := time.ParseDuration(d)
 		time.Sleep(dur)
 		os.Exit(0)
+	}
+	if os.Getenv("WHATSAPP_MCP_TEST_FAKE") != "" {
+		os.Exit(fakeBinary(os.Args[1:]))
 	}
 	if runtime.GOOS == "windows" {
 		os.Exit(m.Run())
@@ -180,7 +185,7 @@ func TestInternationalPhone(t *testing.T) {
 }
 
 // version prints the version alone on a line: the release tag the release
-// build stamps (.goreleaser.yaml), dev otherwise.
+// build stamps (.goreleaser.yaml), dev otherwise. update reads it back.
 func TestVersion(t *testing.T) {
 	var out bytes.Buffer
 	if err := versionCmd(nil, &out); err != nil || out.String() != "dev\n" {
@@ -204,5 +209,8 @@ func TestVersion(t *testing.T) {
 		if err != nil || string(b) != tag+"\n" {
 			t.Errorf("%s = %q, %v; want %q", arg, b, err, tag+"\n")
 		}
+	}
+	if v, err := installedVersion(bin); err != nil || v != tag {
+		t.Errorf("installedVersion = %q, %v; want %s", v, err, tag)
 	}
 }

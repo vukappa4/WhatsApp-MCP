@@ -9,6 +9,7 @@ Go daemon that links to WhatsApp as a device (whatsmeow), stores everything in S
 - Two installed profiles, each its own linked device: `dev` (port 8766) and `prod` (8765, in daily use). Deploy: commit, build, `<exe> install --profile dev`, check, then `--profile prod`. Never start `run` by hand for an installed profile.
 - Token and speed metrics on a synthetic fake account: `go test ./internal/mcpserver -run TestSizeReport -v` (chars and tokens of tool definitions, instructions and a probe per read tool; `-args -dump` prints the texts) and `go test ./internal/mcpserver -run '^$' -bench . -benchtime 30x` (ns/op and SQL queries/op per probe).
 - Real-data check, safe while the daemon runs: `WHATSAPP_MCP_E2E_DB=<prod data.db> go test ./internal/mcpserver -run TestRealData -v`.
+- Update E2E, which reinstalls dev from a fake GitHub and leaves prod alone: `WHATSAPP_MCP_E2E_UPDATE=dev go test ./cmd/whatsapp-mcp -run TestUpdateE2E -v -timeout 30m`.
 - After changing hooks or `setup-claude`, run `setup-claude` under both `~/.claude` and `~/.claude-work`.
 
 ## Never
