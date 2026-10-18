@@ -39,8 +39,8 @@ const (
 const githubAPI = "https://api.github.com"
 
 // downloadHosts are the hosts GitHub serves release assets from: github.com
-// redirects a download to release-assets.githubusercontent.com, and before
-// that to objects.githubusercontent.com.
+// redirects a download to release-assets.githubusercontent.com or
+// objects.githubusercontent.com.
 var downloadHosts = []string{"github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"}
 
 // ErrNoRelease means the repository has no published release.
@@ -86,8 +86,8 @@ func (e *ChecksumError) Error() string {
 }
 
 // Client reads the releases of Repo (owner/name) from the GitHub API at
-// APIBase. It takes only assets under the repository's release downloads
-// and follows redirects only to GitHub's hosts. Any APIBase but GitHub's is
+// APIBase. It takes only assets whose URL is exactly their own download
+// from the release, and follows redirects only to GitHub's hosts. Any APIBase but GitHub's is
 // a test server, which then also serves the downloads.
 type Client struct {
 	APIBase   string // https://api.github.com
@@ -242,26 +242,39 @@ func (c *Client) release(ctx context.Context, path string) (*Release, error) {
 			Digest string `json:"digest"`
 		} `json:"assets"`
 	}
-	url := strings.TrimRight(c.APIBase, "/") + "/repos/" + c.Repo + path
-	b, err := c.get(ctx, url, "application/vnd.github+json", maxJSON)
+	endpoint := strings.TrimRight(c.APIBase, "/") + "/repos/" + c.Repo + path
+	b, err := c.get(ctx, endpoint, "application/vnd.github+json", maxJSON)
 	if err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal(b, &in); err != nil {
-		return nil, fmt.Errorf("GET %s: unexpected answer: %w", url, err)
+		return nil, fmt.Errorf("GET %s: unexpected answer: %w", endpoint, err)
 	}
 	if in.TagName == "" {
-		return nil, fmt.Errorf("GET %s: the answer names no tag", url)
+		return nil, fmt.Errorf("GET %s: the answer names no tag", endpoint)
 	}
 	r := &Release{Tag: in.TagName, Prerelease: in.Prerelease, Draft: in.Draft, HTMLURL: in.HTMLURL}
 	prefix := c.downloadPrefix(in.TagName)
 	for _, a := range in.Assets {
-		if len(a.URL) <= len(prefix) || !strings.EqualFold(a.URL[:len(prefix)], prefix) {
-			return nil, fmt.Errorf("GET %s: asset %s downloads from %s, not from %s", url, a.Name, a.URL, prefix)
+		if !plainName(a.Name) {
+			return nil, fmt.Errorf("GET %s: asset name %q is not a plain file name", endpoint, a.Name)
+		}
+		// Exactly the asset's own download: a prefix alone would let
+		// .../download/<tag>/../../ reach any path of the host.
+		file := url.PathEscape(a.Name)
+		want := prefix + file
+		if len(a.URL) != len(want) || !strings.EqualFold(a.URL[:len(prefix)], prefix) || !strings.HasSuffix(a.URL, file) {
+			return nil, fmt.Errorf("GET %s: asset %s downloads from %s, not from %s", endpoint, a.Name, a.URL, want)
 		}
 		r.Assets = append(r.Assets, Asset{Name: a.Name, URL: a.URL, Size: a.Size, Digest: a.Digest})
 	}
 	return r, nil
+}
+
+// plainName reports whether name is a file name of its own: not empty, no
+// path separator, no "..".
+func plainName(name string) bool {
+	return name != "" && name != "." && !strings.ContainsAny(name, `/\`) && !strings.Contains(name, "..")
 }
 
 // get fetches url within apiTimeout and returns its body, refused when

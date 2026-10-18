@@ -96,8 +96,9 @@ func TestByTagRefusesAnotherRelease(t *testing.T) {
 	}
 }
 
-// Every asset must download from the repository's release downloads for
-// the release's tag: on GitHub https://github.com/<repo>/releases/download/<tag>/.
+// Every asset must download from exactly its own URL among the repository's
+// release downloads for the release's tag: on GitHub
+// https://github.com/<repo>/releases/download/<tag>/<name>.
 func TestAssetsMustBeTheReleasesDownloads(t *testing.T) {
 	gh := &Client{APIBase: "https://api.github.com", Repo: repo}
 	if got, want := gh.downloadPrefix("v0.3.0"), "https://github.com/vukappa4/WhatsApp-MCP/releases/download/v0.3.0/"; got != want {
@@ -110,6 +111,10 @@ func TestAssetsMustBeTheReleasesDownloads(t *testing.T) {
 		"not download": "{base}/vukappa4/WhatsApp-MCP/archive/v0.3.0/x.exe",
 		"prefix only":  "{base}/vukappa4/WhatsApp-MCP/releases/download/v0.3.0/",
 		"https":        "https://{host}/vukappa4/WhatsApp-MCP/releases/download/v0.3.0/x.exe",
+		"dot dot":      "{base}/vukappa4/WhatsApp-MCP/releases/download/v0.3.0/../../../../attacker/repo/releases/download/v0.3.0/x.exe",
+		"other asset":  "{base}/vukappa4/WhatsApp-MCP/releases/download/v0.3.0/y.exe",
+		"subfolder":    "{base}/vukappa4/WhatsApp-MCP/releases/download/v0.3.0/sub/x.exe",
+		"query":        "{base}/vukappa4/WhatsApp-MCP/releases/download/v0.3.0/x.exe?x=1",
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -121,6 +126,28 @@ func TestAssetsMustBeTheReleasesDownloads(t *testing.T) {
 				t.Fatalf("Latest = %+v, %v", r, err)
 			}
 		})
+	}
+	// An asset name with a path in it is refused, even with a URL that
+	// spells the name out under the release's downloads.
+	for _, name := range []string{"..", ".", "", "../x.exe", "x..exe", "a/x.exe", `a\x.exe`, "../../../../attacker/repo/releases/download/v0.3.0/x.exe"} {
+		t.Run("name "+name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				u := "http://" + r.Host + "/vukappa4/WhatsApp-MCP/releases/download/v0.3.0/" + name
+				fmt.Fprintf(w, `{"tag_name":"v0.3.0","assets":[{"name":%q,"browser_download_url":%q,"size":1}]}`, name, u)
+			}))
+			defer srv.Close()
+			if r, err := client(srv).Latest(context.Background()); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("asset name %q is not a plain file name", name)) {
+				t.Fatalf("Latest = %+v, %v", r, err)
+			}
+		})
+	}
+	// A name GitHub escapes in the URL is still its own download.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"tag_name":"v0.3.0","assets":[{"name":"a b.exe","browser_download_url":"http://%s/vukappa4/WhatsApp-MCP/releases/download/v0.3.0/a%%20b.exe","size":1}]}`, r.Host)
+	}))
+	defer srv.Close()
+	if r, err := client(srv).Latest(context.Background()); err != nil || len(r.Assets) != 1 {
+		t.Fatalf("escaped name: %+v, %v", r, err)
 	}
 }
 
