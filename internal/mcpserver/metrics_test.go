@@ -104,6 +104,7 @@ func probes(tb testing.TB, db *store.DB) []probe {
 	add(toolSearchMessages, "query", searchMessages(searchMessagesIn{Query: "fattura"}))
 	add(toolSearchMessages, "from", searchMessages(searchMessagesIn{From: "+39 000 000 0002"}))
 	add(toolSearchMessages, "context", searchMessages(searchMessagesIn{Query: "preventivo domani", Context: 2}))
+	add(toolSearchMessages, "newest", searchMessages(searchMessagesIn{Query: "fattura", Sort: "newest"}))
 	add(toolGetMedia, "voice", getMedia(getMediaIn{Message: voice}))
 	add(toolGetMedia, "image", getMedia(getMediaIn{Message: image}))
 	add(toolGetMedia, "document", getMedia(getMediaIn{Message: doc}))

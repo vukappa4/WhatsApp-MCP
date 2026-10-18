@@ -479,14 +479,6 @@ func CountMatches(ctx context.Context, e Execer, q SearchQuery) (int, error) {
 // page exists.
 func SearchMessages(ctx context.Context, e Execer, q SearchQuery) (hits []SearchHit, more bool, err error) {
 	where, args := q.where()
-	excerpts := `'', ''`
-	order := "m.ts DESC, m.id DESC"
-	if q.Match != "" {
-		excerpts = `snippet(messages_fts, 0, '', '', '…', 40), snippet(messages_fts, 1, '', '', '…', 40)`
-		if !q.Newest {
-			order = "bm25(messages_fts), m.ts DESC, m.id DESC"
-		}
-	}
 	paging := ""
 	if q.Match == "" || q.Newest {
 		if q.HasAnchor {
@@ -500,8 +492,32 @@ func SearchMessages(ctx context.Context, e Execer, q SearchQuery) (hits []Search
 	if paging != "" {
 		args = append(args, q.Offset)
 	}
-	rows, err := e.QueryContext(ctx, `SELECT `+messageColumns+`, `+excerpts+` `+q.from()+` `+messageJoinsOnM+
-		` WHERE `+where+` ORDER BY `+order+` LIMIT ?`+paging, args...)
+	// SQLite runs the joins for every match but computes result columns
+	// only for rows that enter the LIMIT's top-N sort. So the page is picked
+	// on ids alone and sender, media and quote are joined for its rows only.
+	// Excerpts stay in the pick when ranking by bm25, where few rows enter
+	// the sort. In newest order FTS walks matches by id, which mostly rises
+	// with time, so nearly every row enters the sort and pays for both
+	// excerpts: they come from a second walk of the matches, kept only for
+	// the page.
+	const excerpts = `snippet(messages_fts, 0, '', '', '…', 40), snippet(messages_fts, 1, '', '', '…', 40)`
+	var query string
+	switch {
+	case q.Match == "":
+		query = `SELECT ` + messageColumns + `, '', '' FROM messages m ` + messageJoinsOnM +
+			` WHERE ` + where + ` ORDER BY m.ts DESC, m.id DESC LIMIT ?`
+	case !q.Newest:
+		query = `WITH hit(id, ts, score, text_excerpt, transcript_excerpt) AS (SELECT m.id, m.ts, bm25(messages_fts) AS score, ` + excerpts + ` ` + q.from() +
+			` WHERE ` + where + ` ORDER BY score, m.ts DESC, m.id DESC LIMIT ?` + paging + `)
+			SELECT ` + messageColumns + `, hit.text_excerpt, hit.transcript_excerpt FROM hit CROSS JOIN messages m ` + messageJoinsOnM +
+			` WHERE m.id = hit.id ORDER BY hit.score, hit.ts DESC, hit.id DESC`
+	default:
+		query = `WITH hit AS (SELECT m.id, m.ts ` + q.from() + ` WHERE ` + where + ` ORDER BY m.ts DESC, m.id DESC LIMIT ?)
+			SELECT ` + messageColumns + `, ` + excerpts + ` FROM messages_fts CROSS JOIN hit CROSS JOIN messages m ` + messageJoinsOnM +
+			` WHERE messages_fts MATCH ? AND hit.id = messages_fts.rowid AND m.id = hit.id ORDER BY hit.ts DESC, hit.id DESC`
+		args = append(args, q.Match)
+	}
+	rows, err := e.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, false, err
 	}
