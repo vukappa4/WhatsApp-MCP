@@ -69,6 +69,7 @@ Usage:
                                                     run it once per config dir
   whatsapp-mcp hook user-prompt                     Claude Code UserPromptSubmit hook (JSON on stdin)
   whatsapp-mcp hook pre-tool                        Claude Code PreToolUse hook for the send tools
+  whatsapp-mcp version                              print the version: the release tag (v0.2.0) or dev
 
 Common flags:
   --profile   prod (default) or dev
@@ -110,6 +111,8 @@ func main() {
 		err = setupClaudeCmd(args)
 	case "hook":
 		os.Exit(hookCmd(args, os.Stdin, os.Stdout))
+	case "version", "--version", "-v":
+		err = versionCmd(args, os.Stdout)
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		return
@@ -121,6 +124,16 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
+}
+
+// versionCmd prints the version stamped at build time: the release tag
+// (v0.2.0, v0.2.0-rc.1), or dev for a local build.
+func versionCmd(args []string, out io.Writer) error {
+	if len(args) > 0 {
+		return fmt.Errorf("unexpected arguments: %v", args)
+	}
+	_, err := fmt.Fprintln(out, version)
+	return err
 }
 
 type common struct {

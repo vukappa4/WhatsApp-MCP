@@ -1,0 +1,43 @@
+# Release build: push a vMAJOR.MINOR.PATCH tag and .github/workflows/release.yml
+# runs GoReleaser. The asset names carry no version, so
+# https://github.com/vukappa4/WhatsApp-MCP/releases/latest/download/<asset>
+# is a stable URL: keep the names and checksums.txt as they are.
+version: 2
+
+project_name: whatsapp-mcp
+
+builds:
+  - id: whatsapp-mcp
+    main: ./cmd/whatsapp-mcp
+    binary: whatsapp-mcp
+    # cgo-free like every build of the daemon: on Windows this links the
+    # manifest (cmd/whatsapp-mcp/manifest_nocgo.go).
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Tag }}
+    goos:
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  # Raw binaries: whatsapp-mcp_windows_amd64.exe, whatsapp-mcp_darwin_arm64, ...
+  - formats: [binary]
+    name_template: "{{ .Binary }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  use: github-native
+
+release:
+  # A tag with a suffix (v0.2.0-rc.1) publishes a prerelease.
+  prerelease: auto

@@ -178,3 +178,31 @@ func TestInternationalPhone(t *testing.T) {
 		}
 	}
 }
+
+// version prints the version alone on a line: the release tag the release
+// build stamps (.goreleaser.yaml), dev otherwise.
+func TestVersion(t *testing.T) {
+	var out bytes.Buffer
+	if err := versionCmd(nil, &out); err != nil || out.String() != "dev\n" {
+		t.Fatalf("versionCmd = %q, %v; want \"dev\n\"", out.String(), err)
+	}
+	if err := versionCmd([]string{"extra"}, &out); err == nil {
+		t.Fatal("versionCmd accepted an argument")
+	}
+	if testing.Short() {
+		t.Skip("builds the binary")
+	}
+	const tag = "v0.2.0-rc.1"
+	bin := filepath.Join(t.TempDir(), exeName)
+	build := exec.Command("go", "build", "-trimpath", "-ldflags", "-s -w -X main.version="+tag, "-o", bin, ".")
+	build.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if b, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build: %v\n%s", err, b)
+	}
+	for _, arg := range []string{"version", "--version", "-v"} {
+		b, err := exec.Command(bin, arg).Output()
+		if err != nil || string(b) != tag+"\n" {
+			t.Errorf("%s = %q, %v; want %q", arg, b, err, tag+"\n")
+		}
+	}
+}
