@@ -146,9 +146,10 @@ func parseTimeAt(s string, now time.Time) (time.Time, error) {
 }
 
 // tagName matches the wrapper tag name in any case inside sender text, and
-// look-alikes such as untrusted_whatsapp. sanitize keeps the zero-width joiner
-// for emoji, so the pattern skips joiners between letters.
-var tagName = regexp.MustCompile(`(?i)` + strings.Join(strings.Split("untrusted_w", ""), `\x{200D}*`))
+// look-alikes such as untrusted_whatsapp. sanitize keeps the zero-width joiner,
+// combining marks (variation selectors, accents) and Hangul fillers, which
+// render as nothing between letters, so the pattern skips them.
+var tagName = regexp.MustCompile(`(?i)` + strings.Join(strings.Split("untrusted_w", ""), `[\x{200D}\p{M}\x{115F}\x{1160}\x{3164}\x{FFA0}]*`))
 
 // sanitize strips control, invisible and bidi formatting characters (keeping
 // newlines, tabs and the emoji zero-width joiner) and defuses the wrapper tag.
