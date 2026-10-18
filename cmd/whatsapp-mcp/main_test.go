@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -185,7 +186,10 @@ func TestInternationalPhone(t *testing.T) {
 }
 
 // version prints the version alone on a line: the release tag the release
-// build stamps (.goreleaser.yaml), dev otherwise. update reads it back.
+// build stamps (.goreleaser.yaml), dev otherwise. update reads it back. The
+// binary is built with the release's own ldflags, which keep the symbol
+// table: Microsoft Defender's machine learning flagged a stripped (-s -w)
+// build as a trojan, while unstripped builds pass.
 func TestVersion(t *testing.T) {
 	var out bytes.Buffer
 	if err := versionCmd(nil, &out); err != nil || out.String() != "dev\n" {
@@ -198,8 +202,12 @@ func TestVersion(t *testing.T) {
 		t.Skip("builds the binary")
 	}
 	const tag = "v0.2.0-rc.1"
+	ldflags := releaseLdflags(t)
+	if f := strings.Fields(ldflags); slices.Contains(f, "-s") || slices.Contains(f, "-w") {
+		t.Fatalf(".goreleaser.yaml strips the binaries (%s): Defender flags stripped builds", ldflags)
+	}
 	bin := filepath.Join(t.TempDir(), exeName)
-	build := exec.Command("go", "build", "-trimpath", "-ldflags", "-s -w -X main.version="+tag, "-o", bin, ".")
+	build := exec.Command("go", "build", "-trimpath", "-ldflags", strings.ReplaceAll(ldflags, "{{ .Tag }}", tag), "-o", bin, ".")
 	build.Env = append(os.Environ(), "CGO_ENABLED=0")
 	if b, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, b)
@@ -213,4 +221,32 @@ func TestVersion(t *testing.T) {
 	if v, err := installedVersion(bin); err != nil || v != tag {
 		t.Errorf("installedVersion = %q, %v; want %s", v, err, tag)
 	}
+}
+
+// releaseLdflags is the one ldflags entry of the release build in
+// .goreleaser.yaml.
+func releaseLdflags(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "..", ".goreleaser.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found []string
+	lines := strings.Split(strings.ReplaceAll(string(b), "\r\n", "\n"), "\n")
+	for i, l := range lines {
+		if strings.TrimSpace(l) != "ldflags:" {
+			continue
+		}
+		for _, e := range lines[i+1:] {
+			v, ok := strings.CutPrefix(strings.TrimSpace(e), "- ")
+			if !ok {
+				break
+			}
+			found = append(found, v)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf(".goreleaser.yaml: want one ldflags entry, found %q", found)
+	}
+	return found[0]
 }

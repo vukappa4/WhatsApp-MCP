@@ -1,5 +1,6 @@
-# Release build: push a vMAJOR.MINOR.PATCH tag and .github/workflows/release.yml
-# runs GoReleaser. The asset names carry no version, so
+# Release build: push a vMAJOR.MINOR.PATCH tag on a commit of main and
+# .github/workflows/release.yml runs GoReleaser. The asset names carry no
+# version, so
 # https://github.com/vukappa4/WhatsApp-MCP/releases/latest/download/<asset>
 # is a stable URL: keep the names and checksums.txt as they are.
 version: 2
@@ -17,7 +18,7 @@ builds:
     flags:
       - -trimpath
     ldflags:
-      - -s -w -X main.version={{ .Tag }}
+      - -X main.version={{ .Tag }}
     goos:
       - windows
       - darwin
@@ -41,3 +42,8 @@ changelog:
 release:
   # A tag with a suffix (v0.2.0-rc.1) publishes a prerelease.
   prerelease: auto
+  # GitHub makes every new stable release the latest: a backport tag would
+  # make releases/latest/download/<asset> serve an older build. release.yml
+  # sets MAKE_LATEST to true only for the highest vX.Y.Z tag; GoReleaser
+  # never makes a prerelease the latest.
+  make_latest: "{{ .Env.MAKE_LATEST }}"
