@@ -311,7 +311,9 @@ func (w wrapper) block(lines []string) string {
 }
 
 // name renders a person's name: plain from the address book, "~Name" (cleaned
-// and capped, like WhatsApp shows strangers) when the person chose it.
+// and capped, like WhatsApp shows strangers) when the person chose it. A
+// chosen name is sender text: bare in a block, where it cannot hold a quote,
+// and in tags outside one.
 func (w wrapper) name(p *store.PersonRef) string {
 	switch {
 	case p == nil:
@@ -323,7 +325,10 @@ func (w wrapper) name(p *store.PersonRef) string {
 	}
 	if p.Source != people.SourcePhone {
 		if n := people.ProfileName(p.Name); n != "" {
-			return n
+			if w.inBlock {
+				return n
+			}
+			return w.wrap(n)
 		}
 	}
 	if p.Phone != "" {

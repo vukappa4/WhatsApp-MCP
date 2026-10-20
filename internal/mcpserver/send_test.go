@@ -54,7 +54,7 @@ func TestSendNameNeverPicksStrangerOverContact(t *testing.T) {
 		t.Fatal(err)
 	}
 	text, isErr := call(t, e.cs, toolSendMessage, map[string]any{"to": "giulia", "text": "ciao"})
-	if !isErr || !strings.Contains(text, personID(saved)+" Giulia Verdi") || !strings.Contains(text, personID(stranger)+" ~Giulia") {
+	if bare := wrapperTag.ReplaceAllString(text, ""); !isErr || !strings.Contains(bare, personID(saved)+" Giulia Verdi") || !strings.Contains(bare, personID(stranger)+" ~Giulia") {
 		t.Fatalf("stranger vs contact:\n%s", text)
 	}
 	e.fake.onWA["393334444444"] = true
@@ -259,7 +259,7 @@ func TestSendMessageRecipients(t *testing.T) {
 
 	// An ambiguous name lists the candidates with their phones and sends nothing.
 	text, isErr := call(t, e.cs, toolSendMessage, map[string]any{"to": "marco", "text": "ciao"})
-	if !isErr || !strings.Contains(text, marcoA+" ~Marco, +39 333 111 1111") || !strings.Contains(text, marcoB+" ~Marco, +39 333 222 2222") {
+	if bare := wrapperTag.ReplaceAllString(text, ""); !isErr || !strings.Contains(bare, marcoA+" ~Marco, +39 333 111 1111") || !strings.Contains(bare, marcoB+" ~Marco, +39 333 222 2222") {
 		t.Fatalf("ambiguous:\n%s", text)
 	}
 	// Unknown names and invalid numbers are errors too.
@@ -284,7 +284,7 @@ func TestSendMessageRecipients(t *testing.T) {
 	}
 	chatA := e.id(t, "c_", `SELECT chat_id FROM messages WHERE wa_id = 'A2'`)
 	mid := e.id(t, "m_", `SELECT id FROM messages WHERE wa_id = '3EB0SENT01'`)
-	if !strings.Contains(text, "Sent the message to ~Marco (+39 333 111 1111) in "+chatA+" at ") || !strings.HasSuffix(text, "Stored as "+mid+".") {
+	if !regexp.MustCompile(`Sent the message to <untrusted_wa n=\w+>~Marco</untrusted_wa n=\w+> \(\+39 333 111 1111\) in `+chatA+` at `).MatchString(text) || !strings.HasSuffix(text, "Stored as "+mid+".") {
 		t.Fatalf("result:\n%s", text)
 	}
 	if got := e.one(t, `SELECT from_me || source || text FROM messages WHERE wa_id = '3EB0SENT01'`); got != "1livearrivo alle 8" {
@@ -506,7 +506,7 @@ func TestSendFile(t *testing.T) {
 		t.Fatalf("image message = %v", img)
 	}
 	// The file name can be a sender's (files from the media folder): wrapped.
-	if !regexp.MustCompile(`Sent the photo <untrusted_wa n=(\w+)>scontrino.png</untrusted_wa n=(\w+)> to ~Marco`).MatchString(text) {
+	if !regexp.MustCompile(`Sent the photo <untrusted_wa n=(\w+)>scontrino.png</untrusted_wa n=(\w+)> to <untrusted_wa n=(\w+)>~Marco</untrusted_wa n=(\w+)>`).MatchString(text) {
 		t.Fatalf("result:\n%s", text)
 	}
 	stored := regexp.MustCompile(`Stored as m_(\d+)\.`).FindStringSubmatch(text)

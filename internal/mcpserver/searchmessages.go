@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -23,7 +24,7 @@ type searchMessagesIn struct {
 	Context        int    `json:"context,omitempty" jsonschema:"messages of the same chat shown before and after each hit, 0-3, default 0"`
 	Limit          int    `json:"limit,omitempty" jsonschema:"hits per page, 1-50, default 20 (10 with context)"`
 	Cursor         string `json:"cursor,omitempty" jsonschema:"next_cursor of the previous page; it carries query, filters, sort and context"`
-	ResponseFormat string `json:"response_format,omitempty" jsonschema:"default concise (long texts cut to an excerpt around the match); detailed gives full texts, WhatsApp ids, media details and who reacted"`
+	ResponseFormat string `json:"response_format,omitempty" jsonschema:"default concise (long texts cut to an excerpt around the match); detailed gives texts up to 4,000 characters, WhatsApp ids, media details and who reacted"`
 }
 
 // Concise bodies: a hit is cut to an excerpt around the match, a context line shorter.
@@ -170,6 +171,9 @@ func (s *Server) searchMessages(ctx context.Context, _ *mcp.CallToolRequest, in 
 	}
 	w := newWrapper(s.now())
 	full := detailed(in.ResponseFormat)
+	if full {
+		w.capText = maxDetailedText
+	}
 
 	var b strings.Builder
 	b.WriteString(fresh + "\n")
@@ -324,10 +328,17 @@ func (w wrapper) hitLines(n int, chat *store.ChatRow, h *store.SearchHit, before
 }
 
 // cutLine renders a transcript line; in concise mode a text or transcript
-// over maxText runes becomes its excerpt (or its start), marked [cut N].
+// over maxText runes becomes its excerpt (or its start), marked [cut N]. In
+// detailed mode one over w.capText keeps the capText runes around its excerpt.
 func (w wrapper) cutLine(m *store.MessageRow, full bool, maxText int, textExcerpt, transcriptExcerpt string) string {
 	s := w.shown(m, full)
 	if full {
+		if s.textCut > 0 {
+			s.text = window(m.Text, w.capText, textExcerpt)
+		}
+		if s.transcriptCut > 0 {
+			s.transcript = window(m.Transcript(), w.capText, transcriptExcerpt)
+		}
 		return w.lineOf(m, full, s)
 	}
 	if r := []rune(m.Text); len(r) > maxText {
@@ -343,4 +354,29 @@ func (w wrapper) cutLine(m *store.MessageRow, full bool, maxText int, textExcerp
 		}
 	}
 	return w.lineOf(m, false, s)
+}
+
+// window cuts s to n runes centred on excerpt, the match's FTS snippet ("…"
+// where the snippet cut), or to its start when s does not hold the excerpt.
+// "…" marks each end it cut.
+func window(s string, n int, excerpt string) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	start := 0
+	if e := strings.Trim(excerpt, "…"); e != "" {
+		if i := strings.Index(s, e); i >= 0 {
+			mid := utf8.RuneCountInString(s[:i]) + utf8.RuneCountInString(e)/2
+			start = min(max(mid-n/2, 0), len(r)-n)
+		}
+	}
+	out := string(r[start : start+n])
+	if start > 0 {
+		out = "…" + out
+	}
+	if start+n < len(r) {
+		out += "…"
+	}
+	return out
 }

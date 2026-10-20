@@ -313,9 +313,6 @@ func (s *Server) readChat(ctx context.Context, _ *mcp.CallToolRequest, in readCh
 		return textResult(b.String()), nil
 	}
 	fmt.Fprintf(&b, ". %d messages, %s to %s.\n", len(msgs), w.ts(msgs[0].TS), w.ts(msgs[len(msgs)-1].TS))
-	if chat.Kind != "dm" {
-		b.WriteString(w.participants(msgs))
-	}
 	if left > 0 {
 		fmt.Fprintf(&b, "%d more messages of this page left out to keep the answer under about 20k tokens: page with the cursors.\n", left)
 	}
@@ -324,7 +321,12 @@ func (s *Server) readChat(ctx context.Context, _ *mcp.CallToolRequest, in readCh
 	}
 
 	day := ""
-	rows := make([]string, 0, len(msgs)+8)
+	rows := make([]string, 0, len(msgs)+9)
+	if chat.Kind != "dm" {
+		if sp := w.inner().participants(msgs); sp != "" {
+			rows = append(rows, sp)
+		}
+	}
 	for i := range msgs {
 		if d := fmtDay(msgs[i].TS, w.now); d != day {
 			day = d
@@ -340,7 +342,7 @@ func (s *Server) readChat(ctx context.Context, _ *mcp.CallToolRequest, in readCh
 }
 
 // participants lists the people speaking in a group window once, so message
-// lines can use bare names.
+// lines can use bare names: the first line of the block.
 func (w wrapper) participants(msgs []store.MessageRow) string {
 	seen := map[int64]bool{}
 	var parts []string
@@ -355,7 +357,7 @@ func (w wrapper) participants(msgs []store.MessageRow) string {
 	if len(parts) == 0 {
 		return ""
 	}
-	return "Speakers: " + strings.Join(parts, "; ") + "\n"
+	return "Speakers: " + strings.Join(parts, "; ")
 }
 
 // shown is what a line shows of a message's text and transcript, with the

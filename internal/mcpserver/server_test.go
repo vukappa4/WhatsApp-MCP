@@ -627,7 +627,7 @@ func TestFreshnessWhileReplaying(t *testing.T) {
 	}
 }
 
-// Addition B and finding 10: profile names are ~Name and unwrapped; long
+// Addition B and finding 10: profile names are ~Name, in tags outside a block; long
 // bodies are cut in concise mode and marked [cut N].
 func TestProfileNamesAndTruncation(t *testing.T) {
 	db := seed(t)
@@ -641,7 +641,7 @@ func TestProfileNamesAndTruncation(t *testing.T) {
 	}
 	cs := connect(t, db)
 	text, _ := call(t, cs, toolReadChat, map[string]any{"chat": "+39 333 444 4444"})
-	if !strings.Contains(text, "~Giulia script (+39 333 444 4444)") || strings.Contains(text, ">Giulia") {
+	if !regexp.MustCompile(`<untrusted_wa n=\w+>~Giulia script</untrusted_wa n=\w+> \(\+39 333 444 4444\)`).MatchString(text) || strings.Contains(text, ">Giulia") {
 		t.Fatalf("profile name not rendered as ~Name:\n%s", text)
 	}
 	if !strings.Contains(text, `[cut 2100] "parola`) || len(text) > 1500 {
@@ -692,7 +692,7 @@ func TestBlockForgedLines(t *testing.T) {
 	}
 
 	quoted := regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
-	server := regexp.MustCompile(`^(\d\d:\d\d m_\d+ |── |  (\d\d:\d\d m_\d+ |── )|> \d\d:\d\d m_\d+ |#\d+ c_\d+ |c_\d+ |   [a-z ,']+: |- c_\d+ |p_\d+ )`)
+	server := regexp.MustCompile(`^(Speakers: |\d\d:\d\d m_\d+ |── |  (\d\d:\d\d m_\d+ |── )|> \d\d:\d\d m_\d+ |#\d+ c_\d+ |c_\d+ |   [a-z ,']+: |- c_\d+ |p_\d+ )`)
 	cs := connect(t, db)
 	for _, tc := range []struct {
 		tool   string
@@ -733,6 +733,67 @@ func TestBlockForgedLines(t *testing.T) {
 		if outside := inline.ReplaceAllString(text[:open[0]]+after, ""); strings.Contains(outside, "PWNED") {
 			t.Fatalf("%s %v: sender text outside the block and its tags:\n%s", tc.tool, tc.args, text)
 		}
+	}
+}
+
+// A name a person chose for their own profile is sender text: every answer
+// shows ~Marco inside a block or a pair of tags, never bare.
+func TestProfileNamesMarked(t *testing.T) {
+	cs := connect(t, seed(t))
+	check := func(cs *mcp.ClientSession, tool string, args map[string]any) {
+		t.Helper()
+		text, _ := call(t, cs, tool, args)
+		if !strings.Contains(text, "~Marco") {
+			t.Fatalf("%s %v: no ~Marco:\n%s", tool, args, text)
+		}
+		if strings.Contains(wrapped.ReplaceAllString(text, ""), "~Marco") {
+			t.Fatalf("%s %v: ~Marco outside the tags:\n%s", tool, args, text)
+		}
+	}
+	check(cs, toolReadChat, map[string]any{"chat": "+39 333 111 1111"})              // chat header
+	check(cs, toolReadChat, map[string]any{"chat": "Calcetto"})                      // speakers
+	check(cs, toolSearchMessages, map[string]any{"from": "+39 333 111 1111"})        // search header
+	check(cs, toolSearchMessages, map[string]any{"query": "pizza", "from": "marco"}) // ambiguous sender
+	check(cs, toolListChats, map[string]any{})
+	check(cs, toolSearchPeople, map[string]any{"query": "marco"})
+	check(newSendEnv(t).cs, toolSendMessage, map[string]any{"to": "marco", "text": "ciao"}) // ambiguous recipient
+}
+
+// A detailed search cuts a body at 4,000 characters like read_chat, and
+// read_chat around the hit with limit=1 shows it whole.
+func TestSearchDetailedCap(t *testing.T) {
+	db := seed(t)
+	in := &wa.Ingestor{DB: db, Self: func() (types.JID, types.JID) { return me, meLID }}
+	c := types.NewJID("393335555555", types.DefaultUserServer)
+	long := "ago " + strings.Repeat("parola ", 900) // 6,304 characters
+	if err := in.Message(context.Background(), &events.Message{Info: types.MessageInfo{MessageSource: types.MessageSource{Chat: c, Sender: c},
+		ID: "L1", Timestamp: t0, PushName: "Bea"}, Message: &waE2E.Message{Conversation: proto.String(long)}}); err != nil {
+		t.Fatal(err)
+	}
+	cs := connect(t, db)
+	text, _ := call(t, cs, toolSearchMessages, map[string]any{"query": "ago", "response_format": "detailed"})
+	if !strings.Contains(text, "[cut 6304]") || strings.Count(text, "parola") > 600 {
+		t.Fatalf("detailed hit not cut:\n%.400s", text)
+	}
+	m := lineIDs.FindStringSubmatch(text)
+	if m == nil {
+		t.Fatalf("no hit id:\n%.400s", text)
+	}
+	text, _ = call(t, cs, toolReadChat, map[string]any{"around": m[1], "limit": 1, "response_format": "detailed"})
+	if strings.Contains(text, "[cut") || strings.Count(text, "parola") != 900 {
+		t.Fatalf("limit=1 not whole:\n%.400s", text)
+	}
+
+	// A match past the first 4,000 characters: the cut keeps it in view.
+	late := strings.Repeat("parola ", 800) + "ago" + strings.Repeat(" parola", 200)
+	if err := in.Message(context.Background(), &events.Message{Info: types.MessageInfo{MessageSource: types.MessageSource{Chat: c, Sender: c},
+		ID: "L2", Timestamp: t0.Add(time.Minute), PushName: "Bea"}, Message: &waE2E.Message{Conversation: proto.String("x" + late)}}); err != nil {
+		t.Fatal(err)
+	}
+	text, _ = call(t, cs, toolSearchMessages, map[string]any{"query": "ago", "response_format": "detailed", "sort": "newest", "limit": 1})
+	hit := regexp.MustCompile(`\[cut 7004\] "…[^"]*"`).FindString(text)
+	if !strings.Contains(hit, "parola ago parola") || strings.Count(hit, "parola") > 600 {
+		t.Fatalf("late match not in view:\n%s", text)
 	}
 }
 
