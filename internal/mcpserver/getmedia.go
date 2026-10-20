@@ -140,7 +140,7 @@ func (s *Server) getMedia(ctx context.Context, _ *mcp.CallToolRequest, in getMed
 		b.WriteString("Caption: " + w.wrap(clip(msg.Text, 800)) + "\n")
 	}
 	if full {
-		fmt.Fprintf(&b, "WhatsApp id %s, media row %d, state %s, %d download attempts", j.WAID, j.MediaID, j.State, j.Attempts)
+		fmt.Fprintf(&b, "WhatsApp id %s, media row %d, state %s, %d download attempts", w.waID(j.WAID), j.MediaID, j.State, j.Attempts)
 		if len(j.SHA256) > 0 {
 			fmt.Fprintf(&b, ", sha256 %s", hex.EncodeToString(j.SHA256))
 		}

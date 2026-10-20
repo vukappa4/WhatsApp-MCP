@@ -607,13 +607,15 @@ func currentPhone(ctx context.Context, e store.Execer, id int64, stored string) 
 
 // ProfileName renders a self-chosen WhatsApp profile (push or business) name
 // the way WhatsApp shows people outside the address book: "~Name". Control,
-// invisible and bidi characters, newlines and angle brackets are removed,
-// spaces collapsed, and the name capped at 40 characters.
+// invisible and bidi characters, newlines, angle brackets, double quotes and
+// backslashes are removed, spaces collapsed, and the name capped at 40
+// characters. Tool output shows the name bare beside quoted sender text, so
+// it must not be able to open or close a quote.
 func ProfileName(name string) string {
 	var b strings.Builder
 	for _, r := range name {
 		switch {
-		case r == '<' || r == '>':
+		case r == '<' || r == '>' || r == '"' || r == '\\':
 			continue
 		case r == '\n' || r == '\r' || r == '\t' || r == 0x2028 || r == 0x2029:
 			b.WriteRune(' ')

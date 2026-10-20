@@ -318,10 +318,12 @@ func (s *Server) searchPeople(ctx context.Context, _ *mcp.CallToolRequest, in se
 	if err != nil {
 		return nil, err
 	}
+	var lines []string
 	for i := range page {
 		act := acts[page[i].ID]
-		b.WriteString(w.personBlock(&page[i], &act, full))
+		lines = append(lines, w.inner().personLines(&page[i], &act, full)...)
 	}
+	b.WriteString(w.block(lines) + "\n")
 	if more {
 		next := cursor{Tool: toolSearchPeople, Query: query, Off: offset + len(page)}.encode()
 		fmt.Fprintf(&b, "More people: call again with cursor=%q, or narrow the query.", next)
@@ -329,9 +331,9 @@ func (s *Server) searchPeople(ctx context.Context, _ *mcp.CallToolRequest, in se
 	return textResult(strings.TrimRight(b.String(), "\n")), nil
 }
 
-// personBlock renders one search result: identity, names, numbers, chats.
-func (w wrapper) personBlock(m *personMatch, a *store.PersonActivity, full bool) string {
-	var b strings.Builder
+// personLines renders one search result, for a block: identity, names,
+// numbers, chats.
+func (w wrapper) personLines(m *personMatch, a *store.PersonActivity, full bool) []string {
 	label := w.label(&m.PersonRef)
 	if m.IsMe {
 		label = "me"
@@ -339,7 +341,7 @@ func (w wrapper) personBlock(m *personMatch, a *store.PersonActivity, full bool)
 			label += " (" + people.FormatPhone(m.Phone) + ")"
 		}
 	}
-	fmt.Fprintf(&b, "%s %s · %s\n", personID(m.ID), label, nameSource(&m.PersonCandidate))
+	lines := []string{fmt.Sprintf("%s %s · %s", personID(m.ID), label, nameSource(&m.PersonCandidate))}
 
 	var phones, lids []string
 	for _, j := range a.JIDs {
@@ -366,7 +368,7 @@ func (w wrapper) personBlock(m *personMatch, a *store.PersonActivity, full bool)
 			names = append(names, "WhatsApp profile "+n)
 		}
 		if len(names) > 0 {
-			b.WriteString("   names: " + strings.Join(names, "; ") + "\n")
+			lines = append(lines, "   names: "+strings.Join(names, "; "))
 		}
 		ids := []string{}
 		if m.Phone != "" {
@@ -379,23 +381,23 @@ func (w wrapper) personBlock(m *personMatch, a *store.PersonActivity, full bool)
 			ids = append(ids, "LID "+l)
 		}
 		if len(ids) > 0 {
-			b.WriteString("   ids: " + strings.Join(ids, ", ") + "\n")
+			lines = append(lines, "   ids: "+strings.Join(ids, ", "))
 		}
 	} else if len(phones) > 0 {
-		b.WriteString("   other numbers: " + strings.Join(phones, ", ") + "\n")
+		lines = append(lines, "   other numbers: "+strings.Join(phones, ", "))
 	}
 	if len(a.Former) > 0 {
 		var former []string
 		for _, f := range a.Former {
 			former = append(former, fmt.Sprintf("%s (now %s)", people.FormatPhone(f.Phone), personID(f.Owner)))
 		}
-		b.WriteString("   former numbers, now another account's: " + strings.Join(former, ", ") + "\n")
+		lines = append(lines, "   former numbers, now another account's: "+strings.Join(former, ", "))
 	}
 
 	if a.LastAt != 0 {
-		fmt.Fprintf(&b, "   last interaction: %s in %s\n", w.ts(a.LastAt), chatID(a.LastChatID))
+		lines = append(lines, fmt.Sprintf("   last interaction: %s in %s", w.ts(a.LastAt), chatID(a.LastChatID)))
 	} else {
-		b.WriteString("   last interaction: none stored\n")
+		lines = append(lines, "   last interaction: none stored")
 	}
 	who, wrote := "them", "they"
 	if m.IsMe {
@@ -411,13 +413,13 @@ func (w wrapper) personBlock(m *personMatch, a *store.PersonActivity, full bool)
 			g.Messages, who, w.ts(g.LastAt)))
 	}
 	if len(chats) == 0 {
-		b.WriteString("   chats: none stored\n")
+		lines = append(lines, "   chats: none stored")
 	} else {
-		b.WriteString("   chats: " + strings.Join(chats, "; "))
+		line := "   chats: " + strings.Join(chats, "; ")
 		if extra := a.GroupsTotal - len(a.Groups); extra > 0 {
-			fmt.Fprintf(&b, "; %d more groups where %s wrote", extra, wrote)
+			line += fmt.Sprintf("; %d more groups where %s wrote", extra, wrote)
 		}
-		b.WriteString("\n")
+		lines = append(lines, line)
 	}
-	return b.String()
+	return lines
 }

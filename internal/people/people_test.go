@@ -273,6 +273,7 @@ func TestProfileName(t *testing.T) {
 	cases := map[string]string{
 		"Marco":                    "~Marco",
 		"  Ma‮rco\n<b>Rossi</b>  ": "~Marco bRossi/b",
+		`Eve" \"x`:                 "~Eve x",
 		"":                         "",
 		strings.Repeat("a", 50):    "~" + strings.Repeat("a", 39) + "…",
 	}

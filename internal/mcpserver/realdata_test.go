@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -111,7 +112,13 @@ var totalShown = regexp.MustCompile(`(\d+) (?:match(?:es)?|people match|person m
 
 var wrapped = regexp.MustCompile(`<untrusted_wa n=\w+>(?s:.*?)</untrusted_wa n=\w+>`)
 
-// redact hides sender-written text so only the shape of a response is logged.
+// redact hides sender-written text so only the shape of a response is logged:
+// a block becomes its line count.
 func redact(s string) string {
-	return wrapped.ReplaceAllStringFunc(s, func(m string) string { return "<U>" })
+	return wrapped.ReplaceAllStringFunc(s, func(m string) string {
+		if n := strings.Count(m, "\n"); n > 1 {
+			return fmt.Sprintf("<U: %d lines>", n-1)
+		}
+		return "<U>"
+	})
 }

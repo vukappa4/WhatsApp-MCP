@@ -237,11 +237,13 @@ func sanitize(s string) string {
 	return tagName.ReplaceAllString(out, "untrusted-w")
 }
 
-// wrapper marks sender-written text with a per-response nonce.
+// wrapper marks sender-written text with a per-response nonce: one field
+// alone with wrap, a list of lines at once with block.
 // transcripts shows voice-note transcripts in concise lines too.
 type wrapper struct {
 	nonce       string
 	transcripts bool
+	inBlock     bool      // the text goes into a block: wrap leaves the tags to it
 	capText     int       // detailed mode: most runes of a body or transcript, 0 for no cap
 	now         time.Time // times omit now's year
 }
@@ -255,12 +257,57 @@ func newWrapper(now time.Time) wrapper {
 // ts is fmtTS as of the response's now.
 func (w wrapper) ts(ts int64) string { return fmtTS(ts, w.now) }
 
+// wrap encloses one field of sender text in the tags, or quotes it for a
+// block.
 func (w wrapper) wrap(s string) string {
 	s = sanitize(s)
-	if s == "" {
+	switch {
+	case s == "":
 		return ""
+	case w.inBlock:
+		return quote(s)
 	}
 	return "<untrusted_wa n=" + w.nonce + ">" + s + "</untrusted_wa n=" + w.nonce + ">"
+}
+
+var quoter = strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
+
+// quote renders sanitized sender text as a quoted string: \ and " are
+// escaped and a line break is \n, so the text can neither end the quote nor
+// start a line.
+func quote(s string) string { return `"` + quoter.Replace(s) + `"` }
+
+var plainWAID = regexp.MustCompile(`^[0-9A-Za-z]+$`)
+
+// waID renders a WhatsApp message id: bare when it is letters and digits, as
+// sender text otherwise, since the sending client picks it.
+func (w wrapper) waID(id string) string {
+	if plainWAID.MatchString(id) {
+		return id
+	}
+	return w.wrap(id)
+}
+
+// inner is w for rendering the lines of a block.
+func (w wrapper) inner() wrapper {
+	w.inBlock = true
+	return w
+}
+
+// block encloses lines in one pair of tags, each tag on a line of its own.
+// Every line is server text with the sender text in it quoted (see wrap and
+// reactionText). Each line is also sanitized whole, which leaves \n as the
+// only line break, and that becomes ⏎: whatever a field lets through, sender
+// text never starts a line, so it cannot pass for a message, a hit or a
+// chat, and nothing in a line closes the block.
+func (w wrapper) block(lines []string) string {
+	var b strings.Builder
+	b.WriteString("<untrusted_wa n=" + w.nonce + ">\n")
+	for _, l := range lines {
+		b.WriteString(strings.ReplaceAll(sanitize(l), "\n", "⏎") + "\n")
+	}
+	b.WriteString("</untrusted_wa n=" + w.nonce + ">")
+	return b.String()
 }
 
 // name renders a person's name: plain from the address book, "~Name" (cleaned

@@ -381,34 +381,36 @@ func (s *Server) listChats(ctx context.Context, _ *mcp.CallToolRequest, in listC
 		return textResult(b.String()), nil
 	}
 	fmt.Fprintf(&b, "%d chats, newest first:\n", len(chats))
+	bw := w.inner()
+	lines := make([]string, 0, 2*len(chats))
 	for i := range chats {
 		c := &chats[i]
-		fmt.Fprintf(&b, "%s %s · %s · %s", chatID(c.ID), w.chatName(c), c.Kind, orNever(w.ts(c.LastMessageAt)))
+		line := fmt.Sprintf("%s %s · %s · %s", chatID(c.ID), bw.chatName(c), c.Kind, orNever(w.ts(c.LastMessageAt)))
 		if c.Unread > 0 {
-			fmt.Fprintf(&b, " · %d unread", c.Unread)
+			line += fmt.Sprintf(" · %d unread", c.Unread)
 		}
 		if full {
-			fmt.Fprintf(&b, " · jid %s", c.JID)
+			line += " · jid " + c.JID
 			if c.Person != nil {
-				fmt.Fprintf(&b, " · person %s", personID(c.Person.ID))
+				line += " · person " + personID(c.Person.ID)
 			}
 			if c.Archived {
-				b.WriteString(" · archived")
+				line += " · archived"
 			}
 			if c.MutedUntil > s.now().Unix() {
-				b.WriteString(" · muted")
+				line += " · muted"
 			}
 		}
-		b.WriteString("\n")
+		lines = append(lines, line)
 		if m := c.Last; m != nil {
 			n := 80
 			if full {
 				n = 300
 			}
-			who := w.sender(m)
-			fmt.Fprintf(&b, "   last: %s: %s\n", who, w.summary(m, n))
+			lines = append(lines, fmt.Sprintf("   last: %s: %s", bw.sender(m), bw.summary(m, n)))
 		}
 	}
+	b.WriteString(w.block(lines) + "\n")
 	if more {
 		last := chats[len(chats)-1]
 		next := cursor{Tool: toolListChats, TS: last.LastMessageAt, ID: last.ID, Kind: f.Kind, Unread: f.UnreadOnly, Query: f.Query}.encode()

@@ -143,7 +143,7 @@ func TestGetMediaEndToEnd(t *testing.T) {
 
 	// Before transcription the chat shows the voice note without a transcript.
 	text, _ := call(t, cs, toolReadChat, map[string]any{"chat": "+39 333 666 6666"})
-	if !strings.Contains(text, "[voice 0:42]") || !strings.Contains(text, "[document · <untrusted_wa") {
+	if !strings.Contains(text, "[voice 0:42]") || !strings.Contains(text, `[document · "Contratto.pdf"]`) {
 		t.Fatalf("read_chat before:\n%s", text)
 	}
 
@@ -160,12 +160,12 @@ func TestGetMediaEndToEnd(t *testing.T) {
 		t.Fatalf("read_chat concise:\n%s", text)
 	}
 	text, _ = call(t, cs, toolReadChat, map[string]any{"chat": "+39 333 666 6666", "response_format": "detailed"})
-	if !strings.Contains(text, "media downloaded · transcript: <untrusted_wa n=") {
+	if !strings.Contains(text, "media downloaded · transcript] (wa_id ") {
 		t.Fatalf("read_chat detailed:\n%s", text)
 	}
 	// The transcript is searchable and shown with the hit.
 	text, _ = call(t, cs, toolSearchMessages, map[string]any{"query": "ufficio istruzioni"})
-	if !strings.Contains(text, "1 match") || !strings.Contains(text, "[voice 0:42 · transcript: <untrusted_wa") {
+	if !strings.Contains(text, "1 match") || !strings.Contains(text, "[voice 0:42 · transcript] ") {
 		t.Fatalf("search transcript:\n%s", text)
 	}
 
