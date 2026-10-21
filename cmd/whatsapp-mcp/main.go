@@ -33,6 +33,7 @@ import (
 	"github.com/vukappa4/whatsapp-mcp/internal/pairpage"
 	"github.com/vukappa4/whatsapp-mcp/internal/people"
 	"github.com/vukappa4/whatsapp-mcp/internal/store"
+	"github.com/vukappa4/whatsapp-mcp/internal/updatecheck"
 	"github.com/vukappa4/whatsapp-mcp/internal/wa"
 )
 
@@ -334,9 +335,17 @@ func runCmd(args []string) error {
 		log.Info("unconfirmed sends found stored: recorded as sent", "count", n)
 	}
 
+	updates := &updatecheck.Checker{Client: releaseClient(releaseAPIBase, nil), Version: version,
+		File: filepath.Join(cfg.DataDir, "update-check.json"), Log: log.With("component", "update"),
+		Enabled: func() (bool, error) {
+			s, err := config.LoadSettings(cfg.DataDir)
+			return s.UpdateCheckOn(), err
+		}}
+	go updates.Run(ctx)
+
 	reason := "signal"
 	srv := &mcpserver.Server{DB: db, WA: client, Media: mgr, Profile: string(cfg.Profile), DataDir: cfg.DataDir, Version: version, Log: log,
-		Stop: func() { reason = "stop command"; cancel() }, Sender: client, Ingest: client.Ingestor()}
+		Stop: func() { reason = "stop command"; cancel() }, Sender: client, Ingest: client.Ingestor(), Updates: updates}
 	log.Info("serving MCP", "url", fmt.Sprintf("http://127.0.0.1:%d/mcp", cfg.Port))
 	serveErr := srv.Serve(ctx, ln, token, cfg.Port)
 	if serveErr != nil {

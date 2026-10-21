@@ -34,6 +34,13 @@ const releaseRepo = "vukappa4/WhatsApp-MCP"
 // and checks its SHA-256 by hand.
 const installDownloadStep = "https://github.com/" + releaseRepo + "/blob/main/INSTALL.md#2-download"
 
+// releaseClient reads the project's releases from apiBase: update and the
+// daemon's daily check use the same client. hc nil: release.NewHTTP.
+func releaseClient(apiBase string, hc *http.Client) *release.Client {
+	return &release.Client{APIBase: apiBase, Repo: releaseRepo, HTTP: hc,
+		UserAgent: "whatsapp-mcp/" + version + " (+https://github.com/" + releaseRepo + ")"}
+}
+
 // updateOptions is one update run; tests fill it directly.
 type updateOptions struct {
 	cfg     *config.Config
@@ -112,17 +119,16 @@ func update(ctx context.Context, o updateOptions) error {
 		return fmt.Errorf("another whatsapp-mcp command (pair, reingest, unlink or import-legacy) holds profile %s: let it finish, then update", p)
 	}
 
-	client := &release.Client{APIBase: o.APIBase, Repo: releaseRepo, HTTP: o.HTTP,
-		UserAgent: "whatsapp-mcp/" + version + " (+https://github.com/" + releaseRepo + ")"}
+	client := releaseClient(o.APIBase, o.HTTP)
 	var r *release.Release
 	which := "Latest release"
 	if o.Tag != "" {
 		which = "Requested release"
 		r, err = client.ByTag(ctx, o.Tag)
 	} else {
-		r, err = client.Latest(ctx)
-		if err == nil && (r.Draft || r.Prerelease) {
-			err = fmt.Errorf("GitHub named %s, a draft or prerelease, as the latest release: not installing it", r.Tag)
+		r, err = client.LatestStable(ctx)
+		if ue := (*release.UnstableError)(nil); errors.As(err, &ue) {
+			err = fmt.Errorf("%w: not installing it", err)
 		}
 	}
 	if err != nil {

@@ -37,11 +37,14 @@ macOS (Terminal):
 "$HOME/Library/Application Support/WhatsAppMCP/bin/whatsapp-mcp" update
 ```
 
-It downloads the latest release, checks its SHA-256 and restarts the daemon on it. Your pairing and messages stay. It can take many minutes, about half an hour at worst: let it run until it ends, since stopping it midway can leave the daemon stopped. `update --check` only reports whether a newer release exists. See [INSTALL.md](INSTALL.md#update) for the other options and for moving an install built from source to releases.
+It downloads the latest release, checks its SHA-256 and restarts the daemon on it. Your pairing and messages stay. It can take many minutes, about half an hour at worst: let it run until it ends, since stopping it midway can leave the daemon stopped. `update --check` only reports whether a newer release exists.
+
+You do not have to remember it: the daemon checks for a newer release once a day. While one exists, Claude sees it in every WhatsApp result, tells you once and offers to run `update` for you. See [INSTALL.md](INSTALL.md#update) for the other options and for moving an install built from source to releases.
 
 ## Privacy and security
 
 - Your messages stay on your computer, in `%LOCALAPPDATA%\WhatsAppMCP` on Windows and `~/Library/Application Support/WhatsAppMCP` on macOS. There is no server and no telemetry. What Claude reads goes to Anthropic like the rest of your Claude conversation.
+- Besides WhatsApp, the daemon contacts only GitHub's API, once a day, to read the latest release's version. The request carries only the program's version, and GitHub sees your IP address as with any web request. To turn it off, put `{"update_check": false}` in `config.json` in the profile's data folder (`prod` or `dev` in the folder above); the daemon reads it within 10 minutes.
 - The MCP endpoint listens only on `127.0.0.1` and needs a random token that only your user can read.
 - `whatsapp_send_file` sends only from your usual folders (Desktop, Documents, Downloads, Pictures, Videos or Movies, Music, OneDrive, iCloud Drive) and refuses keys, credentials and databases even there.
 

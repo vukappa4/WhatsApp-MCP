@@ -101,6 +101,13 @@ func TestLoadSettings(t *testing.T) {
 	if s, err := LoadSettings(dir); err != nil || len(s.SendFileExtraRoots) != 1 || s.SendFileExtraRoots[0] != abs {
 		t.Fatalf("with BOM: %+v %v", s, err)
 	}
+	if s, _ := LoadSettings(dir); !s.UpdateCheckOn() {
+		t.Fatal("update_check unset: off")
+	}
+	_ = os.WriteFile(SettingsFile(dir), []byte(`{"update_check": false}`), 0o600)
+	if s, err := LoadSettings(dir); err != nil || s.UpdateCheckOn() {
+		t.Fatalf("update_check false: %+v %v", s, err)
+	}
 	for _, bad := range []string{`{"send_files_roots": []}`, `{"send_file_roots": ["rel"]}`, `[1]`,
 		// A stray brace must not hide the keys after it.
 		`{"send_file_roots": []}, "send_file_extra_roots": ["rel"]}`, `{} {"send_files_roots": []}`} {

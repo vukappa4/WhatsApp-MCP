@@ -217,6 +217,24 @@ func (c *Client) Latest(ctx context.Context) (*Release, error) {
 	return r, err
 }
 
+// LatestStable is Latest, refused when GitHub names a draft or a prerelease
+// as the latest release: update installs it, and the daemon's check reports
+// it, only when it is neither.
+func (c *Client) LatestStable(ctx context.Context) (*Release, error) {
+	r, err := c.Latest(ctx)
+	if err == nil && (r.Draft || r.Prerelease) {
+		return nil, &UnstableError{Tag: r.Tag}
+	}
+	return r, err
+}
+
+// UnstableError is GitHub naming a draft or a prerelease as the latest release.
+type UnstableError struct{ Tag string }
+
+func (e *UnstableError) Error() string {
+	return "GitHub named " + e.Tag + ", a draft or prerelease, as the latest release"
+}
+
 // ByTag is the release tagged tag, prereleases included.
 func (c *Client) ByTag(ctx context.Context, tag string) (*Release, error) {
 	r, err := c.release(ctx, "/releases/tags/"+tag)
