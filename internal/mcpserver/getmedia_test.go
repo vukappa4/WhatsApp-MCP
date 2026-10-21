@@ -237,6 +237,74 @@ func TestGetMediaEndToEnd(t *testing.T) {
 	}
 }
 
+// engineTranscriber fails like the engine while err is set, then hears no speech.
+type engineTranscriber struct {
+	mu  sync.Mutex
+	err error
+}
+
+func (e *engineTranscriber) Engine() string { return "fake-engine" }
+func (e *engineTranscriber) Check() error   { return nil }
+func (e *engineTranscriber) Transcribe(context.Context, string, bool, time.Duration) (string, string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return "", "", e.err
+}
+
+// An engine failure is shown as a failure with its cause, never as silence;
+// silence is shown as no speech.
+func TestGetMediaTranscriptionFailure(t *testing.T) {
+	db := seed(t)
+	ctx := context.Background()
+	in := &wa.Ingestor{DB: db, Self: func() (types.JID, types.JID) { return me, meLID }}
+	chat := types.NewJID("393336666666", types.DefaultUserServer)
+	voice := []byte("OggS voice bytes")
+	sum := sha256.Sum256(voice)
+	key := sha256.Sum256(append([]byte("key"), voice...))
+	src := &mediaSource{connected: true, files: map[string][]byte{"/v/voice?": voice}}
+	if err := in.Message(ctx, &events.Message{Info: types.MessageInfo{MessageSource: types.MessageSource{Chat: chat, Sender: chat},
+		ID: "MDV", Timestamp: t0.Add(time.Minute), PushName: "Sara"}, Message: &waE2E.Message{AudioMessage: &waE2E.AudioMessage{
+		PTT: proto.Bool(true), Seconds: proto.Uint32(7), Mimetype: proto.String("audio/ogg; codecs=opus"), DirectPath: proto.String("/v/voice"),
+		MediaKey: key[:], FileSHA256: sum[:], FileEncSHA256: sum[:], FileLength: proto.Uint64(uint64(len(voice)))}}}); err != nil {
+		t.Fatal(err)
+	}
+	var msgID int64
+	if err := db.QueryRow(`SELECT id FROM messages WHERE wa_id = 'MDV'`).Scan(&msgID); err != nil {
+		t.Fatal(err)
+	}
+	tr := &engineTranscriber{err: errors.New("parakeet-cli.exe failed: read_audio_data: failed to open audio data from stdin (Unknown error); error: failed to read audio file '-'")}
+	mgr := media.New(media.Options{DB: db, Root: filepath.Join(t.TempDir(), "media"), Source: src, Transcriber: tr,
+		Now: func() time.Time { return t0.Add(30 * 24 * time.Hour) }})
+	mgr.Start()
+	t.Cleanup(mgr.Stop)
+	s := &Server{DB: db, WA: fixedStatus{State: wa.StateConnected, Since: t0}, Media: mgr, Profile: "dev", DataDir: "x", Version: "test",
+		Now: func() time.Time { return t0.Add(3 * time.Hour) }}
+	hs := httptest.NewServer(s.Handler(token, 8766))
+	t.Cleanup(hs.Close)
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil).Connect(ctx, &mcp.StreamableClientTransport{
+		Endpoint: hs.URL + "/mcp", HTTPClient: &http.Client{Transport: bearer{http.DefaultTransport}}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cs.Close() })
+
+	text, _ := call(t, cs, toolGetMedia, map[string]any{"message": messageID(msgID)})
+	if !strings.Contains(text, "Transcript: not available - <untrusted_wa n=") || !strings.Contains(text, "error: failed to read audio file '-'") ||
+		strings.Contains(text, "no speech") {
+		t.Fatalf("engine failure:\n%s", text)
+	}
+	if j, ok, err := store.LoadMediaJob(ctx, db, msgID); err != nil || !ok || j.HasTranscript || !strings.Contains(j.TranscriptError, "failed to read audio file") {
+		t.Fatalf("stored: %+v %v %v", j, ok, err)
+	}
+
+	tr.mu.Lock()
+	tr.err = nil
+	tr.mu.Unlock()
+	if text, _ = call(t, cs, toolGetMedia, map[string]any{"message": messageID(msgID)}); !strings.Contains(text, "Transcript: no speech detected.") {
+		t.Fatalf("silence:\n%s", text)
+	}
+}
+
 func mustID(t *testing.T, s string) int64 {
 	n, ok := parseID(s, "m_")
 	if !ok {

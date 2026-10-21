@@ -18,7 +18,7 @@ type migration struct {
 
 // migrations is append-only. Entry i upgrades the schema to version i+1.
 // Never edit an applied entry: add a new one.
-var migrations = []migration{{sql: schemaV1}, {sql: schemaV2}, {sql: schemaV3}, {sql: schemaV4, noFK: true}, {sql: schemaV5}, {sql: schemaV6}, {sql: schemaV7}, {sql: schemaV8}, {sql: schemaV9}, {sql: schemaV10}, {sql: schemaV11}, {sql: schemaV12}}
+var migrations = []migration{{sql: schemaV1}, {sql: schemaV2}, {sql: schemaV3}, {sql: schemaV4, noFK: true}, {sql: schemaV5}, {sql: schemaV6}, {sql: schemaV7}, {sql: schemaV8}, {sql: schemaV9}, {sql: schemaV10}, {sql: schemaV11}, {sql: schemaV12}, {sql: schemaV13}}
 
 // SchemaVersion is the version a fresh database ends at.
 func SchemaVersion() int { return len(migrations) }
@@ -380,6 +380,14 @@ CREATE TRIGGER media_fts_transcript AFTER UPDATE OF transcript ON media BEGIN
 	INSERT INTO messages_fts(rowid, text, transcript)
 	SELECT id, text, COALESCE(new.transcript, '') FROM messages WHERE media_id = new.id;
 END;
+`
+
+// schemaV13: empty transcripts are transcribed again. An empty transcript
+// may hide an engine failure: parakeet-cli prints an error and exits 0 with
+// no text. The sweep picks the rows up again; silence comes back empty.
+const schemaV13 = `
+UPDATE media SET transcript = NULL, transcript_lang = NULL, transcript_engine = NULL, transcript_error = ''
+WHERE transcript = '';
 `
 
 // schemaV12: indexes for the exact-name chat lookup (FindChats), one per
