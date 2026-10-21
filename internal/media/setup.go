@@ -121,10 +121,10 @@ type SetupOptions struct {
 	// SourceDirs are searched for already downloaded copies (same file
 	// names); a copy is verified like a download.
 	SourceDirs []string
-	// FFmpegCandidates are checked when ffmpeg is not on PATH.
-	FFmpegCandidates []string
-	HTTP             *http.Client
-	Out              io.Writer
+	// FFmpegSearch is where ffmpeg is looked for.
+	FFmpegSearch config.FFmpegSearch
+	HTTP         *http.Client
+	Out          io.Writer
 }
 
 // Setup installs the engine's model into the shared tools directory and, on
@@ -170,7 +170,7 @@ func Setup(ctx context.Context, o SetupOptions) error {
 		}
 		fmt.Fprintf(o.Out, "Model %s: installed in %s\n", m.Name, dst)
 	}
-	if p, err := childproc.FindFFmpeg(nil, o.FFmpegCandidates); err != nil {
+	if p, err := childproc.FindFFmpeg(nil, o.FFmpegSearch); err != nil {
 		fmt.Fprintln(o.Out, "ffmpeg: NOT FOUND - transcription needs it: "+config.FFmpegInstallHint()+", then restart the daemon")
 	} else {
 		fmt.Fprintf(o.Out, "ffmpeg: %s\n", p)

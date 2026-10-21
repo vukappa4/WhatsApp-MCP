@@ -248,7 +248,7 @@ func runCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	tr, err := media.NewTranscriber(transcriber, toolsDir, config.FFmpegCandidates())
+	tr, err := media.NewTranscriber(transcriber, toolsDir, config.FFmpegLocations())
 	if err != nil {
 		return err
 	}
@@ -839,7 +839,7 @@ func setupTranscriptionCmd(args []string) error {
 	ctx, cancel := signalContext()
 	defer cancel()
 	fmt.Println("Installing transcription tools into", dir)
-	if err := media.Setup(ctx, media.SetupOptions{ToolsDir: dir, Engine: engine, SourceDirs: sources, FFmpegCandidates: config.FFmpegCandidates(), Out: os.Stdout}); err != nil {
+	if err := media.Setup(ctx, media.SetupOptions{ToolsDir: dir, Engine: engine, SourceDirs: sources, FFmpegSearch: config.FFmpegLocations(), Out: os.Stdout}); err != nil {
 		return err
 	}
 	fmt.Println("Done. Restart the daemon if ffmpeg was just installed; otherwise the next voice note is transcribed.")

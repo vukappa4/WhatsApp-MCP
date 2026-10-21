@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/vukappa4/whatsapp-mcp/internal/childproc"
+	"github.com/vukappa4/whatsapp-mcp/internal/config"
 )
 
 // Transcriber turns an audio file into text.
@@ -44,16 +45,16 @@ type CLITranscriber struct {
 	// LookPath finds ffmpeg and, where the tools are not pinned (see
 	// toolExe), the engine on PATH; exec.LookPath when nil.
 	LookPath func(string) (string, error)
-	// FFmpegCandidates are tried in order when ffmpeg is not on PATH.
-	FFmpegCandidates []string
+	// FFmpegSearch is where ffmpeg is looked for besides PATH.
+	FFmpegSearch config.FFmpegSearch
 }
 
 // NewTranscriber returns the transcriber for a --transcriber choice; nil for
-// "off". ffmpegCandidates are the places to find ffmpeg when PATH lacks it.
-func NewTranscriber(choice, toolsDir string, ffmpegCandidates []string) (Transcriber, error) {
+// "off". ffmpeg is where ffmpeg is looked for besides PATH.
+func NewTranscriber(choice, toolsDir string, ffmpeg config.FFmpegSearch) (Transcriber, error) {
 	switch choice {
 	case EngineParakeet, EngineWhisper:
-		return &CLITranscriber{Choice: choice, ToolsDir: toolsDir, FFmpegCandidates: ffmpegCandidates}, nil
+		return &CLITranscriber{Choice: choice, ToolsDir: toolsDir, FFmpegSearch: ffmpeg}, nil
 	case EngineOff:
 		return nil, nil
 	}
@@ -84,7 +85,7 @@ func (t *CLITranscriber) Engine() string {
 
 // FFmpeg is the ffmpeg executable the transcriber runs.
 func (t *CLITranscriber) FFmpeg() (string, error) {
-	return childproc.FindFFmpeg(t.LookPath, t.FFmpegCandidates)
+	return childproc.FindFFmpeg(t.LookPath, t.FFmpegSearch)
 }
 
 func (t *CLITranscriber) Check() error {

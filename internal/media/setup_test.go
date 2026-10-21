@@ -82,7 +82,7 @@ func TestCopyVerifiedChecksSizeAndHash(t *testing.T) {
 // Every pinned artifact is an https URL at a fixed revision with a full hash.
 // Every OS and architecture the releases ship for gets both engines' tools;
 // on macOS from this project's tools release, with ffmpeg where
-// config.FFmpegCandidates looks first.
+// config.FFmpegLocations pins it.
 func TestPinnedArtifacts(t *testing.T) {
 	all := []artifact{parakeetModel, whisperModel}
 	for _, p := range [][2]string{{"windows", "amd64"}, {"windows", "arm64"}, {"darwin", "arm64"}, {"darwin", "amd64"}} {
@@ -276,7 +276,7 @@ func TestTranscribeRealVoiceNotes(t *testing.T) {
 	if engine == "" {
 		engine = EngineParakeet
 	}
-	tr, err := NewTranscriber(engine, tools, config.FFmpegCandidates())
+	tr, err := NewTranscriber(engine, tools, config.FFmpegLocations())
 	if err != nil {
 		t.Fatal(err)
 	}

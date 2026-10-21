@@ -103,7 +103,7 @@ func TestPlaylistAudioIsNeverFetched(t *testing.T) {
 // The real ffmpeg with the daemon's arguments: a playlist renamed to look
 // like audio fails to decode and fetches nothing; real Ogg audio decodes.
 func TestFFmpegArgsNeverFetch(t *testing.T) {
-	ff, err := childproc.FindFFmpeg(nil, config.FFmpegCandidates())
+	ff, err := childproc.FindFFmpeg(nil, config.FFmpegLocations())
 	if err != nil {
 		t.Skip("ffmpeg not installed")
 	}

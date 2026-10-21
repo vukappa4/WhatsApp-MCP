@@ -31,37 +31,42 @@ func TestAppDir(t *testing.T) {
 // Outside Windows a daemon started by launchd lacks the user's PATH: ffmpeg
 // is also looked for where Homebrew (Apple Silicon and Intel) and MacPorts
 // put it.
-func TestFFmpegCandidatesIncludeHomebrew(t *testing.T) {
+func TestFFmpegLocationsIncludeHomebrew(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Homebrew is not on Windows")
 	}
-	got := FFmpegCandidates()
+	got := FFmpegLocations().Fallback
 	for _, want := range []string{"/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/opt/local/bin/ffmpeg"} {
 		if !slices.Contains(got, want) {
-			t.Errorf("candidates %v lack %s", got, want)
+			t.Errorf("fallback %v lacks %s", got, want)
 		}
 	}
 }
 
-// On macOS the ffmpeg build setup-transcription pins comes before any other
-// install location.
-func TestFFmpegCandidatesPinnedFirstOnMac(t *testing.T) {
-	if runtime.GOOS != "darwin" {
-		t.Skip("the pinned ffmpeg build is for macOS")
-	}
+// On macOS the ffmpeg build setup-transcription pins is the pinned place,
+// tried before PATH; elsewhere nothing is pinned.
+func TestFFmpegLocationsPinOnlyOnMac(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	base, err := AppDir()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := FFmpegCandidates(); got[0] != filepath.Join(base, "tools", PinnedFFmpegDir, "ffmpeg") {
-		t.Fatalf("candidates = %v, want the pinned build first", got)
+	s := FFmpegLocations()
+	want := ""
+	if runtime.GOOS == "darwin" {
+		want = filepath.Join(base, "tools", PinnedFFmpegDir, "ffmpeg")
+	}
+	if s.Pinned != want {
+		t.Fatalf("pinned = %q, want %q", s.Pinned, want)
+	}
+	if places := s.Places(); want != "" && places[0] != want {
+		t.Fatalf("places = %v, want the pinned build first", places)
 	}
 }
 
 // The winget install of Gyan.FFmpeg is a known ffmpeg location, both its
 // Links shim and the package folder.
-func TestFFmpegCandidatesIncludeWinget(t *testing.T) {
+func TestFFmpegLocationsIncludeWinget(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("winget is Windows only")
 	}
@@ -74,19 +79,14 @@ func TestFFmpegCandidatesIncludeWinget(t *testing.T) {
 	if err := os.WriteFile(pkg, []byte("x"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	got := FFmpegCandidates()
+	got := FFmpegLocations()
 	want := []string{
 		filepath.Join(local, "WhatsAppMCP", "tools", "ffmpeg.exe"),
 		filepath.Join(local, "Microsoft", "WinGet", "Links", "ffmpeg.exe"),
 		pkg,
 	}
-	if len(got) != len(want) {
-		t.Fatalf("candidates = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("candidate %d = %q, want %q", i, got[i], want[i])
-		}
+	if got.Pinned != "" || !slices.Equal(got.Fallback, want) {
+		t.Fatalf("locations = %+v, want fallback %v", got, want)
 	}
 }
 

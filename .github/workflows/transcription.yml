@@ -154,7 +154,7 @@ jobs:
       - name: Test the pinned ffmpeg
         run: |
           . "$RUNNER_TEMP/isolated.sh"
-          # PATH first, as a daemon with this ffmpeg on PATH finds it.
+          # On PATH too: the send tests look for ffmpeg there.
           export PATH="$(dirname "$FFMPEG"):$PATH"
           go test ./internal/media ./internal/outgoing ./internal/mcpserver -count=1 -v \
             -run '^(TestFFmpegArgsNeverFetch|TestConvertVoice|TestSendFile|TestSentFileServedFromMediaFolder)$' | tee "$RUNNER_TEMP/ffmpeg.log"
