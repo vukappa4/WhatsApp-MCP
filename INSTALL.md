@@ -129,7 +129,7 @@ It writes the Claude config folder named by `CLAUDE_CONFIG_DIR`, else `~/.claude
 
 ## 6. Voice notes and audio (optional, ask the user)
 
-Transcribing voice notes and sending voice notes need ffmpeg; transcription also needs a speech model (about 650 MB download).
+Transcribing voice notes and sending voice notes need ffmpeg; transcription also needs the whisper.cpp programs and a speech model (about 650 MB download). `setup-transcription` downloads the programs (on macOS also ffmpeg) and the model, and checks each file's SHA-256.
 
 Windows:
 
@@ -141,17 +141,14 @@ winget install --id Gyan.FFmpeg -e --accept-source-agreements --accept-package-a
 
 Without the two `--accept` flags the first winget run waits for an answer no agent can give. Tell the user first: Windows asks them to allow the installer.
 
-macOS (the transcription programs come from Homebrew's `whisper.cpp`, which on Intel Macs builds from source for several minutes):
+macOS (no Homebrew needed: `setup-transcription` also installs ffmpeg; this project builds the programs for Apple Silicon and Intel Macs):
 
 ```sh
-brew install ffmpeg whisper.cpp
 "$HOME/Library/Application Support/WhatsAppMCP/bin/whatsapp-mcp" setup-transcription
 "$HOME/Library/Application Support/WhatsAppMCP/bin/whatsapp-mcp" install
 ```
 
-Without Homebrew (`brew --version` fails), the user installs it from https://brew.sh first: its installer asks for their password. After a fresh Homebrew install, run `eval "$(/opt/homebrew/bin/brew shellenv)"` (Intel Macs: `eval "$(/usr/local/bin/brew shellenv)"`) in the same shell before calling `brew`.
-
-The second `install` restarts the daemon so it finds ffmpeg. Run it as [Long commands](#long-commands) says: in the background, and wait until it exits.
+The `install` after `setup-transcription` restarts the daemon so it finds ffmpeg and the new programs. Run both as [Long commands](#long-commands) says: in the background, and wait until each exits.
 
 ## 7. Finish
 

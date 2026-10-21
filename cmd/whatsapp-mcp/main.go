@@ -56,7 +56,8 @@ Usage:
                                                     import the old bridge's data (read-only; use copies)
   whatsapp-mcp setup-transcription [--engine parakeet|whisper|all] [--source-dir <dir>]...
                                                     install the transcription model into <app dir>/tools, and on
-                                                    Windows the pinned whisper.cpp tools (SHA-256 verified)
+                                                    Windows and macOS the pinned whisper.cpp tools (macOS: also
+                                                    ffmpeg), every file SHA-256 verified
   whatsapp-mcp install       [--profile prod|dev]   copy this binary to <app dir>/bin (prod) or bin-dev (dev),
                                                     register the autostart (Windows: logon task; macOS:
                                                     LaunchAgent) and (re)start the daemon

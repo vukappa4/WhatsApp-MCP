@@ -118,10 +118,16 @@ func ToolsDir() (string, error) {
 	return filepath.Join(base, "tools"), nil
 }
 
+// PinnedFFmpegDir is the folder of ToolsDir where setup-transcription
+// installs the pinned ffmpeg build on macOS (internal/media pins the
+// archive).
+const PinnedFFmpegDir = "ffmpeg-8.1.3"
+
 // FFmpegCandidates lists, in order, where ffmpeg is looked for when it is not
-// on PATH: a copy in the tools directory, then the package managers'
-// install locations. A daemon started by Task Scheduler or launchd runs
-// without the user's interactive PATH, which is where those live.
+// on PATH: on macOS the pinned build, then a copy in the tools directory,
+// then the package managers' install locations. A daemon started by Task
+// Scheduler or launchd runs without the user's interactive PATH, which is
+// where those live.
 //   - Windows: winget's install of Gyan.FFmpeg (its Links shim, then the
 //     package folders, newest first).
 //   - macOS and others: Homebrew on Apple Silicon (/opt/homebrew), Homebrew
@@ -132,7 +138,11 @@ func FFmpegCandidates() []string {
 		return nil
 	}
 	if runtime.GOOS != "windows" {
-		return []string{filepath.Join(base, "tools", "ffmpeg"), "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/opt/local/bin/ffmpeg"}
+		out := []string{filepath.Join(base, "tools", "ffmpeg"), "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/opt/local/bin/ffmpeg"}
+		if runtime.GOOS == "darwin" {
+			out = append([]string{filepath.Join(base, "tools", PinnedFFmpegDir, "ffmpeg")}, out...)
+		}
+		return out
 	}
 	local := filepath.Dir(base)
 	out := []string{filepath.Join(base, "tools", "ffmpeg.exe"), filepath.Join(local, "Microsoft", "WinGet", "Links", "ffmpeg.exe")}
@@ -154,7 +164,7 @@ func FFmpegInstallHint() string {
 	case "windows":
 		return "winget install Gyan.FFmpeg"
 	case "darwin":
-		return "brew install ffmpeg"
+		return "run `whatsapp-mcp setup-transcription`"
 	}
 	return "install ffmpeg with the system package manager"
 }

@@ -13,7 +13,7 @@ Ask Claude things like "what did Marco say about Friday?", "summarize the family
 
 ## Install
 
-Requirements: Windows 10 or 11 (before Windows 11 24H2 the daemon may show a console window) or macOS 13 or later (Apple Silicon or Intel), [Claude Code](https://claude.com/claude-code) 2.1.295 or later, and your phone with WhatsApp at hand. Voice notes on macOS also need [Homebrew](https://brew.sh).
+Requirements: Windows 10 or 11 (before Windows 11 24H2 the daemon may show a console window) or macOS 13 or later (Apple Silicon or Intel), [Claude Code](https://claude.com/claude-code) 2.1.295 or later, and your phone with WhatsApp at hand.
 
 The easy way: give Claude Code this link and ask it to install it.
 

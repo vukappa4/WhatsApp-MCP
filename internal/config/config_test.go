@@ -43,6 +43,22 @@ func TestFFmpegCandidatesIncludeHomebrew(t *testing.T) {
 	}
 }
 
+// On macOS the ffmpeg build setup-transcription pins comes before any other
+// install location.
+func TestFFmpegCandidatesPinnedFirstOnMac(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("the pinned ffmpeg build is for macOS")
+	}
+	t.Setenv("HOME", t.TempDir())
+	base, err := AppDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := FFmpegCandidates(); got[0] != filepath.Join(base, "tools", PinnedFFmpegDir, "ffmpeg") {
+		t.Fatalf("candidates = %v, want the pinned build first", got)
+	}
+}
+
 // The winget install of Gyan.FFmpeg is a known ffmpeg location, both its
 // Links shim and the package folder.
 func TestFFmpegCandidatesIncludeWinget(t *testing.T) {

@@ -18,6 +18,7 @@ import (
 	"github.com/vukappa4/whatsapp-mcp/internal/childproc"
 	"github.com/vukappa4/whatsapp-mcp/internal/config"
 	"github.com/vukappa4/whatsapp-mcp/internal/store"
+	"github.com/vukappa4/whatsapp-mcp/internal/testaudio"
 )
 
 func TestSniffAudio(t *testing.T) {
@@ -136,8 +137,11 @@ func TestFFmpegArgsNeverFetch(t *testing.T) {
 		t.Fatalf("ffmpeg sent %d requests", n)
 	}
 
-	ogg := filepath.Join(dir, "tone.ogg")
-	gen := exec.Command(ff, "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1", "-c:a", "libopus", ogg)
+	wav, ogg := filepath.Join(dir, "tone.wav"), filepath.Join(dir, "tone.ogg")
+	if err := testaudio.WAV(wav, 16000, 1, 1, testaudio.Tone(440, 0.5)); err != nil {
+		t.Fatal(err)
+	}
+	gen := exec.Command(ff, "-v", "error", "-f", "wav", "-i", wav, "-c:a", "libopus", ogg)
 	childproc.Hide(gen)
 	if out, err := gen.CombinedOutput(); err != nil {
 		t.Skipf("cannot generate Ogg Opus: %v %s", err, out)

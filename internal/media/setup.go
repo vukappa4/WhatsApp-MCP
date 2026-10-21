@@ -1,7 +1,9 @@
 package media
 
 import (
+	"archive/tar"
 	"archive/zip"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,7 +11,9 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -25,10 +29,34 @@ type artifact struct {
 	Size   int64
 }
 
-// whisperCppRelease is the pinned whisper.cpp Windows build; it ships both
-// parakeet-cli.exe and whisper-cli.exe. Homebrew's whisper.cpp 1.9.5 is the
-// same commit.
+// whisperCppRelease is the pinned whisper.cpp release. On Windows it is
+// ggml-org's own build, which ships parakeet-cli.exe and whisper-cli.exe; on
+// macOS this project builds the same commit (.github/workflows/tools.yml).
 const whisperCppRelease = "b5454"
+
+const whisperCppDir = "whisper.cpp-" + whisperCppRelease
+
+// toolsRelease is where this project publishes its macOS builds: the
+// release tools.yml made for whisperCppRelease.
+const toolsRelease = "https://github.com/vukappa4/WhatsApp-MCP/releases/download/tools-whisper.cpp-" + whisperCppRelease + "-1/"
+
+// toolsArtifact is an archive of the tools release.
+func toolsArtifact(name, sha256 string, size int64) artifact {
+	return artifact{Name: name, URL: toolsRelease + name, SHA256: sha256, Size: size}
+}
+
+// darwinTools are the macOS archives by GOARCH: parakeet-cli and
+// whisper-cli (Metal on arm64), and ffmpeg with libopus.
+var darwinTools = map[string]struct{ whisperCpp, ffmpeg artifact }{
+	"arm64": {
+		whisperCpp: toolsArtifact(whisperCppDir+"-darwin-arm64.tar.gz", "823acc8e214ff0456e8a099291ace77d04448230d9ea54c3cac577b6c5e4dca7", 4005430),
+		ffmpeg:     toolsArtifact(config.PinnedFFmpegDir+"-darwin-arm64.tar.gz", "fdf469c618ef6cf64c5490dc2792c70b4911fed8b71efd9cd660e5298f51ec17", 1784621),
+	},
+	"amd64": {
+		whisperCpp: toolsArtifact(whisperCppDir+"-darwin-amd64.tar.gz", "af22f1c9727431a422531723b3c3daf77906c105d033cd68ad365bca2231116c", 2429634),
+		ffmpeg:     toolsArtifact(config.PinnedFFmpegDir+"-darwin-amd64.tar.gz", "69c8d137eefcd1eadcc8ebe77eb2400bba29321eb22fa9af883d12a5496d7823", 1837160),
+	},
+}
 
 var (
 	whisperCppZip = artifact{
@@ -52,8 +80,35 @@ var (
 	}
 )
 
-// binDir holds the extracted whisper.cpp release.
-func binDir(toolsDir string) string { return filepath.Join(toolsDir, "whisper.cpp-"+whisperCppRelease) }
+// bundle is a pinned archive of programs, extracted into its own folder of
+// the tools dir.
+type bundle struct {
+	artifact
+	Dir  string   // folder in the tools dir
+	Exes []string // programs it must hold
+}
+
+// toolBundles are the archives setup-transcription installs on goos and
+// goarch; nil where the whisper.cpp tools are not pinned.
+func toolBundles(goos, goarch string) []bundle {
+	switch goos {
+	case "windows":
+		return []bundle{{artifact: whisperCppZip, Dir: whisperCppDir, Exes: []string{"parakeet-cli.exe", "whisper-cli.exe"}}}
+	case "darwin":
+		t, ok := darwinTools[goarch]
+		if !ok {
+			return nil
+		}
+		return []bundle{
+			{artifact: t.whisperCpp, Dir: whisperCppDir, Exes: []string{"parakeet-cli", "whisper-cli"}},
+			{artifact: t.ffmpeg, Dir: config.PinnedFFmpegDir, Exes: []string{"ffmpeg"}},
+		}
+	}
+	return nil
+}
+
+// binDir holds the extracted whisper.cpp tools.
+func binDir(toolsDir string) string { return filepath.Join(toolsDir, whisperCppDir) }
 
 // modelPath is where a model lives once verified. A file at this path always
 // passed its hash check: downloads land under a temporary name first.
@@ -73,8 +128,9 @@ type SetupOptions struct {
 }
 
 // Setup installs the engine's model into the shared tools directory and, on
-// Windows, the pinned whisper.cpp binaries, verifying every file's SHA-256.
-// Elsewhere it checks that Homebrew's whisper.cpp tools are found.
+// Windows and macOS, the pinned whisper.cpp tools (on macOS also ffmpeg),
+// verifying every file's SHA-256. Elsewhere it checks that the engine's
+// whisper.cpp tool is found.
 func Setup(ctx context.Context, o SetupOptions) error {
 	if o.Out == nil {
 		o.Out = io.Discard
@@ -96,7 +152,7 @@ func Setup(ctx context.Context, o SetupOptions) error {
 	if err := os.MkdirAll(filepath.Join(o.ToolsDir, "models"), 0o755); err != nil {
 		return err
 	}
-	if err := installBinaries(ctx, o); err != nil {
+	if err := installTools(ctx, o); err != nil {
 		return err
 	}
 	for _, m := range models {
@@ -105,7 +161,7 @@ func Setup(ctx context.Context, o SetupOptions) error {
 			fmt.Fprintf(o.Out, "Model %s: already installed\n", m.Name)
 			continue
 		}
-		tmp, err := obtain(ctx, o, m)
+		tmp, err := obtain(ctx, o, m, filepath.Join(o.ToolsDir, "models"))
 		if err != nil {
 			return err
 		}
@@ -122,43 +178,58 @@ func Setup(ctx context.Context, o SetupOptions) error {
 	return nil
 }
 
-// installBinaries extracts the pinned release unless its marker says it is
-// in place. Outside Windows it reports where the Homebrew tools are.
-func installBinaries(ctx context.Context, o SetupOptions) error {
-	if !pinnedBinaries {
-		for _, name := range []string{"parakeet-cli", "whisper-cli"} {
+// installTools installs every pinned bundle. Where the tools are not
+// pinned it reports where the engine's tools are.
+func installTools(ctx context.Context, o SetupOptions) error {
+	bundles := toolBundles(runtime.GOOS, runtime.GOARCH)
+	if bundles == nil {
+		for _, name := range engineTools(o.Engine) {
 			p := toolExe(o.ToolsDir, name, nil)
 			if _, err := os.Stat(p); err != nil {
-				return fmt.Errorf("%s not found on PATH nor in %s: %s", name, strings.Join(toolBinDirs, ", "), toolsHint(""))
+				return fmt.Errorf("%s not found on PATH nor in %s: %s", name, strings.Join(toolBinDirs, ", "), toolsHint(o.Engine))
 			}
 			fmt.Fprintf(o.Out, "%s: %s\n", name, p)
 		}
 		return nil
 	}
-	dir := binDir(o.ToolsDir)
-	marker := filepath.Join(dir, ".sha256")
-	if b, err := os.ReadFile(marker); err == nil && strings.TrimSpace(string(b)) == whisperCppZip.SHA256 {
-		fmt.Fprintf(o.Out, "whisper.cpp %s: already installed\n", whisperCppRelease)
+	for _, b := range bundles {
+		if err := installBundle(ctx, o, b); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// installBundle extracts b into its folder unless that folder already holds
+// b (see installed).
+func installBundle(ctx context.Context, o SetupOptions, b bundle) error {
+	dir := filepath.Join(o.ToolsDir, b.Dir)
+	if installed(dir, b) {
+		fmt.Fprintf(o.Out, "%s: already installed\n", b.Dir)
 		return nil
 	}
-	zipPath, err := obtain(ctx, o, whisperCppZip)
+	archive, err := obtain(ctx, o, b.artifact, o.ToolsDir)
 	if err != nil {
 		return err
 	}
-	defer os.Remove(zipPath)
+	defer os.Remove(archive)
 	staging := dir + ".tmp"
 	os.RemoveAll(staging)
-	if err := extractZip(zipPath, staging); err != nil {
+	extract := extractZip
+	if strings.HasSuffix(b.Name, ".tar.gz") {
+		extract = extractTarGz
+	}
+	if err := extract(archive, staging); err != nil {
 		os.RemoveAll(staging)
 		return err
 	}
-	for _, exe := range []string{"parakeet-cli.exe", "whisper-cli.exe"} {
-		if _, err := os.Stat(filepath.Join(staging, exe)); err != nil {
+	for _, exe := range b.Exes {
+		if fi, err := os.Stat(filepath.Join(staging, exe)); err != nil || !fi.Mode().IsRegular() {
 			os.RemoveAll(staging)
-			return fmt.Errorf("%s is not in %s", exe, whisperCppZip.URL)
+			return fmt.Errorf("%s is not in %s", exe, b.URL)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(staging, ".sha256"), []byte(whisperCppZip.SHA256+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(staging, ".sha256"), []byte(b.SHA256+"\n"), 0o644); err != nil {
 		return err
 	}
 	if err := os.RemoveAll(dir); err != nil {
@@ -167,21 +238,33 @@ func installBinaries(ctx context.Context, o SetupOptions) error {
 	if err := os.Rename(staging, dir); err != nil {
 		return err
 	}
-	fmt.Fprintf(o.Out, "whisper.cpp %s: installed in %s\n", whisperCppRelease, dir)
+	fmt.Fprintf(o.Out, "%s: installed in %s\n", b.Dir, dir)
 	return nil
 }
 
-// obtain returns a verified copy of a under a temporary name in the tools
-// directory: from SourceDir when a copy is there, otherwise downloaded.
-func obtain(ctx context.Context, o SetupOptions, a artifact) (string, error) {
-	tmp := filepath.Join(o.ToolsDir, "models", a.Name+".part")
-	if a == whisperCppZip {
-		tmp = filepath.Join(o.ToolsDir, a.Name+".part")
+// installed reports whether dir holds b: its .sha256 marker names b's
+// archive and every program is there.
+func installed(dir string, b bundle) bool {
+	m, err := os.ReadFile(filepath.Join(dir, ".sha256"))
+	if err != nil || strings.TrimSpace(string(m)) != b.SHA256 {
+		return false
 	}
+	for _, exe := range b.Exes {
+		if fi, err := os.Stat(filepath.Join(dir, exe)); err != nil || !fi.Mode().IsRegular() {
+			return false
+		}
+	}
+	return true
+}
+
+// obtain returns a verified copy of a under a temporary name in dir: from
+// SourceDirs when a copy is there, otherwise downloaded.
+func obtain(ctx context.Context, o SetupOptions, a artifact, dir string) (string, error) {
+	tmp := filepath.Join(dir, a.Name+".part")
 	var src io.ReadCloser
 	from := a.URL
-	for _, dir := range o.SourceDirs {
-		if f, err := os.Open(filepath.Join(dir, a.Name)); err == nil {
+	for _, d := range o.SourceDirs {
+		if f, err := os.Open(filepath.Join(d, a.Name)); err == nil {
 			src, from = f, f.Name()
 			break
 		}
@@ -251,10 +334,10 @@ func (p *progress) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
-// extractZip unpacks the release, flattening its top "Release/" folder.
-// Entries that would leave dir are refused.
-func extractZip(path, dir string) error {
-	zr, err := zip.OpenReader(path)
+// extractZip unpacks the Windows release, flattening its top "Release/"
+// folder. Entries that would leave dir are refused.
+func extractZip(archive, dir string) error {
+	zr, err := zip.OpenReader(archive)
 	if err != nil {
 		return err
 	}
@@ -275,20 +358,79 @@ func extractZip(path, dir string) error {
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			return err
 		}
-		if err := extractFile(f, dst); err != nil {
+		r, err := f.Open()
+		if err != nil {
+			return err
+		}
+		err = writeExtracted(dst, r, 0o644)
+		r.Close()
+		if err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func extractFile(f *zip.File, dst string) error {
-	r, err := f.Open()
+// extractTarGz unpacks a macOS tools archive: folders and regular files
+// only, and a file with any executable bit becomes 0755. Entries that would
+// leave dir, links and devices are refused.
+func extractTarGz(archive, dir string) error {
+	f, err := os.Open(archive)
 	if err != nil {
 		return err
 	}
-	defer r.Close()
-	w, err := os.Create(dst)
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return err
+	}
+	defer gz.Close()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tr := tar.NewReader(gz)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		name := path.Clean(h.Name)
+		if name == "." || h.Typeflag == tar.TypeXGlobalHeader {
+			continue
+		}
+		rel := filepath.FromSlash(name)
+		if !filepath.IsLocal(rel) {
+			return fmt.Errorf("archive entry %q escapes the install dir", h.Name)
+		}
+		dst := filepath.Join(dir, rel)
+		switch h.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(dst, 0o755); err != nil {
+				return err
+			}
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+				return err
+			}
+			mode := os.FileMode(0o644)
+			if h.Mode&0o111 != 0 {
+				mode = 0o755
+			}
+			if err := writeExtracted(dst, tr, mode); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("archive entry %q is not a file or folder", h.Name)
+		}
+	}
+}
+
+// writeExtracted writes up to 1 GiB of r to dst, created with mode.
+func writeExtracted(dst string, r io.Reader, mode os.FileMode) error {
+	w, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
 	if err != nil {
 		return err
 	}
