@@ -68,6 +68,21 @@ func TestPipelineHelperProcess(t *testing.T) {
 		fmt.Fprintf(os.Stderr, "read_audio_data: read %d bytes from stdin\n", n)
 		fmt.Print("\r\n")
 		os.Exit(0)
+	case "whisper-error-exit0":
+		// whisper-cli on audio it cannot read, as parakeet-cli exits: 0.
+		io.Copy(io.Discard, os.Stdin)
+		fmt.Fprintln(os.Stderr, "error: failed to read audio file '-'")
+		os.Exit(0)
+	case "engine-warns":
+		// Library lines that name an error or a warning mid-line, and
+		// warnings: a backend that falls back to the CPU still transcribes.
+		io.Copy(io.Discard, os.Stdin)
+		fmt.Fprintln(os.Stderr, "ggml_metal_init: error: failed to allocate buffer, falling back to CPU")
+		fmt.Fprintln(os.Stderr, "whisper_init_state: compute buffer: no error: 12 MB")
+		fmt.Fprintln(os.Stderr, "warning: the language is set to auto")
+		fmt.Fprint(os.Stderr, "progress = 50%\rprogress = 100%\r")
+		fmt.Println("ok")
+		os.Exit(0)
 	}
 	os.Exit(2)
 }
@@ -109,6 +124,7 @@ func TestPipelineReportsTheCause(t *testing.T) {
 		{"ffmpeg-decodes", "whisper-unreadable", "exit status 11: read_audio_data: failed to open audio data from stdin (Unknown error); error: failed to read audio file '-'; error: 1 input file(s) failed"},
 		{"ffmpeg-streams", "engine-quits", "failed to read audio file"},
 		{"ffmpeg-sigpipe", "engine-quits", "failed to read audio file"},
+		{"ffmpeg-decodes", "whisper-error-exit0", "failed: error: failed to read audio file '-'"},
 	} {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		_, err := pipeline(ctx, exe, args(tc.ffmpeg), exe, args(tc.engine))
@@ -133,5 +149,40 @@ func TestPipelineSilenceIsNoError(t *testing.T) {
 	out, err := pipeline(ctx, exe, args("ffmpeg-decodes"), exe, args("engine-silent"))
 	if err != nil || strings.TrimSpace(string(out)) != "" {
 		t.Fatalf("silence: %q, %v", out, err)
+	}
+	// "error:" inside a library line, and warnings, are no failure.
+	out, err = pipeline(ctx, exe, args("ffmpeg-decodes"), exe, args("engine-warns"))
+	if err != nil || strings.TrimSpace(string(out)) != "ok" {
+		t.Fatalf("warnings: %q, %v", out, err)
+	}
+}
+
+// Only a line that starts with "error:" fails a run, however the writes
+// split it: whisper.cpp's tools print their errors that way, while library
+// lines such as "ggml_metal_init: error: ..." report a fallback, not a
+// failed run (and -np turns them off).
+func TestEngineLogErrorLines(t *testing.T) {
+	for _, tc := range []struct {
+		writes []string
+		failed bool
+	}{
+		{[]string{"error: failed to read audio file '-'\n"}, true},
+		{[]string{"  Error: no model\n"}, true},
+		{[]string{"progress = 10%\rerror: out of memory"}, true},
+		{[]string{"read_audio_data: ok\ner", "ror: failed to read audio file '-'\n"}, true},
+		{[]string{"ggml_metal_init: error: failed to allocate buffer\n"}, false},
+		{[]string{"whisper_full: no error: done\n", "warning: error: later\n"}, false},
+		{[]string{"warning: falling back to the CPU\n"}, false},
+		{[]string{strings.Repeat("x", 40) + " error: mid-line\n"}, false},
+		{[]string{"errors: 0\n", "error\n"}, false},
+	} {
+		var l engineLog
+		l.tail.n = 2048
+		for _, w := range tc.writes {
+			l.Write([]byte(w))
+		}
+		if l.failed != tc.failed {
+			t.Errorf("%q: failed = %v, want %v", tc.writes, l.failed, tc.failed)
+		}
 	}
 }
