@@ -121,7 +121,7 @@ jobs:
             --enable-decoder=opus,libopus,vorbis,flac,alac,mp1,mp1float,mp2,mp2float,mp3,mp3float,aac,aac_fixed,aac_latm,amrnb,amrwb,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,pcm_s32be,pcm_f32le,pcm_f32be,pcm_f64le,pcm_u8,pcm_alaw,pcm_mulaw,adpcm_ima_wav,adpcm_ms,gsm_ms \
             --enable-parser=opus,vorbis,flac,aac,aac_latm,mpegaudio \
             --enable-encoder=libopus,pcm_s16le \
-            --enable-muxer=ogg,wav,s16le \
+            --enable-muxer=ogg,wav,pcm_s16le \
             --enable-filter=aresample,aformat,anull,atrim
           make -j "$(sysctl -n hw.ncpu)"
           ./ffmpeg -hide_banner -version
@@ -191,7 +191,7 @@ jobs:
             echo "== $b"
             test -x "$b"
             test "$(lipo -archs "$b")" = "$MACHINE"
-            minos=$(otool -l "$b" | awk '$1 == "cmd" && $2 == "LC_BUILD_VERSION" {f = 1} f && $1 == "minos" {print $2; exit}')
+            minos=$(otool -l "$b" | awk '$1 == "cmd" && $2 == "LC_BUILD_VERSION" {f = 1} f && $1 == "minos" && !done {print $2; done = 1}')
             test "$minos" = "$MACOSX_DEPLOYMENT_TARGET"
             # Not stripped: the local symbols are there.
             test "$(nm "$b" | awk '$2 == "t" {n++} END {print n + 0}')" -gt 100
@@ -214,6 +214,9 @@ jobs:
           head -c 4 note.ogg | grep -q OggS
           ./check/ffmpeg -nostdin -v error -protocol_whitelist file,pipe -f ogg -i file:note.ogg -vn -ar 16000 -ac 1 -f wav pipe:1 > decoded.wav
           test "$(wc -c < decoded.wav)" -gt 16000
+          # The waveform of a voice note the daemon sends.
+          ./check/ffmpeg -hide_banner -loglevel error -protocol_whitelist pipe -f ogg -i pipe:0 -ac 1 -ar 8000 -f s16le pipe:1 < note.ogg > waveform.pcm
+          test "$(wc -c < waveform.pcm)" -gt 8000
           # No protocol but file and pipe.
           if ./check/ffmpeg -nostdin -v error -i https://example.com/x.ogg -f null - 2>/dev/null; then exit 1; fi
 
