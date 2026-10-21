@@ -8,6 +8,7 @@ name: Transcription E2E
 # change. The models are cached by their pinned SHA-256.
 on:
   push:
+    branches: ["**"]
     paths:
       - ".github/workflows/transcription.yml"
       - "cmd/whatsapp-mcp/**"
@@ -65,6 +66,9 @@ jobs:
           export HOME='$RUNNER_TEMP/home'
           export PATH='$(dirname "$(command -v go)"):/usr/bin:/bin:/usr/sbin:/sbin'
           TOOLS="\$HOME/Library/Application Support/WhatsAppMCP/tools"
+          # The pinned folders, whatever their versions, once installed.
+          FFMPEG=\$(echo "\$TOOLS"/ffmpeg-*/ffmpeg)
+          WHISPER_CPP=\$(echo "\$TOOLS"/whisper.cpp-*)
           EOF
           mkdir -p "$RUNNER_TEMP/home" "$RUNNER_TEMP/models" "$RUNNER_TEMP/voice"
           sw_vers
@@ -89,7 +93,9 @@ jobs:
           "$RUNNER_TEMP/whatsapp-mcp" setup-transcription --engine all --source-dir "$RUNNER_TEMP/models" | tee "$RUNNER_TEMP/setup.log"
           # The tools come from the tools release, never from a cache.
           test "$(grep -c '^Fetching .*-darwin-.*\.tar\.gz .* from https://github.com/vukappa4/WhatsApp-MCP/releases/download/tools-' "$RUNNER_TEMP/setup.log")" -eq 2
-          grep -Fx "ffmpeg: $TOOLS/ffmpeg-8.1.3/ffmpeg" "$RUNNER_TEMP/setup.log"
+          . "$RUNNER_TEMP/isolated.sh" # again: the pinned folders exist now
+          test -x "$FFMPEG"
+          grep -Fx "ffmpeg: $FFMPEG" "$RUNNER_TEMP/setup.log"
           ls -lR "$TOOLS"
           # Run again: everything is in place.
           "$RUNNER_TEMP/whatsapp-mcp" setup-transcription --engine all | tee "$RUNNER_TEMP/setup2.log"
@@ -105,12 +111,12 @@ jobs:
             say ${2:+-v "$2"} -o "$v/$1.wav" --file-format=WAVE --data-format=LEI16@22050 "$3"
             printf '%s\n' "$3" > "$v/$1.txt"
             # As WhatsApp records a voice note: Ogg Opus, 16 kHz mono.
-            "$TOOLS/ffmpeg-8.1.3/ffmpeg" -nostdin -v error -protocol_whitelist file,pipe -f wav -i "file:$v/$1.wav" \
+            "$FFMPEG" -nostdin -v error -protocol_whitelist file,pipe -f wav -i "file:$v/$1.wav" \
               -ac 1 -ar 16000 -c:a libopus -b:a 32k -application voip -f ogg "$v/$1.ogg"
             rm "$v/$1.wav"
           }
           record english "" "Please call me back tomorrow morning, the garden party starts at noon."
-          if say -v '?' | grep -q '^Alice '; then
+          if say -v '?' | grep '^Alice ' > /dev/null; then
             record italian Alice "Ciao, ti richiamo domani mattina perché oggi sono in ufficio fino a tardi."
           else
             echo "::notice::no Italian voice on ${{ matrix.runner }}"
@@ -132,15 +138,14 @@ jobs:
       - name: Engine report
         run: |
           . "$RUNNER_TEMP/isolated.sh"
-          ff="$TOOLS/ffmpeg-8.1.3/ffmpeg"
-          "$ff" -nostdin -v error -f ogg -i "$RUNNER_TEMP/voice/english.ogg" -ar 16000 -ac 1 -f wav "$RUNNER_TEMP/english.wav"
+          "$FFMPEG" -nostdin -v error -f ogg -i "$RUNNER_TEMP/voice/english.ogg" -ar 16000 -ac 1 -f wav "$RUNNER_TEMP/english.wav"
           for exe in parakeet-cli whisper-cli; do
             model=ggml-parakeet-tdt-0.6b-v3-q8_0.bin
             [ $exe = whisper-cli ] && model=ggml-large-v3-turbo-q8_0.bin
             for gpu in "" -ng; do
               echo "::group::$exe $gpu"
               start=$(date +%s)
-              "$TOOLS/whisper.cpp-b5454/$exe" -m "$TOOLS/models/$model" -f "$RUNNER_TEMP/english.wav" -t 4 $gpu 2>&1 | grep -Ei 'metal|gpu|backend|device|error|warn|^\[|morning' || true
+              "$WHISPER_CPP/$exe" -m "$TOOLS/models/$model" -f "$RUNNER_TEMP/english.wav" -t 4 $gpu 2>&1 | grep -Ei 'metal|gpu|backend|device|error|warn|^\[|morning' || true
               echo "$exe $gpu: $(( $(date +%s) - start )) s"
               echo "::endgroup::"
             done
@@ -150,7 +155,7 @@ jobs:
         run: |
           . "$RUNNER_TEMP/isolated.sh"
           # PATH first, as a daemon with this ffmpeg on PATH finds it.
-          export PATH="$TOOLS/ffmpeg-8.1.3:$PATH"
+          export PATH="$(dirname "$FFMPEG"):$PATH"
           go test ./internal/media ./internal/outgoing ./internal/mcpserver -count=1 -v \
             -run '^(TestFFmpegArgsNeverFetch|TestConvertVoice|TestSendFile|TestSentFileServedFromMediaFolder)$' | tee "$RUNNER_TEMP/ffmpeg.log"
           if grep -i -e '--- SKIP' -e 'ffmpeg not on PATH' "$RUNNER_TEMP/ffmpeg.log"; then exit 1; fi

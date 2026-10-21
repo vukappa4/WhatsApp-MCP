@@ -164,7 +164,7 @@ func FFmpegInstallHint() string {
 	case "windows":
 		return "winget install Gyan.FFmpeg"
 	case "darwin":
-		return "run `whatsapp-mcp setup-transcription`"
+		return "run `whatsapp-mcp setup-transcription`, or `brew install ffmpeg`"
 	}
 	return "install ffmpeg with the system package manager"
 }

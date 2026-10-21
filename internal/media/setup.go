@@ -38,7 +38,7 @@ const whisperCppDir = "whisper.cpp-" + whisperCppRelease
 
 // toolsRelease is where this project publishes its macOS builds: the
 // release tools.yml made for whisperCppRelease.
-const toolsRelease = "https://github.com/vukappa4/WhatsApp-MCP/releases/download/tools-whisper.cpp-" + whisperCppRelease + "-1/"
+const toolsRelease = "https://github.com/vukappa4/WhatsApp-MCP/releases/download/tools-whisper.cpp-" + whisperCppRelease + "-2/"
 
 // toolsArtifact is an archive of the tools release.
 func toolsArtifact(name, sha256 string, size int64) artifact {
@@ -49,12 +49,12 @@ func toolsArtifact(name, sha256 string, size int64) artifact {
 // whisper-cli (Metal on arm64), and ffmpeg with libopus.
 var darwinTools = map[string]struct{ whisperCpp, ffmpeg artifact }{
 	"arm64": {
-		whisperCpp: toolsArtifact(whisperCppDir+"-darwin-arm64.tar.gz", "823acc8e214ff0456e8a099291ace77d04448230d9ea54c3cac577b6c5e4dca7", 4005430),
-		ffmpeg:     toolsArtifact(config.PinnedFFmpegDir+"-darwin-arm64.tar.gz", "fdf469c618ef6cf64c5490dc2792c70b4911fed8b71efd9cd660e5298f51ec17", 1784621),
+		whisperCpp: toolsArtifact(whisperCppDir+"-darwin-arm64.tar.gz", "236074595d879337895ca2380404c264211b8dc605657ea6f870c69d9ef67c80", 4005444),
+		ffmpeg:     toolsArtifact(config.PinnedFFmpegDir+"-darwin-arm64.tar.gz", "d3c0e532ac72029f6b6d807e8a5a7b815c33ce0332e45115ed0648a2e20189e5", 1784718),
 	},
 	"amd64": {
-		whisperCpp: toolsArtifact(whisperCppDir+"-darwin-amd64.tar.gz", "af22f1c9727431a422531723b3c3daf77906c105d033cd68ad365bca2231116c", 2429634),
-		ffmpeg:     toolsArtifact(config.PinnedFFmpegDir+"-darwin-amd64.tar.gz", "69c8d137eefcd1eadcc8ebe77eb2400bba29321eb22fa9af883d12a5496d7823", 1837160),
+		whisperCpp: toolsArtifact(whisperCppDir+"-darwin-amd64.tar.gz", "0207605aee6dd1f152a9f153e91274070c4acd78baf0ad2da7cd8e97735ec73e", 2429630),
+		ffmpeg:     toolsArtifact(config.PinnedFFmpegDir+"-darwin-amd64.tar.gz", "82e936807ac444d3007c61e8fd56d777ae22d27b99f8d63d5a2b9fb8565e2ddf", 1837379),
 	},
 }
 

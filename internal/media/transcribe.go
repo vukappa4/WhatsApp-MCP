@@ -41,8 +41,8 @@ const (
 type CLITranscriber struct {
 	Choice   string // EngineParakeet or EngineWhisper
 	ToolsDir string
-	// LookPath finds ffmpeg and, outside Windows, the engine on PATH;
-	// exec.LookPath when nil.
+	// LookPath finds ffmpeg and, where the tools are not pinned (see
+	// toolExe), the engine on PATH; exec.LookPath when nil.
 	LookPath func(string) (string, error)
 	// FFmpegCandidates are tried in order when ffmpeg is not on PATH.
 	FFmpegCandidates []string
