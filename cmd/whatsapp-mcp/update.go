@@ -183,7 +183,7 @@ func update(ctx context.Context, o updateOptions) error {
 		}
 	}
 	if o.Check {
-		fmt.Fprintf(out, "Update available: %s -> %s (%s). Run `%s --profile %s`.\n", cur, r.Tag, r.HTMLURL, again, p)
+		fmt.Fprintf(out, "Update available: %s -> %s (%s). Run `%s --profile %s`.\n", cur, r.Tag, client.PageURL(r.Tag), again, p)
 		return nil
 	}
 

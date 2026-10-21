@@ -34,7 +34,8 @@ type Checker struct {
 	// File keeps the last answer across restarts; empty keeps it in memory.
 	File string
 	// Enabled is read before every check: false stops checking, and the
-	// notice, until it is true again. nil: always enabled.
+	// notice, until it is true again. An error keeps checking: a typo in
+	// the settings must not hide the notice. nil: always enabled.
 	Enabled func() (bool, error)
 	Log     *slog.Logger
 	Now     func() time.Time // nil: time.Now
@@ -42,15 +43,15 @@ type Checker struct {
 	// Tests shorten the waits; zero means the constants above.
 	firstDelay, interval, retryAfter, maxSleep time.Duration
 
-	mu  sync.Mutex
-	st  state
-	off string
+	mu          sync.Mutex
+	st          state
+	off         string
+	settingsErr string
 }
 
 // state is the last answer, as File keeps it.
 type state struct {
 	Latest    string    `json:"latest,omitempty"` // tag of the latest stable release
-	URL       string    `json:"url,omitempty"`    // its GitHub page
 	CheckedAt time.Time `json:"checked_at,omitzero"`
 	FailedAt  time.Time `json:"failed_at,omitzero"` // the last check, when it failed
 	Error     string    `json:"error,omitempty"`
@@ -60,35 +61,40 @@ type state struct {
 // Status is what the checker knows.
 type Status struct {
 	Installed   string    // the running version
-	Latest, URL string    // the latest stable release when a check worked, else empty
+	Latest, URL string    // the latest stable release and its page when a check worked, else empty
 	CheckedAt   time.Time // the last check that worked
 	FailedAt    time.Time // the last check, when it failed; zero after one that worked
 	Error       string    // why it failed
 	NextAt      time.Time // the next check
 	Off         string    // why the daemon does not check; empty while it does
+	Settings    string    // why the settings cannot be read; the daemon checks meanwhile
 }
 
 // Available reports whether Latest is a release newer than Installed, with
 // the version order update uses. A build from source (dev) cannot be
 // compared with releases: update --check offers no update for it either.
 func (s Status) Available() bool {
-	if s.Off != "" || s.Latest == "" {
+	if s.Off != "" || !release.PlainTag(s.Latest) {
 		return false
 	}
 	cur, err := release.ParseVersion(s.Installed)
 	if err != nil {
 		return false
 	}
-	latest, err := release.ParseVersion(s.Latest)
-	return err == nil && release.Compare(cur, latest) < 0
+	latest, _ := release.ParseVersion(s.Latest)
+	return release.Compare(cur, latest) < 0
 }
 
 // Status returns the last answer.
 func (c *Checker) Status() Status {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return Status{Installed: c.Version, Latest: c.st.Latest, URL: c.st.URL, CheckedAt: c.st.CheckedAt,
-		FailedAt: c.st.FailedAt, Error: c.st.Error, NextAt: c.st.NextAt, Off: c.off}
+	st := Status{Installed: c.Version, Latest: c.st.Latest, CheckedAt: c.st.CheckedAt,
+		FailedAt: c.st.FailedAt, Error: c.st.Error, NextAt: c.st.NextAt, Off: c.off, Settings: c.settingsErr}
+	if release.PlainTag(st.Latest) && c.Client != nil {
+		st.URL = c.Client.PageURL(st.Latest)
+	}
+	return st
 }
 
 // Run checks until ctx ends. A version that is not a release tag is never
@@ -138,25 +144,30 @@ func (c *Checker) due() time.Time {
 	return c.st.NextAt
 }
 
-// enabled reads Enabled and records why checks are off.
+// enabled reads Enabled and records why checks are off. Only an explicit
+// false turns them off: settings that cannot be read keep them on.
 func (c *Checker) enabled() bool {
 	on, err := true, error(nil)
 	if c.Enabled != nil {
 		on, err = c.Enabled()
 	}
-	off := ""
+	off, settingsErr := "", ""
 	switch {
 	case err != nil:
-		off = "the settings cannot be read: " + err.Error()
+		settingsErr = err.Error()
 	case !on:
 		off = "turned off: update_check is false in config.json"
 	}
 	c.mu.Lock()
-	changed := off != c.off
-	c.off = off
+	changed := off != c.off || settingsErr != c.settingsErr
+	c.off, c.settingsErr = off, settingsErr
 	c.mu.Unlock()
-	if changed && off != "" {
+	switch {
+	case !changed:
+	case off != "":
 		c.logger().Warn("update check off", "why", off)
+	case settingsErr != "":
+		c.logger().Warn("update check: settings unreadable, checking anyway", "err", settingsErr)
 	}
 	return off == ""
 }
@@ -196,9 +207,6 @@ func (c *Checker) check(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
-	if err == nil {
-		_, err = release.ParseVersion(r.Tag)
-	}
 	now := c.now()
 	c.mu.Lock()
 	st := c.st
@@ -213,7 +221,7 @@ func (c *Checker) check(ctx context.Context) {
 			}
 		}
 	} else {
-		st = state{Latest: r.Tag, URL: r.HTMLURL, CheckedAt: now, NextAt: now.Add(c.dur(c.interval, interval))}
+		st = state{Latest: r.Tag, CheckedAt: now, NextAt: now.Add(c.dur(c.interval, interval))}
 	}
 	before := Status{Installed: c.Version, Latest: c.st.Latest}.Available()
 	c.st = st
@@ -237,9 +245,10 @@ func (c *Checker) save(st state) {
 	if err == nil {
 		tmp := c.File + ".tmp"
 		if err = os.WriteFile(tmp, b, 0o600); err == nil {
-			if err = os.Rename(tmp, c.File); err != nil {
-				os.Remove(tmp)
-			}
+			err = os.Rename(tmp, c.File)
+		}
+		if err != nil {
+			os.Remove(tmp)
 		}
 	}
 	if err != nil {

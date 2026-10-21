@@ -3,6 +3,7 @@ package updatecheck
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -24,6 +25,7 @@ var t0 = time.Date(2030, 1, 15, 9, 0, 0, 0, time.UTC)
 
 // fakeGitHub answers releases/latest like GitHub's API: with tag (a
 // prerelease when pre), or with status and headers, and counts the calls.
+// Its html_url points elsewhere: the notice must never show it.
 type fakeGitHub struct {
 	srv     *httptest.Server
 	mu      sync.Mutex
@@ -58,7 +60,7 @@ func (g *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	json.NewEncoder(w).Encode(map[string]any{"tag_name": tag, "prerelease": pre, "draft": false,
-		"html_url": "https://github.com/" + repo + "/releases/tag/" + tag, "assets": []any{}})
+		"html_url": "https://evil.example/" + tag, "assets": []any{}})
 }
 
 func (g *fakeGitHub) set(f func(g *fakeGitHub)) {
@@ -82,6 +84,11 @@ func checker(g *fakeGitHub, version, dir string, now *time.Time) *Checker {
 
 func TestCheck(t *testing.T) {
 	reset := t0.Add(3 * time.Hour).Truncate(time.Second)
+	limited := func(at time.Time) func(g *fakeGitHub) {
+		return func(g *fakeGitHub) {
+			g.status, g.headers = 403, map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": strconv.FormatInt(at.Unix(), 10)}
+		}
+	}
 	for name, tc := range map[string]struct {
 		installed string
 		answer    func(g *fakeGitHub)
@@ -90,16 +97,17 @@ func TestCheck(t *testing.T) {
 		err       string
 		next      time.Duration
 	}{
-		"available":                 {"v0.1.0", nil, true, "v0.1.1", "", 24 * time.Hour},
-		"up to date":                {"v0.1.1", nil, false, "v0.1.1", "", 24 * time.Hour},
-		"newer installed":           {"v0.2.0", nil, false, "v0.1.1", "", 24 * time.Hour},
-		"release candidate of it":   {"v0.1.1-rc.1", nil, true, "v0.1.1", "", 24 * time.Hour},
-		"prerelease named latest":   {"v0.1.0", func(g *fakeGitHub) { g.tag, g.pre = "v0.2.0-rc.1", true }, false, "", "a draft or prerelease", time.Hour},
-		"tag that is not a version": {"v0.1.0", func(g *fakeGitHub) { g.tag = "latest" }, false, "", `version "latest"`, time.Hour},
-		"server error":              {"v0.1.0", func(g *fakeGitHub) { g.status = 502 }, false, "", "502", time.Hour},
-		"rate limit until reset": {"v0.1.0", func(g *fakeGitHub) {
-			g.status, g.headers = 403, map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": strconv.FormatInt(reset.Unix(), 10)}
-		}, false, "", "rate limit", 3 * time.Hour},
+		"available":                    {"v0.1.0", nil, true, "v0.1.1", "", 24 * time.Hour},
+		"up to date":                   {"v0.1.1", nil, false, "v0.1.1", "", 24 * time.Hour},
+		"newer installed":              {"v0.2.0", nil, false, "v0.1.1", "", 24 * time.Hour},
+		"release candidate of it":      {"v0.1.1-rc.1", nil, true, "v0.1.1", "", 24 * time.Hour},
+		"prerelease named latest":      {"v0.1.0", func(g *fakeGitHub) { g.tag, g.pre = "v0.2.0-rc.1", true }, false, "", "a draft or prerelease", time.Hour},
+		"tag that is not a version":    {"v0.1.0", func(g *fakeGitHub) { g.tag = "latest" }, false, "", `"latest" as the latest release, not a vMAJOR.MINOR.PATCH tag`, time.Hour},
+		"server error":                 {"v0.1.0", func(g *fakeGitHub) { g.status = 502 }, false, "", "502", time.Hour},
+		"rate limit until reset":       {"v0.1.0", limited(reset), false, "", "rate limit", 3 * time.Hour},
+		"rate limit beyond a day":      {"v0.1.0", limited(t0.Add(72 * time.Hour)), false, "", "rate limit", 24 * time.Hour},
+		"build suffix named latest":    {"v0.1.0", func(g *fakeGitHub) { g.tag = "v0.2.0+evil" }, false, "", "not a vMAJOR.MINOR.PATCH tag", time.Hour},
+		"unflagged prerelease latest":  {"v0.1.0", func(g *fakeGitHub) { g.tag = "v0.2.0-rc.1" }, false, "", "not a vMAJOR.MINOR.PATCH tag", time.Hour},
 		"rate limit sooner than retry": {"v0.1.0", func(g *fakeGitHub) { g.status, g.headers = 429, map[string]string{"Retry-After": "60"} }, false, "", "rate limit", time.Hour},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -258,5 +266,60 @@ func TestOff(t *testing.T) {
 	}
 	if n := g.count(); n != 1 {
 		t.Fatalf("GitHub asked %d times, want only the check before turning it off", n)
+	}
+}
+
+// Settings that cannot be read keep the check and the notice on, and say
+// why; only update_check false turns them off.
+func TestUnreadableSettingsKeepChecking(t *testing.T) {
+	g := newFakeGitHub(t, "v0.1.1")
+	c := checker(g, "v0.1.0", t.TempDir(), new(time.Time))
+	c.Now = nil
+	c.Enabled = func() (bool, error) { return true, errors.New(`config.json: unknown field "update_chek"`) }
+	c.firstDelay, c.maxSleep = time.Millisecond, time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { c.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	waitFor(t, func() bool { return c.Status().Available() })
+	if st := c.Status(); st.Off != "" || !strings.Contains(st.Settings, "update_chek") {
+		t.Fatalf("status %+v", st)
+	}
+}
+
+// A later answer replaces the file a check wrote before, and a write that
+// fails leaves no temporary file behind.
+func TestSave(t *testing.T) {
+	g := newFakeGitHub(t, "v0.1.1")
+	dir := t.TempDir()
+	now := t0
+	c := checker(g, "v0.1.0", dir, &now)
+	c.check(context.Background())
+	g.set(func(g *fakeGitHub) { g.tag = "v0.2.0" })
+	now = t0.Add(25 * time.Hour)
+	c.check(context.Background())
+	again := checker(g, "v0.1.0", dir, &now)
+	again.load()
+	if st := again.Status(); st.Latest != "v0.2.0" || !st.CheckedAt.Equal(now) {
+		t.Fatalf("after saving over the file: %+v", st)
+	}
+	if _, err := os.Stat(c.File + ".tmp"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temporary file left: %v", err)
+	}
+
+	// A folder where the file belongs: the rename fails.
+	blocked := checker(g, "v0.1.0", t.TempDir(), &now)
+	if err := os.Mkdir(blocked.File, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(blocked.File, "x"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	blocked.check(context.Background())
+	if _, err := os.Stat(blocked.File + ".tmp"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temporary file left after a failed write: %v", err)
+	}
+	if !blocked.Status().Available() {
+		t.Fatal("a failed write dropped the answer")
 	}
 }

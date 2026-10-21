@@ -510,6 +510,9 @@ func TestUpdateIncompleteRelease(t *testing.T) {
 		"prerelease as latest": {func(e *updateEnv) ghRelease {
 			return ghRelease{Tag: "v0.3.0-rc.1", Prerelease: true, Files: map[string][]byte{e.asset: e.bin}}
 		}, "GitHub named v0.3.0-rc.1, a draft or prerelease, as the latest release"},
+		"build suffix as latest": {func(e *updateEnv) ghRelease {
+			return ghRelease{Tag: "v0.3.0+x", Files: map[string][]byte{e.asset: e.bin}}
+		}, `GitHub named "v0.3.0+x" as the latest release, not a vMAJOR.MINOR.PATCH tag: not installing it`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			e := newUpdateEnv(t, "v0.2.0", "v0.3.0")

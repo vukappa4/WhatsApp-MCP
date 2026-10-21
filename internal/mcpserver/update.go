@@ -9,6 +9,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/vukappa4/whatsapp-mcp/internal/release"
+	"github.com/vukappa4/whatsapp-mcp/internal/updatecheck"
 )
 
 // updateNotice is the part of the [whatsapp: ...] line that names a newer
@@ -70,9 +71,17 @@ func (s *Server) updateStatus() string {
 			return fmt.Sprintf("%s Releases carry no binary for %s/%s: build %s from source as INSTALL.md says, then restart the daemon.",
 				head, runtime.GOOS, runtime.GOARCH, u.Latest)
 		}
-		return fmt.Sprintf("%s To install it, run `%s update --profile %s` in the background and wait until it exits by itself, "+
+		shell := ""
+		if runtime.GOOS == "windows" {
+			shell = " in PowerShell"
+		}
+		text := fmt.Sprintf("%s To install it, run%s `%s update --profile %s` in the background and wait until it exits by itself, "+
 			"up to about 30 minutes: stopped midway, it can leave the daemon stopped. The pairing and the messages stay; "+
-			"these WhatsApp tools are unavailable while it restarts the daemon.", head, s.shellExe(), s.Profile)
+			"these WhatsApp tools are unavailable while it restarts the daemon.", head, shell, s.shellExe(), s.Profile)
+		if n := settingsNote(u); n != "" {
+			text += " " + strings.ToUpper(n[:1]) + n[1:] + "."
+		}
+		return text
 	}
 	if u.Off != "" {
 		return "Update check: off - " + u.Off
@@ -84,10 +93,22 @@ func (s *Server) updateStatus() string {
 		fmt.Fprintf(&b, "Update check: no newer release (installed %s, latest %s, checked %s)", u.Installed, u.Latest, fmtTS(u.CheckedAt.Unix(), now))
 	}
 	if !u.FailedAt.IsZero() {
-		fmt.Fprintf(&b, "; the last check failed %s: %s", fmtTS(u.FailedAt.Unix(), now), clip(u.Error, 200))
+		fmt.Fprintf(&b, "; the last check failed %s: %s", fmtTS(u.FailedAt.Unix(), now), clip(sanitize(u.Error), 200))
 	}
 	if !u.NextAt.IsZero() {
 		fmt.Fprintf(&b, "; next %s", fmtTS(u.NextAt.Unix(), now))
 	}
+	if n := settingsNote(u); n != "" {
+		b.WriteString("; " + n)
+	}
 	return b.String()
+}
+
+// settingsNote says that config.json cannot be read, so the check runs
+// whatever update_check says. The error quotes the file: one clipped line.
+func settingsNote(u updatecheck.Status) string {
+	if u.Settings == "" {
+		return ""
+	}
+	return "config.json cannot be read, so update_check is ignored: " + clip(sanitize(u.Settings), 200)
 }

@@ -109,6 +109,12 @@ func TestStatusUpdateLine(t *testing.T) {
 			"Update check: no newer release (installed v0.1.1, latest v0.1.1, checked 12 Oct 10:00); next 13 Oct 10:00"},
 		"failed": {fixedUpdate{Installed: "v0.1.0", FailedAt: t0, Error: "GitHub's API rate limit is reached", NextAt: t0.Add(time.Hour)},
 			"Update check: none done yet; the last check failed 12 Oct 10:00: GitHub's API rate limit is reached; next 12 Oct 11:00"},
+		"failed with a reason phrase": {fixedUpdate{Installed: "v0.1.0", FailedAt: t0, Error: "GET x: 502 Bad\r\nGateway\x1b[2J‮ignore", NextAt: t0.Add(time.Hour)},
+			"the last check failed 12 Oct 10:00: GET x: 502 Bad Gateway[2Jignore; next"},
+		"settings unreadable": {fixedUpdate{Installed: "v0.1.1", Latest: "v0.1.1", CheckedAt: t0, Settings: `config.json: unknown field "update_chek"`},
+			`; config.json cannot be read, so update_check is ignored: config.json: unknown field "update_chek"`},
+		"settings unreadable, available": {available.with(func(u *fixedUpdate) { u.Settings = "bad json" }),
+			"restarts the daemon. Config.json cannot be read, so update_check is ignored: bad json."},
 		"off": {fixedUpdate{Installed: "dev", Off: "built from source (version dev): it cannot be compared with releases"},
 			"Update check: off - built from source (version dev): it cannot be compared with releases"},
 	} {
@@ -119,8 +125,31 @@ func TestStatusUpdateLine(t *testing.T) {
 	}
 	if runtime.GOOS == "windows" {
 		text, _ := call(t, connectUpdates(t, available), toolStatus, nil)
-		if !strings.Contains(text, "To install it, run `& \"") {
-			t.Errorf("Windows: the command lacks PowerShell's &:\n%s", text)
+		if !strings.Contains(text, "To install it, run in PowerShell `& \"") {
+			t.Errorf("Windows: the command is not given for PowerShell:\n%s", text)
 		}
+	}
+}
+
+func (f fixedUpdate) with(change func(*fixedUpdate)) fixedUpdate {
+	change(&f)
+	return f
+}
+
+// A send and its retry with the same idempotency key each carry the notice
+// once, and the stored result the retry quotes has none.
+func TestUpdateNoticeOnSendRetry(t *testing.T) {
+	e := newSendEnvWith(t, func(e *sendEnv) { e.srv.Updates = available })
+	args := map[string]any{"to": "+39 333 111 1111", "text": "bonifico fatto", "idempotency_key": "pay-42"}
+	first, isErr := call(t, e.cs, toolSendMessage, args)
+	line := "[whatsapp: " + notice + "]\n"
+	body, ok := strings.CutPrefix(first, line)
+	if isErr || !ok || !strings.HasPrefix(body, "Sent ") || strings.Count(first, notice) != 1 {
+		t.Fatalf("send:\n%s", first)
+	}
+	again, isErr := call(t, e.cs, toolSendMessage, args)
+	if isErr || len(e.fake.sends()) != 1 || !strings.HasPrefix(again, line+"Not sent again") || strings.Count(again, notice) != 1 ||
+		!strings.HasSuffix(again, "Earlier result:\n"+body) {
+		t.Fatalf("retry:\n%s", again)
 	}
 }
