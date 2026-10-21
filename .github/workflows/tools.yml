@@ -1,0 +1,274 @@
+name: Transcription tools
+
+# Builds the macOS programs setup-transcription installs
+# (internal/media/setup.go pins each archive's URL, size and SHA-256):
+#   - whisper.cpp's parakeet-cli and whisper-cli at the release the Windows
+#     build pins, ggml linked in statically, Metal on arm64;
+#   - a minimal ffmpeg: the audio containers and codecs the daemon reads,
+#     libopus for the voice notes it sends, the file and pipe protocols only,
+#     no network.
+# Each for arm64 and amd64, macOS 13 or later, linking only macOS's own
+# libraries, not stripped. Pushing a tag tools-whisper.cpp-<release>-<N>
+# publishes them, with the ffmpeg and libopus sources, as a GitHub release
+# that is never the latest. A change to this file builds and checks them
+# without publishing.
+on:
+  push:
+    branches: ["**"]
+    tags: ["tools-*"]
+    paths: [".github/workflows/tools.yml"]
+  pull_request:
+    paths: [".github/workflows/tools.yml"]
+
+permissions: {}
+
+env:
+  WHISPER_CPP_RELEASE: b5454
+  WHISPER_CPP_COMMIT: d1be6fde11ac6e0407606b4e42fe72d34add8037
+  # Signed by the FFmpeg release key FCF986EA15E6E293A5644F10B4322F04D67658D8.
+  FFMPEG_VERSION: 8.1.3
+  FFMPEG_SHA256: 7138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c1112235dea3ecd3178a3
+  # As listed in https://downloads.xiph.org/releases/opus/SHA256SUMS.txt.
+  OPUS_VERSION: 1.6.1
+  OPUS_SHA256: 6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1
+  MACOSX_DEPLOYMENT_TARGET: "13.0"
+  # A call into an API newer than the deployment target fails the build:
+  # such a program would not start on the older macOS.
+  AVAILABILITY_CFLAGS: -Werror=unguarded-availability-new
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: amd64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    env:
+      ARCH: ${{ matrix.arch }}
+    steps:
+      - name: Check the runner
+        run: |
+          machine=arm64
+          [ "$ARCH" = amd64 ] && machine=x86_64
+          test "$(uname -m)" = "$machine"
+          echo "MACHINE=$machine" >> "$GITHUB_ENV"
+          echo "PREFIX=$RUNNER_TEMP/prefix" >> "$GITHUB_ENV"
+          echo "OUT=$RUNNER_TEMP/out" >> "$GITHUB_ENV"
+          sw_vers
+          xcodebuild -version
+          cmake --version | head -n 1
+          pkg-config --version
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ggml-org/whisper.cpp
+          ref: ${{ env.WHISPER_CPP_COMMIT }}
+          path: whisper.cpp
+          persist-credentials: false
+
+      - name: Check whisper.cpp is release ${{ env.WHISPER_CPP_RELEASE }}
+        run: |
+          test "$(git -C whisper.cpp rev-parse HEAD)" = "$WHISPER_CPP_COMMIT"
+          tagged=$(git ls-remote https://github.com/ggml-org/whisper.cpp "refs/tags/$WHISPER_CPP_RELEASE" | cut -f 1)
+          test "$tagged" = "$WHISPER_CPP_COMMIT"
+
+      - name: Fetch the ffmpeg and libopus sources
+        working-directory: ${{ runner.temp }}
+        run: |
+          mkdir src
+          cd src
+          curl -fsSLO "https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz"
+          curl -fsSLO "https://downloads.xiph.org/releases/opus/opus-$OPUS_VERSION.tar.gz"
+          printf '%s  %s\n' "$FFMPEG_SHA256" "ffmpeg-$FFMPEG_VERSION.tar.xz" "$OPUS_SHA256" "opus-$OPUS_VERSION.tar.gz" | shasum -a 256 -c
+          tar -xJf "ffmpeg-$FFMPEG_VERSION.tar.xz"
+          tar -xzf "opus-$OPUS_VERSION.tar.gz"
+
+      - name: Build libopus
+        run: |
+          cmake -S "$RUNNER_TEMP/src/opus-$OPUS_VERSION" -B "$RUNNER_TEMP/opus-build" \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="$MACHINE" \
+            -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_INSTALL_LIBDIR=lib \
+            -DBUILD_SHARED_LIBS=OFF -DOPUS_BUILD_SHARED_LIBRARY=OFF \
+            -DOPUS_BUILD_PROGRAMS=OFF -DOPUS_BUILD_TESTING=OFF             -DCMAKE_C_FLAGS="$AVAILABILITY_CFLAGS"
+          cmake --build "$RUNNER_TEMP/opus-build" -j "$(sysctl -n hw.ncpu)"
+          cmake --install "$RUNNER_TEMP/opus-build"
+
+      - name: Build ffmpeg
+        working-directory: ${{ runner.temp }}/src/ffmpeg-${{ env.FFMPEG_VERSION }}
+        run: |
+          # x86 assembly needs nasm; decoding a voice note needs no speed-up.
+          asm=()
+          [ "$ARCH" = amd64 ] && asm=(--disable-x86asm)
+          # Only libopus from the prefix, never a Homebrew library.
+          export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig"
+          ./configure --prefix="$PREFIX" --cc=clang "${asm[@]}" \
+            --extra-cflags="$AVAILABILITY_CFLAGS" --pkg-config-flags=--static --disable-shared --enable-static \
+            --disable-autodetect --disable-everything --disable-network --disable-doc --disable-stripping \
+            --disable-avdevice --disable-ffplay --disable-ffprobe \
+            --enable-libopus \
+            --enable-protocol=file,pipe \
+            --enable-demuxer=ogg,wav,mov,amr,matroska,flac,mp3,aac \
+            --enable-decoder=opus,libopus,vorbis,flac,alac,mp1,mp1float,mp2,mp2float,mp3,mp3float,aac,aac_fixed,aac_latm,amrnb,amrwb,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,pcm_s32be,pcm_f32le,pcm_f32be,pcm_f64le,pcm_u8,pcm_alaw,pcm_mulaw,adpcm_ima_wav,adpcm_ms,gsm_ms \
+            --enable-parser=opus,vorbis,flac,aac,aac_latm,mpegaudio \
+            --enable-encoder=libopus,pcm_s16le \
+            --enable-muxer=ogg,wav,s16le \
+            --enable-filter=aresample,aformat,anull,atrim
+          make -j "$(sysctl -n hw.ncpu)"
+          ./ffmpeg -hide_banner -version
+          ./ffmpeg -hide_banner -buildconf
+
+      - name: Build whisper.cpp
+        run: |
+          # No BLAS backend: Accelerate's cblas_sgemm needs macOS 13.3.
+          if [ "$ARCH" = arm64 ]; then
+            # Metal source embedded, compiled at run time; ggml falls back
+            # to the CPU when no Metal device works.
+            cpu=(-DGGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=ON)
+          else
+            # Every Intel Mac that runs macOS 13 has AVX2, FMA and F16C.
+            cpu=(-DGGML_METAL=OFF -DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_BMI2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_AVX512=OFF)
+          fi
+          cmake -S whisper.cpp -B "$RUNNER_TEMP/whisper-build" \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="$MACHINE" \
+            -DCMAKE_C_FLAGS="$AVAILABILITY_CFLAGS" -DCMAKE_CXX_FLAGS="$AVAILABILITY_CFLAGS" -DCMAKE_OBJC_FLAGS="$AVAILABILITY_CFLAGS"             -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DGGML_CCACHE=OFF "${cpu[@]}"             -DGGML_BLAS=OFF \
+            -DWHISPER_BUILD_EXAMPLES=ON -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_SERVER=OFF \
+            -DWHISPER_SDL2=OFF -DWHISPER_CURL=OFF -DWHISPER_COMMON_FFMPEG=OFF
+          cmake --build "$RUNNER_TEMP/whisper-build" --config Release -j "$(sysctl -n hw.ncpu)" --target parakeet-cli whisper-cli
+
+      - name: Package
+        run: |
+          mkdir -p "$OUT" "$RUNNER_TEMP/pkg/whisper" "$RUNNER_TEMP/pkg/ffmpeg"
+          w="$RUNNER_TEMP/pkg/whisper"
+          cp "$RUNNER_TEMP/whisper-build/bin/parakeet-cli" "$RUNNER_TEMP/whisper-build/bin/whisper-cli" "$w/"
+          cp whisper.cpp/LICENSE "$w/LICENSE"
+          cat > "$w/BUILD.txt" <<EOF
+          parakeet-cli and whisper-cli from whisper.cpp $WHISPER_CPP_RELEASE (MIT license, see LICENSE):
+          https://github.com/ggml-org/whisper.cpp/tree/$WHISPER_CPP_COMMIT
+          Built for macOS $MACOSX_DEPLOYMENT_TARGET or later on $MACHINE by
+          https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/.github/workflows/tools.yml
+          (run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID).
+          EOF
+          f="$RUNNER_TEMP/pkg/ffmpeg"
+          src="$RUNNER_TEMP/src/ffmpeg-$FFMPEG_VERSION"
+          cp "$src/ffmpeg" "$f/ffmpeg"
+          cp "$src/LICENSE.md" "$f/LICENSE.md"
+          cp "$src/COPYING.LGPLv2.1" "$f/COPYING.LGPLv2.1"
+          cp "$RUNNER_TEMP/src/opus-$OPUS_VERSION/COPYING" "$f/COPYING.libopus"
+          cat > "$f/BUILD.txt" <<EOF
+          ffmpeg $FFMPEG_VERSION (LGPL 2.1 or later, see LICENSE.md and COPYING.LGPLv2.1)
+          with libopus $OPUS_VERSION (BSD, see COPYING.libopus), linked statically.
+          Sources, also attached to the GitHub release this archive comes from:
+            https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz  SHA-256 $FFMPEG_SHA256
+            https://downloads.xiph.org/releases/opus/opus-$OPUS_VERSION.tar.gz  SHA-256 $OPUS_SHA256
+          Built for macOS $MACOSX_DEPLOYMENT_TARGET or later on $MACHINE by
+          https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/.github/workflows/tools.yml
+          (run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID).
+          ffmpeg configuration:
+          $("$f/ffmpeg" -hide_banner -buildconf)
+          EOF
+          export COPYFILE_DISABLE=1
+          tar --format ustar --no-mac-metadata -czf "$OUT/whisper.cpp-$WHISPER_CPP_RELEASE-darwin-$ARCH.tar.gz" -C "$w" parakeet-cli whisper-cli LICENSE BUILD.txt
+          tar --format ustar --no-mac-metadata -czf "$OUT/ffmpeg-$FFMPEG_VERSION-darwin-$ARCH.tar.gz" -C "$f" ffmpeg LICENSE.md COPYING.LGPLv2.1 COPYING.libopus BUILD.txt
+          ls -l "$OUT"
+
+      - name: Check the programs
+        working-directory: ${{ runner.temp }}
+        run: |
+          mkdir check
+          tar -xzf "$OUT/whisper.cpp-$WHISPER_CPP_RELEASE-darwin-$ARCH.tar.gz" -C check
+          tar -xzf "$OUT/ffmpeg-$FFMPEG_VERSION-darwin-$ARCH.tar.gz" -C check
+          for b in check/parakeet-cli check/whisper-cli check/ffmpeg; do
+            echo "== $b"
+            test -x "$b"
+            test "$(lipo -archs "$b")" = "$MACHINE"
+            minos=$(otool -l "$b" | awk '$1 == "cmd" && $2 == "LC_BUILD_VERSION" {f = 1} f && $1 == "minos" {print $2; exit}')
+            test "$minos" = "$MACOSX_DEPLOYMENT_TARGET"
+            # Not stripped: the local symbols are there.
+            test "$(nm "$b" | awk '$2 == "t" {n++} END {print n + 0}')" -gt 100
+            otool -L "$b"
+            # macOS's own libraries only: nothing from Homebrew or the build.
+            otool -L "$b" | tail -n +2 | awk '{print $1}' | while read -r lib; do
+              case "$lib" in
+                /usr/lib/*|/System/Library/*) ;;
+                *) echo "::error::$b links $lib"; exit 1 ;;
+              esac
+            done
+          done
+          ./check/parakeet-cli --help > /dev/null 2>&1 || test $? -lt 128
+          ./check/whisper-cli --help > /dev/null 2>&1 || test $? -lt 128
+          # A voice note as the daemon sends one, then decoded as the daemon
+          # transcribes one.
+          say -o speech.wav --file-format=WAVE --data-format=LEI16@22050 "Testing the voice note tools."
+          ./check/ffmpeg -nostdin -hide_banner -loglevel error -protocol_whitelist file,pipe -f wav -i file:speech.wav \
+            -vn -map_metadata -1 -ac 1 -ar 16000 -c:a libopus -b:a 32k -application voip -f ogg pipe:1 > note.ogg
+          head -c 4 note.ogg | grep -q OggS
+          ./check/ffmpeg -nostdin -v error -protocol_whitelist file,pipe -f ogg -i file:note.ogg -vn -ar 16000 -ac 1 -f wav pipe:1 > decoded.wav
+          test "$(wc -c < decoded.wav)" -gt 16000
+          # No protocol but file and pipe.
+          if ./check/ffmpeg -nostdin -v error -i https://example.com/x.ogg -f null - 2>/dev/null; then exit 1; fi
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tools-darwin-${{ matrix.arch }}
+          path: ${{ runner.temp }}/out/
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/tools-')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check the tag names whisper.cpp ${{ env.WHISPER_CPP_RELEASE }}
+        run: |
+          case "$GITHUB_REF_NAME" in
+            "tools-whisper.cpp-$WHISPER_CPP_RELEASE-"[1-9]*) ;;
+            *) echo "::error::$GITHUB_REF_NAME: tag tools-whisper.cpp-$WHISPER_CPP_RELEASE-<N>"; exit 1 ;;
+          esac
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: tools-darwin-*
+          merge-multiple: true
+          path: assets
+
+      - name: Add the ffmpeg and libopus sources
+        working-directory: assets
+        run: |
+          curl -fsSLO "https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz"
+          curl -fsSLO "https://downloads.xiph.org/releases/opus/opus-$OPUS_VERSION.tar.gz"
+          printf '%s  %s\n' "$FFMPEG_SHA256" "ffmpeg-$FFMPEG_VERSION.tar.xz" "$OPUS_SHA256" "opus-$OPUS_VERSION.tar.gz" | sha256sum -c
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+          ls -l
+
+      # Created as a draft, published once every asset is uploaded, and never
+      # the latest release: releases/latest stays the daemon's.
+      - name: Publish
+        working-directory: assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<EOF
+          The macOS programs \`whatsapp-mcp setup-transcription\` installs; it pins each archive's size and SHA-256 and checks them before it extracts anything.
+
+          - \`whisper.cpp-$WHISPER_CPP_RELEASE-darwin-<arch>.tar.gz\`: parakeet-cli and whisper-cli from whisper.cpp [$WHISPER_CPP_RELEASE](https://github.com/ggml-org/whisper.cpp/tree/$WHISPER_CPP_COMMIT) (MIT), Metal on arm64.
+          - \`ffmpeg-$FFMPEG_VERSION-darwin-<arch>.tar.gz\`: a minimal ffmpeg $FFMPEG_VERSION (LGPL 2.1 or later) with libopus $OPUS_VERSION (BSD): audio decoding and Opus encoding, local files and pipes only. Its sources are attached.
+
+          For macOS 13 or later, arm64 and amd64. Built by [tools.yml](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/.github/workflows/tools.yml), [run $GITHUB_RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID).
+          EOF
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --latest=false \
+            --title "macOS transcription tools ($GITHUB_REF_NAME)" --notes-file notes.md \
+            ./*.tar.gz ./*.tar.xz SHA256SUMS
+          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false
