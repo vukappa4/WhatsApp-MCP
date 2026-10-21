@@ -1,0 +1,174 @@
+name: Transcription E2E
+
+# A Mac with nothing but the daemon, Homebrew off PATH: setup-transcription
+# downloads and verifies the pinned macOS tools and both models into a
+# throwaway home, install's refresh puts back the tools of an earlier setup,
+# both engines transcribe a voice note spoken by `say` and encoded as
+# WhatsApp records one, and the ffmpeg tests run against the pinned ffmpeg. Runs when the transcription code, its pins or this file
+# change. The models are cached by their pinned SHA-256.
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - ".github/workflows/transcription.yml"
+      - "cmd/whatsapp-mcp/**"
+      - "internal/childproc/**"
+      - "internal/config/**"
+      - "internal/media/**"
+      - "internal/outgoing/**"
+      - "internal/testaudio/**"
+      - "go.mod"
+      - "go.sum"
+  pull_request:
+    paths:
+      - ".github/workflows/transcription.yml"
+      - "cmd/whatsapp-mcp/**"
+      - "internal/childproc/**"
+      - "internal/config/**"
+      - "internal/media/**"
+      - "internal/outgoing/**"
+      - "internal/testaudio/**"
+      - "go.mod"
+      - "go.sum"
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel, macos-26]
+    runs-on: ${{ matrix.runner }}
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      # isolated.sh makes a step a Mac without Homebrew: a throwaway HOME (so
+      # the app dir and its tools are new), PATH with only macOS's own
+      # folders and Go, Go's caches where they were.
+      - name: Isolate
+        id: isolate
+        run: |
+          cat > "$RUNNER_TEMP/isolated.sh" <<EOF
+          export GOCACHE='$(go env GOCACHE)' GOMODCACHE='$(go env GOMODCACHE)' GOPATH='$(go env GOPATH)' GOTOOLCHAIN=local
+          export HOME='$RUNNER_TEMP/home'
+          export PATH='$(dirname "$(command -v go)"):/usr/bin:/bin:/usr/sbin:/sbin'
+          TOOLS="\$HOME/Library/Application Support/WhatsAppMCP/tools"
+          # The pinned folders, whatever their versions, once installed.
+          FFMPEG=\$(echo "\$TOOLS"/ffmpeg-*/ffmpeg)
+          WHISPER_CPP=\$(echo "\$TOOLS"/whisper.cpp-*)
+          EOF
+          mkdir -p "$RUNNER_TEMP/home" "$RUNNER_TEMP/models" "$RUNNER_TEMP/voice"
+          sw_vers
+          uname -m
+          # The models' pinned SHA-256 values key their cache.
+          key=$(awk '/(parakeetModel|whisperModel) = artifact\{/ {f = 1} f && /SHA256:/ {gsub(/[",]/, "", $2); print $2; f = 0}' internal/media/setup.go | paste -sd - -)
+          [ "${#key}" -eq 129 ]
+          echo "models=$key" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/models
+          key: transcription-models-${{ steps.isolate.outputs.models }}
+
+      - name: Build the daemon
+        run: go build -o "$RUNNER_TEMP/whatsapp-mcp" ./cmd/whatsapp-mcp
+
+      - name: Set up transcription
+        run: |
+          . "$RUNNER_TEMP/isolated.sh"
+          if command -v ffmpeg; then echo "::error::ffmpeg is on PATH"; exit 1; fi
+          "$RUNNER_TEMP/whatsapp-mcp" setup-transcription --engine all --source-dir "$RUNNER_TEMP/models" | tee "$RUNNER_TEMP/setup.log"
+          # The tools come from the tools release, never from a cache.
+          test "$(grep -c '^Fetching .*-darwin-.*\.tar\.gz .* from https://github.com/vukappa4/WhatsApp-MCP/releases/download/tools-' "$RUNNER_TEMP/setup.log")" -eq 2
+          . "$RUNNER_TEMP/isolated.sh" # again: the pinned folders exist now
+          test -x "$FFMPEG"
+          grep -Fx "ffmpeg: $FFMPEG" "$RUNNER_TEMP/setup.log"
+          ls -lR "$TOOLS"
+          # Run again: everything is in place.
+          "$RUNNER_TEMP/whatsapp-mcp" setup-transcription --engine all | tee "$RUNNER_TEMP/setup2.log"
+          if grep '^Fetching' "$RUNNER_TEMP/setup2.log"; then exit 1; fi
+          # Keep the verified models for the cache.
+          ln -f "$TOOLS"/models/*.bin "$RUNNER_TEMP/models/"
+
+      # An update after an earlier setup: the models are there, the tools
+      # this version pins are not. install refreshes them.
+      - name: Refresh the tools as install does
+        run: |
+          . "$RUNNER_TEMP/isolated.sh"
+          rm -rf "$WHISPER_CPP" "$(dirname "$FFMPEG")"
+          WHATSAPP_MCP_E2E_REFRESH=1 go test ./internal/media -run '^TestRefreshToolsE2E$' -count=1 -v | tee "$RUNNER_TEMP/refresh.log"
+          if grep -- '--- SKIP' "$RUNNER_TEMP/refresh.log"; then exit 1; fi
+          . "$RUNNER_TEMP/isolated.sh"
+          test -x "$FFMPEG"
+          test -x "$WHISPER_CPP/parakeet-cli"
+
+      - name: Record voice notes
+        run: |
+          . "$RUNNER_TEMP/isolated.sh"
+          v="$RUNNER_TEMP/voice"
+          record() { # name voice text; voice "" is the default one
+            say ${2:+-v "$2"} -o "$v/$1.wav" --file-format=WAVE --data-format=LEI16@22050 "$3"
+            printf '%s\n' "$3" > "$v/$1.txt"
+            # As WhatsApp records a voice note: Ogg Opus, 16 kHz mono.
+            "$FFMPEG" -nostdin -v error -protocol_whitelist file,pipe -f wav -i "file:$v/$1.wav" \
+              -ac 1 -ar 16000 -c:a libopus -b:a 32k -application voip -f ogg "$v/$1.ogg"
+            rm "$v/$1.wav"
+          }
+          record english "" "Please call me back tomorrow morning, the garden party starts at noon."
+          if say -v '?' | grep '^Alice ' > /dev/null; then
+            record italian Alice "Ciao, ti richiamo domani mattina perché oggi sono in ufficio fino a tardi."
+          else
+            echo "::notice::no Italian voice on ${{ matrix.runner }}"
+          fi
+          ls -l "$v"
+
+      - name: Transcribe with parakeet and whisper
+        env:
+          WHATSAPP_MCP_VOICE_DIR: ${{ runner.temp }}/voice
+        run: |
+          . "$RUNNER_TEMP/isolated.sh"
+          for engine in parakeet whisper; do
+            WHATSAPP_MCP_ENGINE=$engine go test ./internal/media -run '^TestTranscribeRealVoiceNotes$' -count=1 -v | tee "$RUNNER_TEMP/$engine.log"
+          done
+          if grep -- '--- SKIP' "$RUNNER_TEMP/parakeet.log" "$RUNNER_TEMP/whisper.log"; then exit 1; fi
+
+      # What the engines print without -np: whether Metal is in use, and how
+      # long a run takes with the GPU and without it.
+      - name: Engine report
+        run: |
+          . "$RUNNER_TEMP/isolated.sh"
+          "$FFMPEG" -nostdin -v error -f ogg -i "$RUNNER_TEMP/voice/english.ogg" -ar 16000 -ac 1 -f wav "$RUNNER_TEMP/english.wav"
+          for exe in parakeet-cli whisper-cli; do
+            model=ggml-parakeet-tdt-0.6b-v3-q8_0.bin
+            [ $exe = whisper-cli ] && model=ggml-large-v3-turbo-q8_0.bin
+            for gpu in "" -ng; do
+              echo "::group::$exe $gpu"
+              start=$(date +%s)
+              "$WHISPER_CPP/$exe" -m "$TOOLS/models/$model" -f "$RUNNER_TEMP/english.wav" -t 4 $gpu 2>&1 | grep -Ei 'metal|gpu|backend|device|error|warn|^\[|morning' || true
+              echo "$exe $gpu: $(( $(date +%s) - start )) s"
+              echo "::endgroup::"
+            done
+          done
+
+      - name: Test the pinned ffmpeg
+        run: |
+          . "$RUNNER_TEMP/isolated.sh"
+          # On PATH too: the send tests look for ffmpeg there.
+          export PATH="$(dirname "$FFMPEG"):$PATH"
+          go test ./internal/media ./internal/outgoing ./internal/mcpserver -count=1 -v \
+            -run '^(TestFFmpegArgsNeverFetch|TestConvertVoice|TestSendFile|TestSentFileServedFromMediaFolder)$' | tee "$RUNNER_TEMP/ffmpeg.log"
+          if grep -i -e '--- SKIP' -e 'ffmpeg not on PATH' "$RUNNER_TEMP/ffmpeg.log"; then exit 1; fi
+          test "$(grep -c -- '--- PASS' "$RUNNER_TEMP/ffmpeg.log")" -eq 4

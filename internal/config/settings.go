@@ -19,7 +19,13 @@ type Settings struct {
 	SendFileRoots []string `json:"send_file_roots,omitempty"`
 	// SendFileExtraRoots adds folders to the default (or replaced) list.
 	SendFileExtraRoots []string `json:"send_file_extra_roots,omitempty"`
+	// UpdateCheck false stops the daemon's daily question to GitHub for a
+	// newer release. Unset or true keeps it.
+	UpdateCheck *bool `json:"update_check,omitempty"`
 }
+
+// UpdateCheckOn reports whether the daemon may ask GitHub for a newer release.
+func (s Settings) UpdateCheckOn() bool { return s.UpdateCheck == nil || *s.UpdateCheck }
 
 // SettingsFile is <data dir>\config.json.
 func SettingsFile(dataDir string) string { return filepath.Join(dataDir, "config.json") }

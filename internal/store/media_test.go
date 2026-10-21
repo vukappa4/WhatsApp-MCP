@@ -447,3 +447,65 @@ func TestMigrateV10ResetsAbsoluteMediaPaths(t *testing.T) {
 		t.Fatalf("rows:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }
+
+// v13 makes empty transcripts untranscribed, so the sweep runs the engine
+// again; text, errors and rows never transcribed stay as they are.
+func TestMigrateV13RetriesEmptyTranscripts(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "data.db")
+	all := migrations
+	migrations = all[:12]
+	db, err := Open(ctx, path)
+	migrations = all
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, q := range []string{
+		`INSERT INTO chats(id, jid, kind, created_at) VALUES (1, '393331111111@s.whatsapp.net', 'dm', 0)`,
+		`INSERT INTO media(id, mimetype, state, local_path, transcript, transcript_lang, transcript_engine, transcript_error) VALUES
+			(1, 'audio/ogg', 'downloaded', 'a.ogg', '', '', 'parakeet-tdt-0.6b-v3-q8_0', ''),
+			(2, 'audio/ogg', 'downloaded', 'b.ogg', 'ci vediamo domani', 'it', 'whisper-large-v3-turbo-q8_0', ''),
+			(3, 'audio/ogg', 'downloaded', 'c.ogg', NULL, NULL, NULL, 'parakeet-cli.exe failed: exit status 1: error: failed to load model'),
+			(4, 'audio/ogg', 'downloaded', 'd.ogg', NULL, NULL, NULL, ''),
+			(5, 'audio/ogg', 'pending', '', '', 'en', 'whisper-large-v3-turbo-q8_0', '')`,
+		`INSERT INTO messages(chat_id, wa_id, ts, kind, media_id) VALUES (1, 'A', 1, 'voice', 1), (1, 'B', 2, 'voice', 2),
+			(1, 'C', 3, 'voice', 3), (1, 'D', 4, 'audio', 4), (1, 'E', 5, 'voice', 5)`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatalf("setup step %d: %v", i, err)
+		}
+	}
+	db.Close()
+	if db, err = Open(ctx, path); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rows, err := db.Query(`SELECT id, COALESCE(transcript, 'NULL'), COALESCE(transcript_lang, 'NULL'), COALESCE(transcript_engine, 'NULL'), transcript_error
+		FROM media ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var id int
+		var tr, lang, engine, terr string
+		rows.Scan(&id, &tr, &lang, &engine, &terr)
+		got = append(got, fmt.Sprintf("%d %s %s %s %s", id, tr, lang, engine, terr))
+	}
+	want := []string{
+		"1 NULL NULL NULL ",
+		"2 ci vediamo domani it whisper-large-v3-turbo-q8_0 ",
+		"3 NULL NULL NULL parakeet-cli.exe failed: exit status 1: error: failed to load model",
+		"4 NULL NULL NULL ",
+		"5 NULL NULL NULL ",
+	}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("rows:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	// The sweep queues the reset row with its file, newest first.
+	refs, err := UntranscribedAudio(ctx, db, 10)
+	if err != nil || len(refs) != 2 || refs[0].MediaID != 4 || refs[1].MediaID != 1 {
+		t.Fatalf("untranscribed = %+v, %v", refs, err)
+	}
+}

@@ -164,7 +164,6 @@ func (c *Client) allowedRedirect(u *url.URL) bool {
 type Release struct {
 	Tag               string
 	Prerelease, Draft bool
-	HTMLURL           string
 	Assets            []Asset
 }
 
@@ -217,6 +216,43 @@ func (c *Client) Latest(ctx context.Context) (*Release, error) {
 	return r, err
 }
 
+// LatestStable is Latest, refused when GitHub names as the latest release a
+// draft, a prerelease or a tag that is not a plain vMAJOR.MINOR.PATCH, which
+// release.yml never makes the latest: update installs it, and the daemon's
+// check reports it, only when it is none of these.
+func (c *Client) LatestStable(ctx context.Context) (*Release, error) {
+	r, err := c.Latest(ctx)
+	switch {
+	case err != nil:
+		return nil, err
+	case r.Draft || r.Prerelease:
+		return nil, &UnstableError{Tag: r.Tag, Flagged: true}
+	case !PlainTag(r.Tag):
+		return nil, &UnstableError{Tag: r.Tag}
+	}
+	return r, nil
+}
+
+// UnstableError is GitHub naming as the latest release a draft or a
+// prerelease (Flagged), or a tag that is not a plain vMAJOR.MINOR.PATCH.
+type UnstableError struct {
+	Tag     string
+	Flagged bool
+}
+
+func (e *UnstableError) Error() string {
+	if e.Flagged {
+		return "GitHub named " + e.Tag + ", a draft or prerelease, as the latest release"
+	}
+	return fmt.Sprintf("GitHub named %q as the latest release, not a vMAJOR.MINOR.PATCH tag", e.Tag)
+}
+
+// PageURL is the GitHub page of the release tagged tag. It is built here,
+// never taken from GitHub's answer, so the page shown is the project's own.
+func (c *Client) PageURL(tag string) string {
+	return "https://github.com/" + c.Repo + "/releases/tag/" + tag
+}
+
 // ByTag is the release tagged tag, prereleases included.
 func (c *Client) ByTag(ctx context.Context, tag string) (*Release, error) {
 	r, err := c.release(ctx, "/releases/tags/"+tag)
@@ -234,7 +270,6 @@ func (c *Client) release(ctx context.Context, path string) (*Release, error) {
 		TagName    string `json:"tag_name"`
 		Prerelease bool   `json:"prerelease"`
 		Draft      bool   `json:"draft"`
-		HTMLURL    string `json:"html_url"`
 		Assets     []struct {
 			Name   string `json:"name"`
 			URL    string `json:"browser_download_url"`
@@ -253,7 +288,7 @@ func (c *Client) release(ctx context.Context, path string) (*Release, error) {
 	if in.TagName == "" {
 		return nil, fmt.Errorf("GET %s: the answer names no tag", endpoint)
 	}
-	r := &Release{Tag: in.TagName, Prerelease: in.Prerelease, Draft: in.Draft, HTMLURL: in.HTMLURL}
+	r := &Release{Tag: in.TagName, Prerelease: in.Prerelease, Draft: in.Draft}
 	prefix := c.downloadPrefix(in.TagName)
 	for _, a := range in.Assets {
 		if !plainName(a.Name) {

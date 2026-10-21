@@ -32,21 +32,26 @@ func ptr[T any](v T) *T { return &v }
 // installed program (this process): stop the daemon, pair, install again.
 // The WhatsApp tools are gone meanwhile.
 func (s *Server) relinkSteps() string {
-	exe, err := os.Executable()
-	if err != nil {
-		exe = "whatsapp-mcp"
-	}
-	run := `"` + exe + `"`
-	if runtime.GOOS == "windows" {
-		run = "& " + run // PowerShell runs a quoted path only through &
-	}
-	p := s.Profile
+	run, p := s.shellExe(), s.Profile
 	return fmt.Sprintf("To link again, run in a shell (these WhatsApp tools are unavailable until step 3 ends): "+
 		"1. `%[1]s stop --profile %[2]s`. "+
 		"2. At once, in the background: `%[1]s pair --profile %[2]s`. It opens a QR code page in the browser: the user scans it with the same WhatsApp number as before "+
 		"(WhatsApp > Settings or the three-dot menu > Linked devices > Link a device). If it says the profile is already paired, run `%[1]s unlink --profile %[2]s` first, then pair. "+
 		"If it says another process holds the profile, the autostart restarted the daemon: start again from step 1. "+
 		"3. When pair has exited by itself (it prints \"History sync quiet\"), `%[1]s install --profile %[2]s`.", run, p)
+}
+
+// shellExe runs the installed program (this process) in a shell: its quoted
+// path, behind & on Windows, where PowerShell runs a quoted path only so.
+func (s *Server) shellExe() string {
+	exe, err := os.Executable()
+	if err != nil {
+		exe = "whatsapp-mcp"
+	}
+	if runtime.GOOS == "windows" {
+		return `& "` + exe + `"`
+	}
+	return `"` + exe + `"`
 }
 
 func readOnly(title string) *mcp.ToolAnnotations {
@@ -191,6 +196,9 @@ func (s *Server) status(ctx context.Context, _ *mcp.CallToolRequest, _ statusIn)
 	var b strings.Builder
 	b.WriteString(fresh + "\n")
 	fmt.Fprintf(&b, "Profile: %s (data dir %s)\n", s.Profile, s.DataDir)
+	if s.Updates != nil {
+		b.WriteString(s.updateStatus() + "\n")
+	}
 	if st.Paired() {
 		fmt.Fprintf(&b, "Account: %s, LID %s\n", people.FormatPhone("+"+st.AccountPN.User), st.AccountLID)
 	} else {

@@ -129,7 +129,7 @@ It writes the Claude config folder named by `CLAUDE_CONFIG_DIR`, else `~/.claude
 
 ## 6. Voice notes and audio (optional, ask the user)
 
-Transcribing voice notes and sending voice notes need ffmpeg; transcription also needs a speech model (about 650 MB download).
+Transcribing voice notes and sending voice notes need ffmpeg; transcription also needs the whisper.cpp programs and a speech model (about 650 MB download). `setup-transcription` downloads the programs (on macOS also ffmpeg) and the model, and checks each file's SHA-256.
 
 Windows:
 
@@ -141,17 +141,14 @@ winget install --id Gyan.FFmpeg -e --accept-source-agreements --accept-package-a
 
 Without the two `--accept` flags the first winget run waits for an answer no agent can give. Tell the user first: Windows asks them to allow the installer.
 
-macOS (the transcription programs come from Homebrew's `whisper.cpp`, which on Intel Macs builds from source for several minutes):
+macOS (no Homebrew needed: `setup-transcription` also installs ffmpeg; this project builds the programs for Apple Silicon and Intel Macs):
 
 ```sh
-brew install ffmpeg whisper.cpp
 "$HOME/Library/Application Support/WhatsAppMCP/bin/whatsapp-mcp" setup-transcription
 "$HOME/Library/Application Support/WhatsAppMCP/bin/whatsapp-mcp" install
 ```
 
-Without Homebrew (`brew --version` fails), the user installs it from https://brew.sh first: its installer asks for their password. After a fresh Homebrew install, run `eval "$(/opt/homebrew/bin/brew shellenv)"` (Intel Macs: `eval "$(/usr/local/bin/brew shellenv)"`) in the same shell before calling `brew`.
-
-The second `install` restarts the daemon so it finds ffmpeg. Run it as [Long commands](#long-commands) says: in the background, and wait until it exits.
+The `install` after `setup-transcription` restarts the daemon so it finds ffmpeg and the new programs. Run both as [Long commands](#long-commands) says: in the background, and wait until each exits.
 
 ## 7. Finish
 
@@ -195,11 +192,13 @@ macOS:
 It compares the installed program's version with the latest release, downloads the release's binary for this computer, checks its SHA-256 against the release's `checksums.txt`, then runs the downloaded binary's `install`: it replaces the installed program and restarts the daemon. Do not close the window while that `install` runs: Ctrl-C does not stop it, but closing the window can, and may leave the daemon stopped. The pairing and the messages stay. Worked when it prints `Updated profile prod: <old> -> <new>.` or `Already up to date: <version>.`
 
 - `update --check` only reports: `Update available: <old> -> <new> ...` or `Already up to date: ...`.
-- `update --version v0.3.0` installs that release, also a prerelease or an older one. Before an older one it warns: if the newer version changed the database, the older one does not start and `install` fails after 3 minutes; then run `update` again to go back.
+- The daemon runs the same check by itself once a day: the first a minute after it starts; after a failure an hour later, or when GitHub's rate limit resets if that is later. A restart keeps the last answer and does not check again before it is due. While a newer release exists, every WhatsApp result starts with a line naming it: the read tools' `[whatsapp: ... | update v0.3.0 available - whatsapp_status says how]`, and for the send tools, `whatsapp_request_history` and errors a line of its own, `[whatsapp: update v0.3.0 available - whatsapp_status says how]`. `whatsapp_status` gives the exact `update` command for the profile. Tell the user once, and offer to run that command as [Long commands](#long-commands) says. An install built from source (`dev`) is never checked. `{"update_check": false}` in the profile's `config.json` (in its data folder) turns the check off; a `config.json` that cannot be read leaves it on, and `whatsapp_status` says why.
+- `update --version v0.3.0` installs that release, also a prerelease or an older one. Before an older one it warns: if the newer version changed the database, the older one does not start and `install` fails after 3 minutes; then run `update` again to go back. After going back the notice for the latest release shows again, until the next `update` or `update_check` false. v0.1.0 refuses a `config.json` that contains `update_check`, and then `whatsapp_send_file` fails: remove that key before going back to it.
 - `update --force` replaces an install it cannot compare with releases: one built from source (its `version` prints `dev`), one too old to have a `version` command, or one whose `version` fails (`update` then prints why, for example an antivirus block). It also reinstalls the same version to repair it, and goes back to the latest release from a newer installed version. Without `--force`, `update` refuses an install it cannot compare and prints the command to run, and leaves a newer version alone.
 - `update` makes one call to GitHub's API. GitHub allows 60 calls an hour per network without login: past that, `update` says when to try again, or download the release by hand as in step 2 and run its `install`. Behind a proxy, set `HTTPS_PROXY`.
 - `update` works on the installed profile, whose daemon always uses the profile's own data folder: it refuses `--data-dir`.
 - On macOS, `update` ends with a reminder: a Full Disk Access entry for the program stops applying after an update. If the user had added one (step 7), they remove it, add it again, then run `install` with the installed program, as [Long commands](#long-commands) says.
+- When voice notes are set up (step 6), `install` also installs the transcription programs this version runs. If that fails it prints `Transcription programs not installed, voice notes stay untranscribed: ...` and the daemon runs without transcription: run the `setup-transcription` command that line names, then `install`, as step 6 says.
 - `update` never changes the Claude Code settings. When they are older than the program, `install` prints `Claude Code settings in <folder> are older than this version: run ...`. Only then, run `setup-claude` again as in step 5, once for every Claude config folder the user uses, and tell the user to restart Claude Code.
 
 ### Move from a source install

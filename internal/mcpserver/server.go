@@ -23,12 +23,18 @@ import (
 	"github.com/vukappa4/whatsapp-mcp/internal/media"
 	"github.com/vukappa4/whatsapp-mcp/internal/outgoing"
 	"github.com/vukappa4/whatsapp-mcp/internal/store"
+	"github.com/vukappa4/whatsapp-mcp/internal/updatecheck"
 	"github.com/vukappa4/whatsapp-mcp/internal/wa"
 )
 
 // StatusSource reports the linked device state.
 type StatusSource interface {
 	Status() wa.Status
+}
+
+// UpdateSource reports the daemon's background check for a newer release.
+type UpdateSource interface {
+	Status() updatecheck.Status
 }
 
 // Server holds what the tools read.
@@ -50,6 +56,8 @@ type Server struct {
 	// Files decides which local files whatsapp_send_file may read; nil means
 	// outgoing.LoadPolicy(DataDir).
 	Files *outgoing.Policy
+	// Updates names a newer release at the top of every result; nil: never.
+	Updates UpdateSource
 
 	sendMu   sync.Mutex  // one send at a time: idempotency keys stay exact
 	closing  atomic.Bool // the daemon is stopping: new sends are refused (Drain)
@@ -61,7 +69,7 @@ const Instructions = `WhatsApp MCP reads the user's own WhatsApp account through
 
 Identity: every phone number and WhatsApp LID of a person maps to one person (p_N) with one DM chat. Chats are c_N, messages m_N. People appear as "Name (+39 333 123 4567)" when saved in the user's address book, and as "~Name (+39 ...)" when the name is the one they chose for their own WhatsApp profile (like WhatsApp shows strangers).
 
-Freshness: every result starts with a [whatsapp: ...] line. If it says DISCONNECTED, NOT PAIRED, "results may be stale" or names a gap overlapping the range, tell the user the data may be incomplete. Nothing arrives while the daemon is down; WhatsApp replays missed messages after reconnecting.
+Freshness: every result starts with a [whatsapp: ...] line. If it says DISCONNECTED, NOT PAIRED, "results may be stale" or names a gap overlapping the range, tell the user the data may be incomplete. Nothing arrives while the daemon is down; WhatsApp replays missed messages after reconnecting. If it names an update, tell the user once and offer to run the command whatsapp_status gives.
 
 Times are Europe/Rome; dates without a year are this year. Time inputs accept the shown forms and ISO 8601 with any offset; without one, a date or date-time is Europe/Rome and a time alone (09:00) is today in Europe/Rome.
 
@@ -76,7 +84,8 @@ func (s *Server) NewMCP() *mcp.Server {
 		Capabilities: &mcp.ServerCapabilities{},
 		Logger:       logx.Quiet(s.Log), // per-request SDK chatter at debug
 	})
-	srv.AddReceivingMiddleware(s.recoverPanics)
+	// updateLine is outermost: it also sees the answer to a panic.
+	srv.AddReceivingMiddleware(s.updateLine, s.recoverPanics)
 	s.addTools(srv)
 	return srv
 }

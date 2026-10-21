@@ -48,7 +48,7 @@ func TestLatest(t *testing.T) {
 		got.Header.Get("Authorization") != "" {
 		t.Fatalf("request %s %v", got.URL, got.Header)
 	}
-	if r.Tag != "v0.3.0" || r.Prerelease || r.Draft || !strings.HasSuffix(r.HTMLURL, "/tag/v0.3.0") || len(r.Assets) != 2 {
+	if r.Tag != "v0.3.0" || r.Prerelease || r.Draft || len(r.Assets) != 2 {
 		t.Fatalf("release %+v", r)
 	}
 	a, ok := r.Asset("whatsapp-mcp_windows_amd64.exe")
@@ -518,6 +518,15 @@ func TestAssetName(t *testing.T) {
 		got, err := AssetName(in[0], in[1])
 		if got != want || (err == nil) != (want != "") {
 			t.Errorf("AssetName(%s/%s) = %q, %v; want %q", in[0], in[1], got, err, want)
+		}
+	}
+}
+
+func TestPlainTag(t *testing.T) {
+	for tag, want := range map[string]bool{"v0.1.1": true, "v10.0.3": true, "v0.1.1-rc.1": false, "v0.1.1+x": false,
+		"v01.1.1": false, "0.1.1": false, "dev": false, "": false} {
+		if PlainTag(tag) != want {
+			t.Errorf("PlainTag(%q) = %v", tag, !want)
 		}
 	}
 }

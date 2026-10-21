@@ -43,6 +43,15 @@ jobs:
           if [ "$GITHUB_REF_NAME" = "$highest" ]; then latest=true; else latest=false; fi
           echo "MAKE_LATEST=$latest" >> "$GITHUB_ENV"
           echo "$GITHUB_REF_NAME: make_latest $latest (highest vX.Y.Z tag on main: $highest)"
+      # The tools-* tags of tools.yml share main's history: the release
+      # notes start from the previous vX.Y.Z tag, never from one of them.
+      - name: Pin GoReleaser's current and previous tags
+        run: |
+          echo "GORELEASER_CURRENT_TAG=$GITHUB_REF_NAME" >> "$GITHUB_ENV"
+          if prev=$(git describe --tags --abbrev=0 --match 'v[0-9]*' "$GITHUB_SHA^" 2>/dev/null); then
+            echo "GORELEASER_PREVIOUS_TAG=$prev" >> "$GITHUB_ENV"
+            echo "previous release tag: $prev"
+          fi
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
