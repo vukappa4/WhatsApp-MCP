@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"github.com/vukappa4/whatsapp-mcp/internal/claudecode"
 	"github.com/vukappa4/whatsapp-mcp/internal/config"
 	"github.com/vukappa4/whatsapp-mcp/internal/instance"
+	"github.com/vukappa4/whatsapp-mcp/internal/media"
 )
 
 // The autostart service is per OS: a Task Scheduler task on Windows
@@ -54,6 +56,8 @@ func installCmd(args []string) error {
 		}
 		fmt.Println("Installed", dst)
 	}
+	// Before the daemon restarts: it starts with the programs it runs.
+	refreshTranscriptionTools(os.Stdout)
 
 	// The service is registered before the daemon stops: whatever fails
 	// later, it starts the installed binary.
@@ -78,6 +82,28 @@ func installCmd(args []string) error {
 	removeLeftovers(dst)
 	checkClaudeSettings(cfg, dst, os.Stdout)
 	return nil
+}
+
+// refreshTimeout bounds install's download of the transcription programs,
+// a few MB.
+const refreshTimeout = 10 * time.Minute
+
+// refreshTranscriptionTools installs the transcription programs this
+// version pins when transcription is set up but they are missing or older
+// (media.RefreshTools): the daemon runs only the pinned ones, so without
+// this an update would stop transcription. A failure is reported and the
+// install goes on, as checkClaudeSettings does: the daemon runs, and
+// whatsapp_status says transcription is not ready and why.
+func refreshTranscriptionTools(out io.Writer) {
+	dir, err := config.ToolsDir()
+	if err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
+		defer cancel()
+		err = media.RefreshTools(ctx, media.SetupOptions{ToolsDir: dir, Out: out})
+	}
+	if err != nil {
+		fmt.Fprintf(out, "Transcription programs not installed, voice notes stay untranscribed: %v\n", err)
+	}
 }
 
 // uninstallCmd removes the service first (so nothing restarts the daemon),

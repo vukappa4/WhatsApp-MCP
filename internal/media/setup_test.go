@@ -8,7 +8,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -227,6 +229,182 @@ func TestInstallBundle(t *testing.T) {
 		t.Fatalf("incomplete archive left %v", err)
 	}
 }
+
+// fakeBundles are this OS's pinned bundles with small archives of the same
+// names and layout in a source folder; the parakeet model's pinned size is
+// small for the test.
+func fakeBundles(t *testing.T) (src string, bundles []bundle) {
+	t.Helper()
+	src = t.TempDir()
+	for _, b := range toolBundles(runtime.GOOS, runtime.GOARCH) {
+		archive := filepath.Join(src, b.Name)
+		if strings.HasSuffix(b.Name, ".zip") {
+			files := map[string]string{}
+			for _, e := range b.Exes {
+				files["Release/"+e] = "exe " + e
+			}
+			writeZip(t, archive, files)
+		} else {
+			var entries []tarEntry
+			for _, e := range b.Exes {
+				entries = append(entries, tarEntry{"./" + e, tar.TypeReg, 0o755, "exe " + e})
+			}
+			writeTarGz(t, archive, entries)
+		}
+		body, err := os.ReadFile(archive)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sum := sha256.Sum256(body)
+		b.SHA256, b.Size, b.URL = hex.EncodeToString(sum[:]), int64(len(body)), "https://example.invalid/"+b.Name
+		bundles = append(bundles, b)
+	}
+	saved := parakeetModel
+	t.Cleanup(func() { parakeetModel = saved })
+	parakeetModel.Size = 5
+	return src, bundles
+}
+
+// An update after an earlier setup: the model is in place, the programs
+// this version pins are not. install's refresh installs them, and the
+// engine is ready again.
+func TestRefreshToolsAfterUpgrade(t *testing.T) {
+	tools := t.TempDir()
+	src, bundles := fakeBundles(t)
+	if err := os.MkdirAll(filepath.Join(tools, "models"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(modelPath(tools, parakeetModel), []byte("model"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	onPath := func(name string) (string, error) { return "/somewhere/bin/" + name, nil }
+	tr := &CLITranscriber{Choice: EngineParakeet, ToolsDir: tools, LookPath: onPath}
+	if pinnedBinaries {
+		if err := tr.Check(); err == nil || !strings.Contains(err.Error(), "setup-transcription") {
+			t.Fatalf("before the refresh: Check = %v, want the missing program", err)
+		}
+	}
+	var out bytes.Buffer
+	o := SetupOptions{ToolsDir: tools, SourceDirs: []string{src}, Out: &out}
+	if err := refreshTools(context.Background(), o, bundles); err != nil {
+		t.Fatal(err)
+	}
+	if !pinnedBinaries {
+		if out.Len() != 0 {
+			t.Fatalf("nothing is pinned on %s, yet:\n%s", runtime.GOOS, out.String())
+		}
+		return
+	}
+	if !strings.Contains(out.String(), "installing the programs this version runs") || strings.Count(out.String(), "Fetching ") != len(bundles) {
+		t.Fatalf("refresh output:\n%s", out.String())
+	}
+	if err := tr.Check(); err != nil {
+		t.Fatalf("after the refresh: %v", err)
+	}
+
+	// Current: nothing is fetched, nothing printed.
+	out.Reset()
+	if err := refreshTools(context.Background(), o, bundles); err != nil || out.Len() != 0 {
+		t.Fatalf("current tools: %v\n%s", err, out.String())
+	}
+
+	// A bundle of another pin is replaced.
+	marker := filepath.Join(tools, bundles[0].Dir, ".sha256")
+	if err := os.WriteFile(marker, []byte(strings.Repeat("0", 64)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := refreshTools(context.Background(), o, bundles); err != nil || strings.Count(out.String(), "Fetching ") != 1 {
+		t.Fatalf("outdated bundle: %v\n%s", err, out.String())
+	}
+	if m, _ := os.ReadFile(marker); strings.TrimSpace(string(m)) != bundles[0].SHA256 {
+		t.Fatalf("marker after the refresh: %q", m)
+	}
+
+	// A failure names the command that fixes it.
+	os.RemoveAll(filepath.Join(tools, bundles[0].Dir))
+	err := refreshTools(context.Background(), SetupOptions{ToolsDir: tools, SourceDirs: []string{t.TempDir()}, HTTP: failingHTTP(), Out: io.Discard}, bundles)
+	if err == nil || !strings.Contains(err.Error(), "run `whatsapp-mcp setup-transcription --engine parakeet`") {
+		t.Fatalf("failed refresh: %v", err)
+	}
+}
+
+// The upgrade on a real machine, as install runs it: set
+// WHATSAPP_MCP_E2E_REFRESH=1 on a tools dir (WHATSAPP_MCP_TOOLS_DIR, else
+// <app dir>/tools) that holds the parakeet model and none of the pinned
+// programs. The refresh downloads and verifies them, and parakeet is ready.
+func TestRefreshToolsE2E(t *testing.T) {
+	if os.Getenv("WHATSAPP_MCP_E2E_REFRESH") != "1" {
+		t.Skip("WHATSAPP_MCP_E2E_REFRESH not set")
+	}
+	if !pinnedBinaries {
+		t.Skip("the tools are not pinned on " + runtime.GOOS)
+	}
+	tools := os.Getenv("WHATSAPP_MCP_TOOLS_DIR")
+	if tools == "" {
+		var err error
+		if tools, err = config.ToolsDir(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bundles := toolBundles(runtime.GOOS, runtime.GOARCH)
+	for _, b := range bundles {
+		if _, err := os.Stat(filepath.Join(tools, b.Dir)); !os.IsNotExist(err) {
+			t.Fatalf("%s is installed already (%v): remove it first", b.Dir, err)
+		}
+	}
+	tr, err := NewTranscriber(EngineParakeet, tools, config.FFmpegLocations())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.Check(); err == nil {
+		t.Fatal("parakeet is ready without its programs")
+	}
+	var out bytes.Buffer
+	if err := RefreshTools(context.Background(), SetupOptions{ToolsDir: tools, Out: &out}); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	t.Log(out.String())
+	if got := strings.Count(out.String(), "Fetching "); got != len(bundles) {
+		t.Fatalf("fetched %d archives, want %d", got, len(bundles))
+	}
+	if err := tr.Check(); err != nil {
+		t.Fatalf("after the refresh: %v", err)
+	}
+	ff, err := tr.(*CLITranscriber).FFmpeg()
+	if p := config.FFmpegLocations().Pinned; p != "" && (err != nil || ff != p) {
+		t.Fatalf("ffmpeg = %q, %v; want the pinned %s", ff, err, p)
+	}
+}
+
+// Without a model transcription was never set up: the refresh fetches nothing.
+func TestRefreshToolsNeedsSetup(t *testing.T) {
+	tools := t.TempDir()
+	src, bundles := fakeBundles(t)
+	var out bytes.Buffer
+	if err := refreshTools(context.Background(), SetupOptions{ToolsDir: tools, SourceDirs: []string{src}, Out: &out}, bundles); err != nil || out.Len() != 0 {
+		t.Fatalf("no model: %v\n%s", err, out.String())
+	}
+	if left, _ := os.ReadDir(tools); len(left) != 0 {
+		t.Fatalf("tools dir holds %v", left)
+	}
+	// A model of the wrong size is no setup either.
+	os.MkdirAll(filepath.Join(tools, "models"), 0o755)
+	os.WriteFile(modelPath(tools, parakeetModel), []byte("model, but longer"), 0o644)
+	if got := setUpEngine(tools); got != "" {
+		t.Fatalf("setUpEngine = %q for a model of the wrong size", got)
+	}
+}
+
+// failingHTTP answers every request with an error.
+func failingHTTP() *http.Client {
+	return &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("offline")
+	})}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 // italianShare is the share of words that are common Italian function words:
 // a plausibility check that never prints the text.

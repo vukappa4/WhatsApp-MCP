@@ -132,12 +132,7 @@ type SetupOptions struct {
 // verifying every file's SHA-256. Elsewhere it checks that the engine's
 // whisper.cpp tool is found.
 func Setup(ctx context.Context, o SetupOptions) error {
-	if o.Out == nil {
-		o.Out = io.Discard
-	}
-	if o.HTTP == nil {
-		o.HTTP = &http.Client{Timeout: 2 * time.Hour}
-	}
+	o = o.withDefaults()
 	var models []artifact
 	switch o.Engine {
 	case EngineParakeet:
@@ -176,6 +171,70 @@ func Setup(ctx context.Context, o SetupOptions) error {
 		fmt.Fprintf(o.Out, "ffmpeg: %s\n", p)
 	}
 	return nil
+}
+
+func (o SetupOptions) withDefaults() SetupOptions {
+	if o.Out == nil {
+		o.Out = io.Discard
+	}
+	if o.HTTP == nil {
+		o.HTTP = &http.Client{Timeout: 2 * time.Hour}
+	}
+	return o
+}
+
+// RefreshTools installs the pinned bundles (see toolBundles) that are
+// missing from o.ToolsDir or older than this version's pins, when
+// transcription is set up there: a model setup-transcription installs is in
+// place. A new version can pin new tools, and the daemon runs only the
+// pinned ones: install calls this, so an update keeps transcribing. It
+// prints nothing when there is nothing to do; its error names the command
+// that installs everything.
+func RefreshTools(ctx context.Context, o SetupOptions) error {
+	return refreshTools(ctx, o, toolBundles(runtime.GOOS, runtime.GOARCH))
+}
+
+func refreshTools(ctx context.Context, o SetupOptions, bundles []bundle) error {
+	o = o.withDefaults()
+	engine := setUpEngine(o.ToolsDir)
+	if engine == "" {
+		return nil
+	}
+	var stale []bundle
+	for _, b := range bundles {
+		if !installed(filepath.Join(o.ToolsDir, b.Dir), b) {
+			stale = append(stale, b)
+		}
+	}
+	if len(stale) == 0 {
+		return nil
+	}
+	fmt.Fprintln(o.Out, "Transcription is set up: installing the programs this version runs.")
+	for _, b := range stale {
+		if err := installBundle(ctx, o, b); err != nil {
+			return fmt.Errorf("%w; run `whatsapp-mcp setup-transcription --engine %s`", err, engine)
+		}
+	}
+	return nil
+}
+
+// setUpEngine is the engine choice whose models are installed in toolsDir:
+// parakeet, whisper, all, or "" when transcription was never set up there.
+func setUpEngine(toolsDir string) string {
+	has := func(m artifact) bool {
+		fi, err := os.Stat(modelPath(toolsDir, m))
+		return err == nil && fi.Size() == m.Size
+	}
+	p, w := has(parakeetModel), has(whisperModel)
+	switch {
+	case p && w:
+		return "all"
+	case p:
+		return EngineParakeet
+	case w:
+		return EngineWhisper
+	}
+	return ""
 }
 
 // installTools installs every pinned bundle. Where the tools are not

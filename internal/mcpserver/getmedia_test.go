@@ -19,6 +19,7 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/vukappa4/whatsapp-mcp/internal/config"
 	"github.com/vukappa4/whatsapp-mcp/internal/media"
 	"github.com/vukappa4/whatsapp-mcp/internal/store"
 	"github.com/vukappa4/whatsapp-mcp/internal/wa"
@@ -302,6 +303,29 @@ func TestGetMediaTranscriptionFailure(t *testing.T) {
 	tr.mu.Unlock()
 	if text, _ = call(t, cs, toolGetMedia, map[string]any{"message": messageID(msgID)}); !strings.Contains(text, "Transcript: no speech detected.") {
 		t.Fatalf("silence:\n%s", text)
+	}
+}
+
+// Transcription that cannot run, as after an update that left the pinned
+// programs missing, is a NOT READY line in whatsapp_status with what is
+// missing and the command that fixes it.
+func TestStatusShowsTranscriptionNotReady(t *testing.T) {
+	db := seed(t)
+	ctx := context.Background()
+	tr, err := media.NewTranscriber(media.EngineParakeet, t.TempDir(), config.FFmpegSearch{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr := media.New(media.Options{DB: db, Root: filepath.Join(t.TempDir(), "media"), Transcriber: tr})
+	s := &Server{DB: db, WA: fixedStatus{State: wa.StateConnected, Since: t0}, Media: mgr, Profile: "dev", DataDir: "x", Version: "test",
+		Now: func() time.Time { return t0.Add(3 * time.Hour) }}
+	res, err := s.status(ctx, nil, statusIn{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := res.Content[0].(*mcp.TextContent).Text
+	if !strings.Contains(text, "Transcription: NOT READY - ") || !strings.Contains(text, "parakeet") {
+		t.Fatalf("status:\n%s", text)
 	}
 }
 

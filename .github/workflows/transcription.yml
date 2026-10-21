@@ -2,9 +2,9 @@ name: Transcription E2E
 
 # A Mac with nothing but the daemon, Homebrew off PATH: setup-transcription
 # downloads and verifies the pinned macOS tools and both models into a
-# throwaway home, both engines transcribe a voice note spoken by `say` and
-# encoded as WhatsApp records one, and the ffmpeg tests run against the
-# pinned ffmpeg. Runs when the transcription code, its pins or this file
+# throwaway home, install's refresh puts back the tools of an earlier setup,
+# both engines transcribe a voice note spoken by `say` and encoded as
+# WhatsApp records one, and the ffmpeg tests run against the pinned ffmpeg. Runs when the transcription code, its pins or this file
 # change. The models are cached by their pinned SHA-256.
 on:
   push:
@@ -102,6 +102,18 @@ jobs:
           if grep '^Fetching' "$RUNNER_TEMP/setup2.log"; then exit 1; fi
           # Keep the verified models for the cache.
           ln -f "$TOOLS"/models/*.bin "$RUNNER_TEMP/models/"
+
+      # An update after an earlier setup: the models are there, the tools
+      # this version pins are not. install refreshes them.
+      - name: Refresh the tools as install does
+        run: |
+          . "$RUNNER_TEMP/isolated.sh"
+          rm -rf "$WHISPER_CPP" "$(dirname "$FFMPEG")"
+          WHATSAPP_MCP_E2E_REFRESH=1 go test ./internal/media -run '^TestRefreshToolsE2E$' -count=1 -v | tee "$RUNNER_TEMP/refresh.log"
+          if grep -- '--- SKIP' "$RUNNER_TEMP/refresh.log"; then exit 1; fi
+          . "$RUNNER_TEMP/isolated.sh"
+          test -x "$FFMPEG"
+          test -x "$WHISPER_CPP/parakeet-cli"
 
       - name: Record voice notes
         run: |
