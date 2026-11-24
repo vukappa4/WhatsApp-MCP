@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/vukappa4/whatsapp-mcp/internal/store"
+	"github.com/vukappa4/whatsapp-mcp/internal/useracl"
 )
 
 // intentCases is the accuracy table: prompts a user writes to Claude Code,
@@ -488,9 +489,6 @@ func TestUserPromptFiles(t *testing.T) {
 	}
 }
 
-// aceRe matches an allow ACE in SDDL and captures its SID token.
-var aceRe = regexp.MustCompile(`\(A;[^;]*;[^;]*;[^;]*;[^;]*;([^)]+)\)`)
-
 // The flag dir and files grant access to the user only.
 func TestFlagsAreUserOnly(t *testing.T) {
 	if runtime.GOOS != "windows" {
@@ -499,23 +497,9 @@ func TestFlagsAreUserOnly(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "hooks")
 	now := time.Date(2026, 10, 13, 10, 0, 0, 0, time.UTC)
 	userPrompt(t, dir, "s1", "invia a Marco il file", now)
-	sid, err := currentUserSID()
-	if err != nil {
-		t.Fatal(err)
-	}
 	for _, p := range []string{dir, filepath.Join(dir, "s1")} {
-		sddl, err := fileDACL(p)
-		if err != nil {
-			t.Fatal(err)
-		}
-		aces := aceRe.FindAllStringSubmatch(sddl, -1)
-		if !strings.HasPrefix(sddl, "D:P") || strings.Count(sddl, "(") != 1 || len(aces) != 1 {
-			t.Errorf("%s: DACL %s, want one ACE for %s", p, sddl, sid)
-			continue
-		}
-		// SDDL writes some SIDs as aliases, like LA when the user is the built-in Administrator.
-		if got, err := canonicalSID(aces[0][1]); err != nil || got != sid {
-			t.Errorf("%s: DACL %s grants %s (%v), want %s", p, sddl, got, err, sid)
+		if err := useracl.Check(p); err != nil {
+			t.Error(err)
 		}
 	}
 }

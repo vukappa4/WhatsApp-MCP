@@ -19,6 +19,7 @@ import (
 	"unicode"
 
 	"github.com/vukappa4/whatsapp-mcp/internal/config"
+	"github.com/vukappa4/whatsapp-mcp/internal/useracl"
 )
 
 // decodeInput reads the hook's JSON input, skipping a UTF-8 byte order mark:
@@ -140,7 +141,7 @@ func writeFlag(dir, path, prompt string, now time.Time) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	if err := restrictToUser(dir, true); err != nil {
+	if err := useracl.Restrict(dir, true); err != nil {
 		return fmt.Errorf("restrict %s to the user: %w", dir, err)
 	}
 	pruneFlags(dir, now)
@@ -164,7 +165,7 @@ func writeFlag(dir, path, prompt string, now time.Time) error {
 	if err != nil {
 		return err
 	}
-	if err := restrictToUser(tmp, false); err != nil {
+	if err := useracl.Restrict(tmp, false); err != nil {
 		f.Close()
 		os.Remove(tmp)
 		return fmt.Errorf("restrict %s to the user: %w", tmp, err)
