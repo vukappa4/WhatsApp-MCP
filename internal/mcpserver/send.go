@@ -196,29 +196,25 @@ func (s *Server) personRecipient(ctx context.Context, p *store.PersonRef) (*reci
 		r.chatID = act.DM.Chat.ID
 	}
 	r.first = (act.DM == nil || act.DM.Messages == 0) && act.GroupsTotal == 0
-	var lids []string
-	for _, j := range act.JIDs {
-		if j.Kind == "lid" {
-			lids = append(lids, j.JID)
-		}
-	}
 	// A DM goes to the account (LID): a stored number can be out of date, or
 	// WhatsApp may have given it to someone else. The number is used only for
-	// a person with no known LID.
+	// a person with no known LID. The send gate picks the same JID.
+	jid, viaPhone, err := store.SendJID(act.JIDs, p.Phone)
+	var many store.ErrManyLIDs
 	switch {
-	case len(lids) > 1:
+	case errors.As(err, &many):
 		return nil, fmt.Sprintf("%s holds %d WhatsApp accounts (LIDs), so which one is meant is unknown: cannot send. "+
-			"Rebuilding data.db (whatsapp-mcp reingest) splits them into separate people.", personID(p.ID), len(lids)), nil
-	case len(lids) == 1:
-		if r.jid, err = types.ParseJID(lids[0]); err != nil {
-			return nil, "", err
-		}
-	case p.Phone != "":
-		digits := strings.TrimPrefix(p.Phone, "+")
-		r.jid = types.NewJID(digits, types.DefaultUserServer)
-		if r.chatID == 0 {
-			r.checkPhone = digits
-		}
+			"Rebuilding data.db (whatsapp-mcp reingest) splits them into separate people.", personID(p.ID), many.N), nil
+	case errors.Is(err, store.ErrNoSendJID):
+		return nil, fmt.Sprintf("%s has no phone number or WhatsApp id stored: cannot send", personID(p.ID)), nil
+	case err != nil:
+		return nil, "", err
+	}
+	if r.jid, err = types.ParseJID(jid); err != nil {
+		return nil, "", err
+	}
+	if viaPhone && r.chatID == 0 {
+		r.checkPhone = r.jid.User
 	}
 	if r.jid.IsEmpty() {
 		return nil, fmt.Sprintf("%s has no phone number or WhatsApp id stored: cannot send", personID(p.ID)), nil
