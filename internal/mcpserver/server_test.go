@@ -325,7 +325,8 @@ func TestToolsEndToEnd(t *testing.T) {
 	if strings.Contains(text, "\u202e") || strings.Contains(text, "</untrusted_wa n=x>") {
 		t.Fatalf("sender text not sanitized:\n%s", text)
 	}
-	if len(ids(lineIDs, text)) != 2 || !regexp.MustCompile(`(?m)^Chat c_\d+: .*, person p_\d+\. 2 messages`).MatchString(text) {
+	if len(ids(lineIDs, text)) != 2 || !regexp.MustCompile(`(?m)^Chat c_\d+ \(dm\), person p_\d+\. 2 messages`).MatchString(text) ||
+		!regexp.MustCompile(`(?m)^<untrusted_wa n=\w+>\nTitle: .*\(\+39 `).MatchString(text) {
 		t.Fatalf("read_chat ids:\n%s", text)
 	}
 }
@@ -642,9 +643,14 @@ func TestProfileNamesAndTruncation(t *testing.T) {
 		t.Fatal(err)
 	}
 	cs := connect(t, db)
-	text, _ := call(t, cs, toolReadChat, map[string]any{"chat": "+39 333 444 4444"})
+	// Without messages the header names the chat, outside a block.
+	text, _ := call(t, cs, toolReadChat, map[string]any{"chat": "+39 333 444 4444", "before": "2026-10-01"})
 	if !regexp.MustCompile(`<untrusted_wa n=\w+>~Giulia script</untrusted_wa n=\w+> \(\+39 333 444 4444\)`).MatchString(text) || strings.Contains(text, ">Giulia") {
-		t.Fatalf("profile name not rendered as ~Name:\n%s", text)
+		t.Fatalf("profile name not rendered as ~Name in tags:\n%s", text)
+	}
+	text, _ = call(t, cs, toolReadChat, map[string]any{"chat": "+39 333 444 4444"})
+	if !regexp.MustCompile(`(?m)^<untrusted_wa n=\w+>\nTitle: ~Giulia script \(\+39 333 444 4444\)\n`).MatchString(text) {
+		t.Fatalf("profile name not rendered as ~Name in the block:\n%s", text)
 	}
 	if !strings.Contains(text, `[cut 2100] "parola`) || len(text) > 1500 {
 		t.Fatalf("long text not truncated (%d chars):\n%s", len(text), text)
@@ -694,7 +700,7 @@ func TestBlockForgedLines(t *testing.T) {
 	}
 
 	quoted := regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
-	server := regexp.MustCompile(`^(Speakers: |\d\d:\d\d m_\d+ |── |  (\d\d:\d\d m_\d+ |── )|> \d\d:\d\d m_\d+ |#\d+ c_\d+ |c_\d+ |   [a-z ,']+: |- c_\d+ |p_\d+ )`)
+	server := regexp.MustCompile(`^(Title: |Speakers: |\d\d:\d\d m_\d+ |── |  (\d\d:\d\d m_\d+ |── )|> \d\d:\d\d m_\d+ |#\d+ c_\d+ |c_\d+ |   [a-z ,']+: |- c_\d+ |p_\d+ )`)
 	cs := connect(t, db)
 	for _, tc := range []struct {
 		tool   string

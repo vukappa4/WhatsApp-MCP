@@ -299,9 +299,15 @@ func (s *Server) readChat(ctx context.Context, _ *mcp.CallToolRequest, in readCh
 		return nil, err
 	}
 
+	// The chat's title is the first line of the block; without messages there
+	// is no block, and the header names it.
 	var b strings.Builder
 	b.WriteString(fresh + "\n")
-	fmt.Fprintf(&b, "Chat %s: %s (%s)", chatID(chat.ID), w.chatName(chat), chat.Kind)
+	b.WriteString("Chat " + chatID(chat.ID))
+	if len(msgs) == 0 {
+		b.WriteString(": " + w.chatName(chat))
+	}
+	fmt.Fprintf(&b, " (%s)", chat.Kind)
 	if chat.Person != nil && !chat.Person.IsMe {
 		fmt.Fprintf(&b, ", person %s", personID(chat.Person.ID))
 	}
@@ -321,7 +327,8 @@ func (s *Server) readChat(ctx context.Context, _ *mcp.CallToolRequest, in readCh
 	}
 
 	day := ""
-	rows := make([]string, 0, len(msgs)+9)
+	rows := make([]string, 0, len(msgs)+10)
+	rows = append(rows, "Title: "+w.inner().chatName(chat))
 	if chat.Kind != "dm" {
 		if sp := w.inner().participants(msgs); sp != "" {
 			rows = append(rows, sp)

@@ -19,7 +19,7 @@ import (
 )
 
 var (
-	readChatHead  = regexp.MustCompile(`(?m)^Chat c_(\d+): .*\. (\d+) messages, `)
+	readChatHead  = regexp.MustCompile(`(?m)^Chat c_(\d+) .*\. (\d+) messages, `)
 	newerCursorRe = regexp.MustCompile(`(?m)^Newer messages: cursor="([^"]+)"`)
 )
 
