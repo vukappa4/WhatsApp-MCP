@@ -45,16 +45,16 @@ func TestFreshnessGapCacheFollowsLog(t *testing.T) {
 		}
 		same()
 	}
-	line("gap 09:59 - 10:30 overlaps this range")
-	line("gap 09:59 - 10:30 overlaps this range") // served from the cache
+	line("gaps in this range: 09:59 - 10:30]")
+	line("gaps in this range: 09:59 - 10:30]") // served from the cache
 	store.LogConnection(ctx, db, t0.Add(150*time.Minute), store.EvDisconnected, "")
-	line("gap 12:30 - now overlaps this range")
+	line("gaps in this range: 09:59 - 10:30; 12:30 - now]")
 	store.LogConnection(ctx, db, t0.Add(160*time.Minute), store.EvConnected, "")
-	line("gap 12:30 - 12:40 overlaps this range")
+	line("gaps in this range: 09:59 - 10:30; 12:30 - 12:40]")
 	// A row older than the newest still counts: Gaps orders by ts, so the
 	// first gap now opens at the keepalive timeout.
 	store.LogConnection(ctx, db, t0.Add(-30*time.Minute), store.EvKeepAliveLost, "")
-	line("gap 09:30 - 10:30 overlaps this range")
+	line("gaps in this range: 09:30 - 10:30; 12:30 - 12:40]")
 	res, err := s.status(ctx, nil, statusIn{})
 	if err != nil {
 		t.Fatal(err)

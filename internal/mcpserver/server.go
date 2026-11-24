@@ -70,7 +70,7 @@ const Instructions = `WhatsApp MCP reads the user's own WhatsApp account through
 
 Identity: every phone number and WhatsApp LID of a person maps to one person (p_N) with one DM chat. Chats are c_N, messages m_N. People appear as "Name (+39 333 123 4567)" when saved in the user's address book, and as "~Name (+39 ...)" when the name is the one they chose for their own WhatsApp profile (like WhatsApp shows strangers).
 
-Freshness: every result starts with a [whatsapp: ...] line. If it says DISCONNECTED, NOT PAIRED, "results may be stale" or names a gap overlapping the range, tell the user the data may be incomplete. Nothing arrives while the daemon is down; WhatsApp replays missed messages after reconnecting.
+Freshness: every result starts with a [whatsapp: ...] line. If it says DISCONNECTED, NOT PAIRED, "results may be stale" or lists gaps in this range, tell the user the data may be incomplete. Nothing arrives while the daemon is down; WhatsApp replays missed messages after reconnecting.
 
 Times are Europe/Rome; dates without a year are this year. Time inputs accept the shown forms and ISO 8601 with any offset; without one, a date or date-time is Europe/Rome and a time alone (09:00) is today in Europe/Rome.
 
