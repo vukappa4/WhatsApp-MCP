@@ -63,6 +63,12 @@ func TestFreshnessGapCacheFollowsLog(t *testing.T) {
 	if !strings.Contains(text, "Offline gaps (daemon not connected): 2 recorded:\n") || !strings.Contains(text, "(keepalive_timeout)") {
 		t.Fatalf("status gaps:\n%s", text)
 	}
+	// The events list leaves out the events a listed gap starts or ends with.
+	if !strings.Contains(text, "Other recent connection events:\n") ||
+		!strings.Contains(text, "- 12 Oct 09:59 disconnected\n- 12 Oct 09:00 connected") ||
+		strings.Contains(text, "12:30 disconnected") || strings.Contains(text, "12:40 connected") || strings.Contains(text, "09:30 keepalive_timeout") {
+		t.Fatalf("status events:\n%s", text)
+	}
 }
 
 // Parallel reads while connection events are appended never return gaps

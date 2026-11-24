@@ -225,7 +225,26 @@ func (s *Server) status(ctx context.Context, _ *mcp.CallToolRequest, _ statusIn)
 	default:
 		fmt.Fprintf(&b, " %d recorded:\n", len(gaps))
 	}
-	for _, g := range gaps[max(0, len(gaps)-maxStatusGaps):] {
+	// Events that open or close a listed gap without a detail add nothing to
+	// it: the events list leaves them out.
+	shown := gaps[max(0, len(gaps)-maxStatusGaps):]
+	type edge struct {
+		ts    int64
+		event string
+	}
+	bound := map[edge]bool{}
+	for _, g := range shown {
+		bound[edge{g.From.Unix(), g.Reason}] = true
+		switch {
+		case g.To.IsZero():
+		case g.Reason == store.EvKeepAliveLost:
+			bound[edge{g.To.Unix(), store.EvKeepAliveBack}] = true
+			bound[edge{g.To.Unix(), store.EvConnected}] = true
+		default:
+			bound[edge{g.To.Unix(), store.EvConnected}] = true
+		}
+	}
+	for _, g := range shown {
 		to := "still open"
 		if !g.To.IsZero() {
 			to = fmtTS(g.To.Unix(), now)
@@ -237,7 +256,10 @@ func (s *Server) status(ctx context.Context, _ *mcp.CallToolRequest, _ statusIn)
 	if stats.OldestTS != 0 {
 		fmt.Fprintf(&b, ", from %s to %s", fmtTS(stats.OldestTS, now), fmtTS(stats.NewestTS, now))
 	}
-	fmt.Fprintf(&b, "; %d chats have no human name yet\n", stats.UnnamedChats)
+	if stats.UnnamedChats > 0 {
+		fmt.Fprintf(&b, "; %d chats have no human name yet", stats.UnnamedChats)
+	}
+	b.WriteString("\n")
 	if histAt.IsZero() {
 		b.WriteString("History sync: none received yet\n")
 	} else {
@@ -272,15 +294,19 @@ func (s *Server) status(ctx context.Context, _ *mcp.CallToolRequest, _ statusIn)
 		return nil, err
 	}
 	b.WriteString(auto + "\n")
-	if len(events) > 0 {
-		b.WriteString("Recent connection events:\n")
-		for _, e := range events {
-			line := fmt.Sprintf("%s %s", fmtTS(e.TS.Unix(), now), e.Event)
-			if e.Detail != "" {
-				line += " (" + clip(e.Detail, 120) + ")"
-			}
-			b.WriteString("- " + line + "\n")
+	var other []string
+	for _, e := range events {
+		if e.Detail == "" && bound[edge{e.TS.Unix(), e.Event}] {
+			continue
 		}
+		line := fmt.Sprintf("%s %s", fmtTS(e.TS.Unix(), now), e.Event)
+		if e.Detail != "" {
+			line += " (" + clip(e.Detail, 120) + ")"
+		}
+		other = append(other, "- "+line+"\n")
+	}
+	if len(other) > 0 {
+		b.WriteString("Other recent connection events:\n" + strings.Join(other, ""))
 	}
 	return textResult(strings.TrimRight(b.String(), "\n")), nil
 }
