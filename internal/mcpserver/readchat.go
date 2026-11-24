@@ -438,7 +438,7 @@ func (w wrapper) lineOf(m *store.MessageRow, full bool, s shown) string {
 	}
 	if full {
 		fmt.Fprintf(&b, " (wa_id %s", w.waID(m.WAID))
-		if m.SenderJID != "" {
+		if m.SenderJID != "" && !m.FromMe { // my own JID is in whatsapp_status
 			fmt.Fprintf(&b, ", from %s", m.SenderJID)
 		}
 		b.WriteString(")")

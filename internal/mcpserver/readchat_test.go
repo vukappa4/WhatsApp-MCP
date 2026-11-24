@@ -248,6 +248,24 @@ func TestReadChatCursorsAfterBudget(t *testing.T) {
 	c.covered(1, 2, 3)
 }
 
+// A detailed line names the sender's JID for messages of others only: mine
+// would repeat the account's JID on every line.
+func TestDetailedLineOmitsOwnJID(t *testing.T) {
+	db := seed(t)
+	ctx := context.Background()
+	in := &wa.Ingestor{DB: db, Self: func() (types.JID, types.JID) { return me, meLID }}
+	a := types.NewJID("393331111111", types.DefaultUserServer)
+	if err := in.Message(ctx, &events.Message{Info: types.MessageInfo{MessageSource: types.MessageSource{Chat: a, Sender: me, IsFromMe: true},
+		ID: "ME1", Timestamp: t0.Add(5 * time.Minute)}, Message: &waE2E.Message{Conversation: proto.String("risposta mia")}}); err != nil {
+		t.Fatal(err)
+	}
+	text, _ := call(t, connect(t, db), toolReadChat, map[string]any{"chat": "+39 333 111 1111", "response_format": "detailed"})
+	if !regexp.MustCompile(`(?m) me: \(wa_id ME1\) "risposta mia"$`).MatchString(text) ||
+		!regexp.MustCompile(`(?m) ~Marco: \[edited [^]]+\] \(wa_id A2, from 393331111111@s\.whatsapp\.net\) `).MatchString(text) {
+		t.Fatalf("detailed lines:\n%s", text)
+	}
+}
+
 // A cursor's JSON names its tool by a one-letter code and leaves zero fields
 // out; a code no tool owns is refused.
 func TestCursorEncoding(t *testing.T) {
