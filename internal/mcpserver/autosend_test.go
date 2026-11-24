@@ -153,9 +153,15 @@ func TestAutosendAllowNeedsTheGatesReceipt(t *testing.T) {
 	// Other arguments, another profile's key, an expired or future receipt: not approved.
 	a.receipt(t, "dev", now, "follow-up", "p_1")
 	a.receipt(t, "prod", now, "follow-up", "p_1", "c_2")
-	for name, at := range map[string]time.Time{"expired": now.Add(-autosend.ReceiptTTL - time.Minute), "future": now.Add(5 * time.Minute)} {
-		a.receipt(t, "dev", at, "follow-up", "p_1", "c_2")
-		if text, isErr := call(t, a.cs, toolAutosendAllow, args); !isErr || !strings.Contains(text, "Not approved") {
+	for name, tc := range map[string]struct {
+		at   time.Time
+		want string
+	}{
+		"expired": {now.Add(-autosend.ReceiptTTL - time.Minute), "Not approved: the approval card expired (answer it within 10 minutes): call again"},
+		"future":  {now.Add(5 * time.Minute), "Not approved: the send gate did not ask the user"},
+	} {
+		a.receipt(t, "dev", tc.at, "follow-up", "p_1", "c_2")
+		if text, isErr := call(t, a.cs, toolAutosendAllow, args); !isErr || !strings.Contains(text, tc.want) {
 			t.Fatalf("%s receipt:\n%s", name, text)
 		}
 	}

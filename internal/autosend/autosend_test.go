@@ -86,28 +86,40 @@ func TestReceiptExpiry(t *testing.T) {
 	key := ArgsKey("prod", "t", []string{"c_1"})
 	for name, tc := range map[string]struct {
 		written, taken time.Time
-		ok             bool
+		want           error
 	}{
-		"fresh":   {now, now.Add(ReceiptTTL - time.Second), true},
-		"expired": {now, now.Add(ReceiptTTL + time.Second), false},
-		"future":  {now.Add(2 * time.Minute), now, false},
+		"fresh":              {now, now.Add(ReceiptTTL - time.Second), nil},
+		"expired":            {now, now.Add(ReceiptTTL + time.Second), ErrReceiptExpired},
+		"expired a day ago":  {now, now.Add(ReceiptTTL + 23*time.Hour), ErrReceiptExpired},
+		"pruned after a day": {now, now.Add(receiptKeep + time.Second), ErrNoReceipt},
+		"future":             {now.Add(2 * time.Minute), now, ErrNoReceipt},
 	} {
 		if err := WriteReceipt(hooks, key, receipt(tc.written)); err != nil {
 			t.Fatal(err)
 		}
-		_, err := TakeReceipt(hooks, key, tc.taken)
-		if (err == nil) != tc.ok || err != nil && !errors.Is(err, ErrNoReceipt) {
-			t.Errorf("%s: %v", name, err)
+		if _, err := TakeReceipt(hooks, key, tc.taken); !errors.Is(err, tc.want) || (err == nil) != (tc.want == nil) {
+			t.Errorf("%s: %v, want %v", name, err, tc.want)
 		}
 	}
-	// Writing prunes expired and corrupt receipts of other calls.
+	// A receipt is taken once, expired or not.
+	if err := WriteReceipt(hooks, key, receipt(now)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := TakeReceipt(hooks, key, now.Add(ReceiptTTL+time.Minute)); !errors.Is(err, ErrReceiptExpired) {
+		t.Fatalf("expired: %v", err)
+	}
+	if _, err := TakeReceipt(hooks, key, now.Add(ReceiptTTL+time.Minute)); !errors.Is(err, ErrNoReceipt) {
+		t.Fatalf("expired, taken again: %v", err)
+	}
+	// Writing prunes receipts of other calls that expired over a day ago,
+	// and corrupt ones.
 	other := ArgsKey("prod", "other", nil)
 	if err := WriteReceipt(hooks, other, receipt(now)); err != nil {
 		t.Fatal(err)
 	}
 	corrupt := filepath.Join(ReceiptDir(hooks), ArgsKey("x", "y", nil)+".json")
 	os.WriteFile(corrupt, []byte("{"), 0o600)
-	if err := WriteReceipt(hooks, key, receipt(now.Add(ReceiptTTL+time.Minute))); err != nil {
+	if err := WriteReceipt(hooks, key, receipt(now.Add(receiptKeep+time.Minute))); err != nil {
 		t.Fatal(err)
 	}
 	entries, _ := os.ReadDir(ReceiptDir(hooks))

@@ -38,8 +38,13 @@ const (
 )
 
 // ReceiptTTL is how long a receipt waits for the tool call it was written
-// for: the user answers the card, then Claude Code calls the tool at once.
-const ReceiptTTL = 2 * time.Minute
+// for: Claude Code calls the tool as soon as the user answers the card,
+// which may take the user some minutes.
+const ReceiptTTL = 10 * time.Minute
+
+// receiptKeep is how long an expired receipt stays on disk, so the daemon
+// can tell a card answered too late from one never shown.
+const receiptKeep = 24 * time.Hour
 
 // MaxPerDay is the most sends the gate lets one approved task make to one
 // chat in 24 hours without asking: a task gone wrong must not flood a chat,
@@ -49,8 +54,12 @@ const MaxPerDay = 20
 // LogName is the autosend log in a profile's logs folder.
 const LogName = "autosend.log"
 
-// ErrNoReceipt means the gate wrote no receipt for these arguments, or it expired.
+// ErrNoReceipt means the gate wrote no receipt for these arguments.
 var ErrNoReceipt = errors.New("no approval receipt")
+
+// ErrReceiptExpired means the gate wrote the receipt more than ReceiptTTL
+// before the tool call: the user answered the card too late.
+var ErrReceiptExpired = errors.New("the approval card expired")
 
 // ErrReceiptConflict means a fresh receipt for the same arguments says
 // something else: two cards for one call cannot both stand.
@@ -179,9 +188,13 @@ func nonce() string {
 
 // fresh reports whether a receipt written at at is still valid at now:
 // within ReceiptTTL, and not from the future (a minute of slack).
-func fresh(at int64, now time.Time) bool {
+func fresh(at int64, now time.Time) bool { return within(at, now, ReceiptTTL) }
+
+// within reports whether at is at most d before now and not from the
+// future (a minute of slack).
+func within(at int64, now time.Time, d time.Duration) bool {
 	age := now.Sub(time.Unix(at, 0))
-	return at != 0 && age >= -time.Minute && age <= ReceiptTTL
+	return at != 0 && age >= -time.Minute && age <= d
 }
 
 // takeMu makes TakeReceipt consume each receipt once. Only the daemon takes
@@ -191,8 +204,9 @@ func fresh(at int64, now time.Time) bool {
 var takeMu sync.Mutex
 
 // TakeReceipt consumes the receipt stored under key: only one caller ever
-// gets it, and it is gone afterwards. A missing, expired, future or
-// unreadable receipt is ErrNoReceipt; a receipt it cannot delete is an error.
+// gets it, and it is gone afterwards. A missing, future or unreadable
+// receipt is ErrNoReceipt, an expired one ErrReceiptExpired; a receipt it
+// cannot delete is an error.
 func TakeReceipt(hooksDir, key string, now time.Time) (Receipt, error) {
 	path, err := receiptPath(hooksDir, key)
 	if err != nil {
@@ -212,14 +226,19 @@ func TakeReceipt(hooksDir, key string, now time.Time) (Receipt, error) {
 		return Receipt{}, err
 	}
 	var r Receipt
-	if len(b) > 1<<20 || json.Unmarshal(b, &r) != nil || !fresh(r.At, now) {
+	switch {
+	case len(b) > 1<<20 || json.Unmarshal(b, &r) != nil || r.At == 0:
 		return Receipt{}, ErrNoReceipt
+	case fresh(r.At, now):
+		return r, nil
+	case now.After(time.Unix(r.At, 0)):
+		return Receipt{}, ErrReceiptExpired
 	}
-	return r, nil
+	return Receipt{}, ErrNoReceipt
 }
 
-// PruneReceipts deletes receipts that expired or cannot be read, and files
-// left behind by an interrupted write.
+// PruneReceipts deletes receipts that expired more than receiptKeep ago or
+// cannot be read, and files left behind by an interrupted write.
 func PruneReceipts(hooksDir string, now time.Time) {
 	dir := ReceiptDir(hooksDir)
 	entries, err := os.ReadDir(dir)
@@ -239,7 +258,7 @@ func PruneReceipts(hooksDir string, now time.Time) {
 		}
 		var r Receipt
 		b, err := os.ReadFile(p)
-		if err != nil || len(b) > 1<<20 || json.Unmarshal(b, &r) != nil || !fresh(r.At, now) {
+		if err != nil || len(b) > 1<<20 || json.Unmarshal(b, &r) != nil || !within(r.At, now, receiptKeep) {
 			_ = os.Remove(p)
 		}
 	}

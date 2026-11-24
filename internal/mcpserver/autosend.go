@@ -73,6 +73,9 @@ func (s *Server) autosendAllow(ctx context.Context, _ *mcp.CallToolRequest, in a
 	switch {
 	case errors.Is(err, autosend.ErrNoReceipt):
 		return errResult("%s", notApproved)
+	case errors.Is(err, autosend.ErrReceiptExpired):
+		return errResult("Not approved: the approval card expired (answer it within %d minutes): call again to show the user a new card.",
+			int(autosend.ReceiptTTL.Minutes()))
 	case err != nil:
 		return errResult("Not approved: cannot read the send gate's receipt: %v", err)
 	case r.Profile != s.Profile:
