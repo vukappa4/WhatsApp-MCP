@@ -172,8 +172,9 @@ func TestSizeReport(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", p.name, err)
 		}
-		// The fixture's temp dir has a random length: count it as a fixed name.
-		text := strings.ReplaceAll(resultText(res), fixture.dir, `C:\fixture`)
+		// The fixture's temp dir has a random length: count it as a fixed
+		// name, bare or quoted as in a block.
+		text := strings.NewReplacer(fixture.dir, `C:\fixture`, quoter.Replace(fixture.dir), quoter.Replace(`C:\fixture`)).Replace(resultText(res))
 		if res.IsError {
 			t.Fatalf("%s returned an error:\n%s", p.name, text)
 		}
