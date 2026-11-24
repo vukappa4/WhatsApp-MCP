@@ -42,10 +42,10 @@ func (s *Server) addAutosendTools(srv *mcp.Server) {
 			"Call it only in a session with the user, right after creating the task, when the user asked for it. task: the taskId " +
 			"given to create_scheduled_task. chats: c_N or p_N ids; write the same ids in the task's prompt, since its runs must " +
 			"call whatsapp_send_message with to set to one of them. The user confirms a card showing the task, schedule, folder, " +
-			"prompt and chats; a scheduled run can never approve itself. Any other send, file or chat still asks, and so does a " +
-			"send past " + strconv.Itoa(autosend.MaxPerDay) + " a day to one chat; in the run nobody is present, so those are refused. " +
-			"Changing the task's prompt, schedule or folder ends the approval, and a bypassPermissions or dontAsk mode blocks it; " +
-			"approving again replaces the chats. Never bulk or unsolicited: WhatsApp bans for it.",
+			"prompt and chats; a scheduled run can never approve itself. Other sends, files and chats, and a send past " +
+			strconv.Itoa(autosend.MaxPerDay) + " a day to one chat, ask in a session with the user and are refused in an unattended run. " +
+			"The task needs the default, acceptEdits, plan or auto permission mode. Changing the task's prompt, schedule or folder " +
+			"ends the approval; approving again replaces the chats. Never bulk or unsolicited: WhatsApp bans for it.",
 		InputSchema: schemaFor[autosendAllowIn](nil),
 		Annotations: &mcp.ToolAnnotations{Title: "Approve WhatsApp autosend", DestructiveHint: &f, OpenWorldHint: &f},
 	}, s.autosendAllow)
@@ -176,6 +176,9 @@ func (s *Server) checkReceipt(ctx context.Context, r autosend.Receipt, ids []str
 	if fp != r.Fingerprint {
 		return "the task's prompt, schedule or folder changed", nil
 	}
+	if why := autosend.ModeProblem("the task", task.PermissionMode); why != "" {
+		return why, nil
+	}
 	return "", nil
 }
 
@@ -246,8 +249,8 @@ func (s *Server) autosendState(ctx context.Context, r store.AutosendRule) string
 	if filepath.Clean(task.Dir) != filepath.Clean(r.TaskDir) {
 		return "inactive: the task is in another Claude Desktop account or organization"
 	}
-	if task.PermissionMode == "bypassPermissions" || task.PermissionMode == "dontAsk" {
-		return "inactive: the task's permission mode is " + task.PermissionMode
+	if why := autosend.ModeProblem("the task", task.PermissionMode); why != "" {
+		return "inactive: " + why
 	}
 	fp, err := desktop.Fingerprint(task)
 	switch {

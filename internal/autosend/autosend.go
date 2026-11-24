@@ -20,9 +20,11 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/vukappa4/whatsapp-mcp/internal/useracl"
 )
@@ -240,4 +242,36 @@ func PruneReceipts(hooksDir string, now time.Time) {
 			_ = os.Remove(p)
 		}
 	}
+}
+
+// promptModes are the permission modes in which Claude Code shows a hook's
+// "ask" to the user: default, acceptEdits, plan, and auto, where a hook's
+// "ask" goes to the prompt and the classifier does not decide it. dontAsk
+// denies or lets a mod settle it, bypassPermissions skips prompts, and a
+// mode this version does not know is unknown: all of those are refused,
+// for an approval and for an autosend.
+var promptModes = map[string]bool{"default": true, "acceptEdits": true, "plan": true, "auto": true}
+
+// PromptMode reports whether mode is one in which the user sees every ask.
+func PromptMode(mode string) bool { return promptModes[mode] }
+
+// ModeProblem says why a permission mode rules out an approval or an
+// autosend, "" when it does not. who names the holder ("the task"). An
+// empty mode is refused: a task without one runs in the user's default
+// mode from Claude settings, which the gate does not read and which may be
+// bypassPermissions.
+func ModeProblem(who, mode string) string {
+	switch {
+	case promptModes[mode]:
+		return ""
+	case mode == "":
+		return who + " has no permission mode"
+	}
+	if r := []rune(mode); len(r) > 40 {
+		mode = string(r[:40]) + "..."
+	}
+	if strings.IndexFunc(mode, func(r rune) bool { return !unicode.IsLetter(r) && r != '.' }) >= 0 {
+		mode = strconv.Quote(mode) // escapes what Desktop's file may hold beyond a plain name
+	}
+	return who + "'s permission mode is " + mode
 }

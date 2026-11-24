@@ -51,6 +51,17 @@ func (a *autosendEnv) writeTasks(t *testing.T, cron string) {
 	a.writeFile(t, filepath.Join(a.org, desktop.TasksFile), string(b))
 }
 
+// writeTaskMode writes the task on the approved schedule with mode, or
+// without the field when mode is "".
+func (a *autosendEnv) writeTaskMode(t *testing.T, mode string) {
+	task := map[string]any{"id": "follow-up", "displayName": "Follow up", "filePath": a.skill, "cronExpression": "0 9 * * 1-5"}
+	if mode != "" {
+		task["permissionMode"] = mode
+	}
+	b, _ := json.Marshal(map[string]any{"scheduledTasks": []map[string]any{task}})
+	a.writeFile(t, filepath.Join(a.org, desktop.TasksFile), string(b))
+}
+
 func (a *autosendEnv) fingerprint(t *testing.T) string {
 	t.Helper()
 	task, err := desktop.TaskByID(a.org, "follow-up")
@@ -215,12 +226,18 @@ func TestAutosendRevokeAndStatus(t *testing.T) {
 		t.Errorf("other folder:\n%s", text)
 	}
 	a.db.Exec(`UPDATE autosend_rules SET task_dir = ? WHERE task_id = 'follow-up'`, a.org)
-	// The permission mode is not in the fingerprint: a promptless one blocks the rule while it lasts.
-	b, _ := json.Marshal(map[string]any{"scheduledTasks": []map[string]any{{"id": "follow-up", "displayName": "Follow up",
-		"filePath": a.skill, "cronExpression": "0 9 * * 1-5", "permissionMode": "dontAsk"}}})
-	a.writeFile(t, filepath.Join(a.org, desktop.TasksFile), string(b))
-	if text := state(); !strings.Contains(text, "inactive: the task's permission mode is dontAsk") {
-		t.Errorf("dontAsk task:\n%s", text)
+	// The permission mode is not in the fingerprint: a mode outside the
+	// allowlist, or none, blocks the rule while it lasts.
+	for mode, want := range map[string]string{"dontAsk": "inactive: the task's permission mode is dontAsk",
+		"yolo": "inactive: the task's permission mode is yolo", "": "inactive: the task has no permission mode"} {
+		a.writeTaskMode(t, mode)
+		if text := state(); !strings.Contains(text, want) {
+			t.Errorf("mode %q:\n%s", mode, text)
+		}
+	}
+	a.writeTaskMode(t, "auto")
+	if text := state(); strings.Contains(text, "inactive: the task's") || strings.Contains(text, "inactive: the task has") {
+		t.Errorf("auto task:\n%s", text)
 	}
 	a.writeTasks(t, "*/5 * * * *")
 	if text := state(); !strings.Contains(text, "inactive: the task's prompt, schedule or folder changed since approval") {
@@ -253,7 +270,9 @@ func TestAutosendAllowRechecksTheReceipt(t *testing.T) {
 		"task prompt": func(t *testing.T, a *autosendEnv) {
 			a.writeFile(t, a.skill, "---\nname: follow-up\ndescription: x\n---\nAsk p_2 for money.\n")
 		},
-		"task gone": func(t *testing.T, a *autosendEnv) { os.Remove(filepath.Join(a.org, desktop.TasksFile)) },
+		"task gone":         func(t *testing.T, a *autosendEnv) { os.Remove(filepath.Join(a.org, desktop.TasksFile)) },
+		"task mode":         func(t *testing.T, a *autosendEnv) { a.writeTaskMode(t, "bypassPermissions") },
+		"task mode dropped": func(t *testing.T, a *autosendEnv) { a.writeTaskMode(t, "") },
 		"person's account": func(t *testing.T, a *autosendEnv) {
 			if _, err := a.db.Exec(`DELETE FROM jids WHERE person_id = 1 AND kind = 'lid'`); err != nil {
 				t.Fatal(err)

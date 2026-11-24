@@ -158,3 +158,20 @@ func TestReceiptConflict(t *testing.T) {
 		t.Fatalf("after expiry: %v", err)
 	}
 }
+
+// Only the modes in which the user sees every ask pass; an empty or unknown
+// mode is refused, and a mode with odd characters is quoted.
+func TestModeProblem(t *testing.T) {
+	for mode, want := range map[string]string{
+		"default": "", "acceptEdits": "", "plan": "", "auto": "",
+		"":                  "the task has no permission mode",
+		"bypassPermissions": "the task's permission mode is bypassPermissions",
+		"dontAsk":           "the task's permission mode is dontAsk",
+		"Default":           "the task's permission mode is Default",
+		"auto\n":            `the task's permission mode is "auto\n"`,
+	} {
+		if got := ModeProblem("the task", mode); got != want || PromptMode(mode) != (want == "") {
+			t.Errorf("%q: %q, PromptMode %v", mode, got, PromptMode(mode))
+		}
+	}
+}
