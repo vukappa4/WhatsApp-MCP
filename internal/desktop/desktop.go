@@ -23,8 +23,10 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
+	_ "time/tzdata" // Europe/Rome without relying on the OS zone database
 	"unicode"
 	"unicode/utf8"
 )
@@ -59,20 +61,107 @@ func Roots() []string {
 	return nil
 }
 
-// Task is one Desktop scheduled task. Its prompt is not in the record: it
-// is the body of the task's SKILL.md (see Skill), which Desktop reads again
-// at every run.
+// Task is one Desktop scheduled task, as Desktop's own record check types
+// it: id, filePath and the optional displayName, cronExpression, cwd and
+// permissionMode are strings, fireAt is a number (epoch ms), enabled a
+// boolean. Its prompt is not in the record: it is the body of the task's
+// SKILL.md (see ReadSkill), which Desktop reads again at every run.
 type Task struct {
-	ID             string `json:"id"` // kebab-case: ^[a-z0-9_-]+$
-	DisplayName    string `json:"displayName"`
-	FilePath       string `json:"filePath"` // its SKILL.md
-	Cron           string `json:"cronExpression"`
-	CronHuman      string `json:"cronHumanReadable"` // optional
-	FireAt         string `json:"fireAt"`            // ISO 8601, for a one-shot task
-	Enabled        *bool  `json:"enabled"`
-	Cwd            string `json:"cwd"`
-	PermissionMode string `json:"permissionMode"`
-	Dir            string `json:"-"` // the account/org folder it was read from
+	ID             string    `json:"id"` // kebab-case: ^[a-z0-9_-]+$
+	DisplayName    string    `json:"displayName"`
+	FilePath       string    `json:"filePath"` // its SKILL.md
+	Cron           string    `json:"cronExpression"`
+	CronHuman      looseText `json:"cronHumanReadable"` // not in Desktop's record check: read only when it is a string
+	FireAt         FireAt    `json:"fireAt"`            // a one-shot task's time
+	Enabled        *bool     `json:"enabled"`
+	Cwd            string    `json:"cwd"`
+	PermissionMode string    `json:"permissionMode"`
+	Dir            string    `json:"-"` // the account/org folder it was read from
+}
+
+// looseText is a string field that is empty when it holds anything else.
+type looseText string
+
+func (l *looseText) UnmarshalJSON(b []byte) error {
+	var s string
+	if json.Unmarshal(b, &s) == nil {
+		*l = looseText(s)
+	}
+	return nil
+}
+
+// FireAt is a one-shot task's time. Desktop writes it as epoch
+// milliseconds; a string is read too, as RFC 3339 when it parses.
+type FireAt struct {
+	ms  int64  // epoch ms, when known
+	raw string // a string that is not RFC 3339
+	set bool
+}
+
+// FireAtMs is a FireAt of epoch milliseconds.
+func FireAtMs(ms int64) FireAt { return FireAt{ms: ms, set: true} }
+
+// UnmarshalJSON reads a number of milliseconds, a string or null.
+func (f *FireAt) UnmarshalJSON(b []byte) error {
+	*f = FireAt{}
+	if string(bytes.TrimSpace(b)) == "null" {
+		return nil
+	}
+	var s string
+	if json.Unmarshal(b, &s) == nil {
+		if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+			*f = FireAt{ms: t.UnixMilli(), set: true}
+		} else {
+			*f = FireAt{raw: s, set: true}
+		}
+		return nil
+	}
+	var n json.Number
+	if err := json.Unmarshal(b, &n); err != nil {
+		return errors.New("fireAt is neither a number nor a string")
+	}
+	if ms, err := n.Int64(); err == nil {
+		*f = FireAt{ms: ms, set: true}
+		return nil
+	}
+	x, err := n.Float64()
+	if err != nil || x != float64(int64(x)) {
+		return fmt.Errorf("fireAt %s is not a whole number of milliseconds", n)
+	}
+	*f = FireAt{ms: int64(x), set: true}
+	return nil
+}
+
+// Set reports whether the task has a fireAt.
+func (f FireAt) Set() bool { return f.set }
+
+// Canonical is the fireAt the fingerprint holds: decimal epoch ms, the
+// string itself when it is not a time, "" when unset.
+func (f FireAt) Canonical() string {
+	switch {
+	case !f.set:
+		return ""
+	case f.raw != "":
+		return f.raw
+	}
+	return strconv.FormatInt(f.ms, 10)
+}
+
+// rome is where the user lives: schedules are shown in its time.
+var rome = func() *time.Location {
+	loc, err := time.LoadLocation("Europe/Rome")
+	if err != nil {
+		return time.UTC
+	}
+	return loc
+}()
+
+// String renders the time in Europe/Rome, "24 Nov 2026 21:19".
+func (f FireAt) String() string {
+	if f.raw != "" || !f.set {
+		return f.raw
+	}
+	return time.UnixMilli(f.ms).In(rome).Format("2 Jan 2006 15:04")
 }
 
 // Title is the name the user sees: the display name, else the id.
@@ -87,12 +176,12 @@ func (t Task) Title() string {
 // "cron <expression>", else "once at <fireAt>", else "manual only".
 func (t Task) Schedule() string {
 	switch {
-	case strings.TrimSpace(t.CronHuman) != "":
-		return strings.TrimSpace(t.CronHuman)
+	case strings.TrimSpace(string(t.CronHuman)) != "":
+		return strings.TrimSpace(string(t.CronHuman))
 	case strings.TrimSpace(t.Cron) != "":
 		return "cron " + strings.TrimSpace(t.Cron)
-	case strings.TrimSpace(t.FireAt) != "":
-		return "once at " + strings.TrimSpace(t.FireAt)
+	case t.FireAt.Set():
+		return "once at " + t.FireAt.String()
 	}
 	return "manual only"
 }
@@ -188,67 +277,145 @@ func FindRun(ctx context.Context, roots []string, id string) (Run, error) {
 	return Run{}, fmt.Errorf("session %s is named by %d Desktop session files", id, len(found))
 }
 
-// LoadTasks reads dir/scheduled-tasks.json. A missing file is no tasks.
-func LoadTasks(dir string) ([]Task, error) {
-	b, tooBig, err := readCapped(filepath.Join(dir, TasksFile), maxFile)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if tooBig {
-		return nil, fmt.Errorf("%s is over %d MB", TasksFile, maxFile>>20)
+// Unreadable is a task record that does not decode as a Task. Its id and
+// display name are kept when they are strings, so a lookup knows whether
+// it might be the task wanted.
+type Unreadable struct {
+	Dir         string
+	ID          *string
+	DisplayName *string // nil also when the record has none
+	TitleKnown  bool    // the record has no displayName, or a string one
+	Err         error
+}
+
+// List is what the task files under some roots hold: the tasks that
+// decode, the records that do not, and the files that cannot be read at all.
+type List struct {
+	Tasks      []Task
+	Unreadable []Unreadable
+	Broken     []error // whole files that cannot be read
+}
+
+// LoadTasks reads dir/scheduled-tasks.json, decoding each task on its own:
+// a record that does not decode is kept in Unreadable. A missing file is no
+// tasks; a file that is not a task list is in Broken.
+func LoadTasks(dir string) List {
+	path := filepath.Join(dir, TasksFile)
+	b, tooBig, err := readCapped(path, maxFile)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return List{}
+	case err != nil:
+		return List{Broken: []error{err}}
+	case tooBig:
+		return List{Broken: []error{fmt.Errorf("%s is over %d MB", path, maxFile>>20)}}
 	}
 	var f struct {
-		ScheduledTasks []Task `json:"scheduledTasks"`
+		ScheduledTasks []json.RawMessage `json:"scheduledTasks"`
 	}
 	if err := json.Unmarshal(b, &f); err != nil {
-		return nil, fmt.Errorf("read %s: %w", TasksFile, err)
+		return List{Broken: []error{fmt.Errorf("read %s: %w", path, err)}}
 	}
-	for i := range f.ScheduledTasks {
-		f.ScheduledTasks[i].Dir = dir
+	var l List
+	for _, raw := range f.ScheduledTasks {
+		var t Task
+		if err := json.Unmarshal(raw, &t); err != nil {
+			l.Unreadable = append(l.Unreadable, unreadable(dir, raw, err))
+			continue
+		}
+		t.Dir = dir
+		l.Tasks = append(l.Tasks, t)
 	}
-	return f.ScheduledTasks, nil
+	return l
+}
+
+func unreadable(dir string, raw json.RawMessage, err error) Unreadable {
+	u := Unreadable{Dir: dir, Err: err}
+	var m map[string]json.RawMessage
+	if json.Unmarshal(raw, &m) != nil {
+		return u
+	}
+	var s string
+	if v, ok := m["id"]; ok && json.Unmarshal(v, &s) == nil {
+		id := s
+		u.ID = &id
+	}
+	v, ok := m["displayName"]
+	switch {
+	case !ok:
+		u.TitleKnown = true
+	case json.Unmarshal(v, &s) == nil:
+		name := s
+		u.DisplayName, u.TitleKnown = &name, true
+	}
+	return u
+}
+
+// mightBeID reports whether an unreadable record could have this id.
+func (u Unreadable) mightBeID(id string) bool { return u.ID == nil || *u.ID == id }
+
+// mightBeTitle reports whether an unreadable record could have this
+// display name, case ignored.
+func (u Unreadable) mightBeTitle(ref string) bool {
+	return !u.TitleKnown || u.DisplayName != nil && strings.EqualFold(strings.TrimSpace(*u.DisplayName), ref)
+}
+
+// find picks the one task match selects. It fails closed: a record that
+// does not decode but might match makes it an error even beside a match,
+// and a file that cannot be read at all does when nothing else matches.
+func (l List) find(match func(Task) bool, mightBe func(Unreadable) bool, ref string) (Task, error) {
+	var found []Task
+	for _, t := range l.Tasks {
+		if match(t) {
+			found = append(found, t)
+		}
+	}
+	for _, u := range l.Unreadable {
+		if mightBe(u) {
+			return Task{}, fmt.Errorf("a task in %s that cannot be read might be %q (%v)", filepath.Join(u.Dir, TasksFile), ref, u.Err)
+		}
+	}
+	switch {
+	case len(found) == 1:
+		return found[0], nil
+	case len(found) > 1:
+		return Task{}, fmt.Errorf("%q names %d tasks: use the id", ref, len(found))
+	case len(l.Broken) > 0:
+		return Task{}, fmt.Errorf("task %q not found, and %v", ref, l.Broken[0])
+	}
+	return Task{}, fmt.Errorf("task %q: %w", ref, ErrNotFound)
 }
 
 // TaskByID returns the task with id from dir's task list.
 func TaskByID(dir, id string) (Task, error) {
-	ts, err := LoadTasks(dir)
-	if err != nil {
-		return Task{}, err
+	if id == "" {
+		return Task{}, errors.New("no task id")
 	}
-	for _, t := range ts {
-		if t.ID == id && id != "" {
-			return t, nil
-		}
-	}
-	return Task{}, fmt.Errorf("task %s: %w", id, ErrNotFound)
+	return LoadTasks(dir).find(func(t Task) bool { return t.ID == id }, func(u Unreadable) bool { return u.mightBeID(id) }, id)
 }
 
-// allTasks reads the task lists of every account/org folder under roots.
-func allTasks(ctx context.Context, roots []string) ([]Task, error) {
-	var out []Task
+// AllTasks reads the task lists of every account/org folder under roots.
+func AllTasks(ctx context.Context, roots []string) (List, error) {
+	var out List
 	for _, p := range matches(roots, TasksFile) {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return List{}, err
 		}
-		ts, err := LoadTasks(filepath.Dir(p))
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, ts...)
+		l := LoadTasks(filepath.Dir(p))
+		out.Tasks = append(out.Tasks, l.Tasks...)
+		out.Unreadable = append(out.Unreadable, l.Unreadable...)
+		out.Broken = append(out.Broken, l.Broken...)
 	}
 	return out, nil
 }
 
 // FindTaskByID finds the task with exactly this id in any account/org folder.
 func FindTaskByID(ctx context.Context, roots []string, id string) (Task, error) {
-	ts, err := allTasks(ctx, roots)
+	l, err := AllTasks(ctx, roots)
 	if err != nil {
 		return Task{}, err
 	}
-	return one(ts, func(t Task) bool { return t.ID == id }, id)
+	return l.find(func(t Task) bool { return t.ID == id }, func(u Unreadable) bool { return u.mightBeID(id) }, id)
 }
 
 // FindTask finds a task by its id in any account/org folder, else by its
@@ -258,30 +425,16 @@ func FindTask(ctx context.Context, roots []string, ref string) (Task, error) {
 	if ref == "" {
 		return Task{}, errors.New("no task given")
 	}
-	ts, err := allTasks(ctx, roots)
+	l, err := AllTasks(ctx, roots)
 	if err != nil {
 		return Task{}, err
 	}
-	if t, err := one(ts, func(t Task) bool { return t.ID == ref }, ref); !errors.Is(err, ErrNotFound) {
+	t, err := l.find(func(t Task) bool { return t.ID == ref }, func(u Unreadable) bool { return u.mightBeID(ref) }, ref)
+	if !errors.Is(err, ErrNotFound) {
 		return t, err
 	}
-	return one(ts, func(t Task) bool { return strings.EqualFold(strings.TrimSpace(t.DisplayName), ref) }, ref)
-}
-
-func one(ts []Task, match func(Task) bool, ref string) (Task, error) {
-	var found []Task
-	for _, t := range ts {
-		if match(t) {
-			found = append(found, t)
-		}
-	}
-	switch len(found) {
-	case 0:
-		return Task{}, fmt.Errorf("task %q: %w", ref, ErrNotFound)
-	case 1:
-		return found[0], nil
-	}
-	return Task{}, fmt.Errorf("%q names %d tasks: use the id", ref, len(found))
+	return l.find(func(t Task) bool { return strings.EqualFold(strings.TrimSpace(t.DisplayName), ref) },
+		func(u Unreadable) bool { return u.mightBeTitle(ref) }, ref)
 }
 
 // ConfigDir is Claude Code's config folder: CLAUDE_CONFIG_DIR, else ~/.claude.
@@ -418,15 +571,16 @@ func ReadSkill(t Task) (file []byte, f SkillFile, err error) {
 
 // FingerprintOf identifies what a task runs, where and when, given the bytes
 // of its SKILL.md: the hex SHA-256 of the JSON array [SHA-256 of the file,
-// cron expression, fireAt, permission mode, cwd, the SKILL.md's absolute
-// path]. Its display name and bookkeeping fields do not count.
+// cron expression, fireAt (FireAt.Canonical), cwd, the SKILL.md's absolute
+// path]. Its display name, permission mode and bookkeeping fields do not
+// count: the gate checks the mode at every send instead.
 func FingerprintOf(t Task, file []byte) (string, error) {
 	p, err := SkillPath(t)
 	if err != nil {
 		return "", err
 	}
 	sum := sha256.Sum256(file)
-	b, err := json.Marshal([]string{hex.EncodeToString(sum[:]), t.Cron, t.FireAt, t.PermissionMode, t.Cwd, p})
+	b, err := json.Marshal([]string{hex.EncodeToString(sum[:]), t.Cron, t.FireAt.Canonical(), t.Cwd, p})
 	if err != nil {
 		return "", err
 	}

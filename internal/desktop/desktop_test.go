@@ -180,9 +180,142 @@ func TestFindTask(t *testing.T) {
 	if _, err := TaskByID(other, "follow-up"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("TaskByID in another folder: %v", err)
 	}
+	// A file that is not a task list blocks only lookups that find nothing elsewhere.
 	f.write(filepath.Join(other, TasksFile), `{"scheduledTasks": [`, time.Time{})
-	if _, err := FindTask(ctx, roots, "follow-up"); err == nil {
-		t.Error("corrupt task list ignored")
+	if got, err := FindTask(ctx, roots, "follow-up"); err != nil || got.ID != "follow-up" {
+		t.Errorf("unique match beside a broken file: %+v %v", got, err)
+	}
+	if _, err := FindTask(ctx, roots, "remind"); err == nil || errors.Is(err, ErrNotFound) {
+		t.Errorf("no match beside a broken file: %v", err)
+	}
+	if _, err := TaskByID(other, "remind"); err == nil || errors.Is(err, ErrNotFound) {
+		t.Errorf("TaskByID in a broken file: %v", err)
+	}
+}
+
+// Each task decodes on its own: a record that does not decode hides only
+// the lookups it might answer.
+func TestUndecodableTasks(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	f.write(filepath.Join(f.org, TasksFile), `{"scheduledTasks": [
+		{"id": "good", "displayName": "Good", "enabled": true, "filePath": "x", "createdAt": 1},
+		{"id": "bad-enabled", "displayName": "Bad", "enabled": "yes", "filePath": "x", "createdAt": 1},
+		{"id": 7, "displayName": "Numbered", "enabled": true},
+		{"id": "odd-name", "displayName": 12, "enabled": true, "cronExpression": 5},
+		"not an object"
+	], "recordedSkips": {}}`, time.Time{})
+	roots := []string{f.root}
+	l, err := AllTasks(ctx, roots)
+	if err != nil || len(l.Tasks) != 1 || len(l.Unreadable) != 4 || len(l.Broken) != 0 {
+		t.Fatalf("list: %+v %v", l, err)
+	}
+	for ref, ok := range map[string]bool{
+		"good": false, // an id: the numbered record and the non-object one might have it
+		"Good": false, // a title: odd-name's and the non-object record's titles are unknown
+	} {
+		if _, err := FindTask(ctx, roots, ref); (err == nil) != ok {
+			t.Errorf("FindTask(%q): %v", ref, err)
+		}
+	}
+	// Without the records whose id or title is unknown, the good task is found.
+	f.write(filepath.Join(f.org, TasksFile), `{"scheduledTasks": [
+		{"id": "good", "displayName": "Good", "enabled": true, "filePath": "x", "createdAt": 1},
+		{"id": "bad-enabled", "displayName": "Bad", "enabled": "yes", "filePath": "x", "createdAt": 1},
+		{"id": "no-title", "enabled": "yes"}
+	]}`, time.Time{})
+	for ref, want := range map[string]string{"good": "good", "GOOD": "good"} {
+		if got, err := FindTask(ctx, roots, ref); err != nil || got.ID != want {
+			t.Errorf("FindTask(%q) = %+v %v", ref, got, err)
+		}
+	}
+	for _, ref := range []string{"bad-enabled", "Bad"} {
+		if _, err := FindTask(ctx, roots, ref); err == nil || !strings.Contains(err.Error(), "cannot be read might be") {
+			t.Errorf("FindTask(%q): %v", ref, err)
+		}
+	}
+	if _, err := FindTask(ctx, roots, "missing"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("missing: %v", err)
+	}
+	if _, err := TaskByID(f.org, "bad-enabled"); err == nil || errors.Is(err, ErrNotFound) {
+		t.Errorf("TaskByID of an unreadable task: %v", err)
+	}
+}
+
+// realRecord is the shape Claude Desktop writes, from a real one-shot task
+// after it ran (ids and paths replaced).
+const realRecord = `{
+ "scheduledTasks": [
+  {
+   "id": "wamcp-test",
+   "displayName": "wamcp-test",
+   "fireAt": 1795551540000,
+   "enabled": false,
+   "filePath": "SKILLPATH",
+   "createdAt": 1795551137428,
+   "cwd": "C:\\Users\\me\\AppData\\Roaming\\Claude\\scratch-workspaces\\acct\\org\\scratch-2026-11-24-3a3b81",
+   "permissionMode": "auto",
+   "permissionModeCarried": true,
+   "madeByClaude": true,
+   "notifySessionId": "local_00000000-0000-0000-0000-000000000000",
+   "promptWrittenBy": ["unknown"],
+   "promptFileHash": "679f80a6f9b74924440c4a86e254aaed.10a006c3db13e2ba734e6f1218b75b110c17e2d6a05b8ed41621b7577afdf26c",
+   "lastRunAt": "2026-11-24T20:19:31.515Z",
+   "lastScheduledFor": "2026-11-24T20:19:00.000Z",
+   "changedByClaudeAt": 1795551143679
+  }
+ ],
+ "recordedSkips": {},
+ "sundayAliasBoundaryStamped": true,
+ "dayFieldsOrBoundaryStamped": true
+}`
+
+func TestRealRecordShape(t *testing.T) {
+	f := newFixture(t)
+	skill := f.skill("wamcp-test", "Send c_5 a test message.\n")
+	b, _ := json.Marshal(skill)
+	f.write(filepath.Join(f.org, TasksFile), strings.Replace(realRecord, `"SKILLPATH"`, string(b), 1), time.Time{})
+	got, err := FindTask(context.Background(), []string{f.root}, "wamcp-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != "wamcp-test" || got.Title() != "wamcp-test" || got.FireAt.Canonical() != "1795551540000" || got.Enabled == nil || *got.Enabled ||
+		got.PermissionMode != "auto" || got.FilePath != skill || !strings.HasSuffix(got.Cwd, `scratch-2026-11-24-3a3b81`) || got.Cron != "" {
+		t.Fatalf("task %+v", got)
+	}
+	if s := got.Schedule(); s != "once at 24 Nov 2026 21:19" {
+		t.Fatalf("schedule %q", s)
+	}
+	if _, err := Fingerprint(got); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFireAt(t *testing.T) {
+	for _, tc := range []struct {
+		json, canonical, shown string
+		err                    bool
+	}{
+		{`1795551540000`, "1795551540000", "24 Nov 2026 21:19", false},
+		{`1.79555154e12`, "1795551540000", "24 Nov 2026 21:19", false},
+		{`"2026-11-24T20:19:00Z"`, "1795551540000", "24 Nov 2026 21:19", false},
+		{`"2026-11-24T21:19:00+01:00"`, "1795551540000", "24 Nov 2026 21:19", false},
+		{`"tomorrow"`, "tomorrow", "tomorrow", false},
+		{`null`, "", "", false},
+		{`1.5`, "", "", true},
+		{`true`, "", "", true},
+	} {
+		var x struct {
+			F FireAt `json:"fireAt"`
+		}
+		err := json.Unmarshal([]byte(`{"fireAt":`+tc.json+`}`), &x)
+		if (err != nil) != tc.err || err == nil && (x.F.Canonical() != tc.canonical || x.F.String() != tc.shown) {
+			t.Errorf("%s: %q %q %v", tc.json, x.F.Canonical(), x.F.String(), err)
+		}
+	}
+	// Summer time in Rome.
+	if s := FireAtMs(time.Date(2026, 7, 1, 7, 0, 0, 0, time.UTC).UnixMilli()).String(); s != "1 Jul 2026 09:00" {
+		t.Errorf("summer: %q", s)
 	}
 }
 
@@ -193,7 +326,7 @@ func TestTaskTitleAndSchedule(t *testing.T) {
 	}{
 		{Task{ID: "a", DisplayName: "Morning", CronHuman: "Every day at 9:00", Cron: "0 9 * * *"}, "Morning", "Every day at 9:00"},
 		{Task{ID: "a", Cron: "0 9 * * *"}, "a", "cron 0 9 * * *"},
-		{Task{ID: "a", FireAt: "2026-12-01T09:00:00Z"}, "a", "once at 2026-12-01T09:00:00Z"},
+		{Task{ID: "a", FireAt: FireAtMs(1795551540000)}, "a", "once at 24 Nov 2026 21:19"},
 		{Task{ID: "a"}, "a", "manual only"},
 	} {
 		if tc.task.Title() != tc.title || tc.task.Schedule() != tc.sched {
@@ -228,12 +361,11 @@ func TestSkillAndFingerprint(t *testing.T) {
 		}
 	}
 	x := base
-	x.DisplayName, x.Dir, x.CronHuman = "Other", "elsewhere", "Weekdays at 9"
-	same("display name, dir, human schedule", x, true)
+	x.DisplayName, x.Dir, x.CronHuman, x.PermissionMode = "Other", "elsewhere", "Weekdays at 9", "acceptEdits"
+	same("display name, dir, human schedule, permission mode", x, true)
 	for name, edit := range map[string]func(*Task){
 		"cron":   func(t *Task) { t.Cron = "0 10 * * 1-5" },
-		"fireAt": func(t *Task) { t.FireAt = "2026-12-01T09:00:00Z" },
-		"mode":   func(t *Task) { t.PermissionMode = "acceptEdits" },
+		"fireAt": func(t *Task) { t.FireAt = FireAtMs(1795551540000) },
 		"cwd":    func(t *Task) { t.Cwd = `D:\y` },
 	} {
 		x := base
@@ -352,12 +484,14 @@ func TestRealDesktop(t *testing.T) {
 	t.Logf("roots: %v", roots)
 	ctx := context.Background()
 	for _, p := range matches(roots, TasksFile) {
-		ts, err := LoadTasks(filepath.Dir(p))
-		if err != nil {
+		l := LoadTasks(filepath.Dir(p))
+		for _, err := range l.Broken {
 			t.Errorf("%s: %v", p, err)
-			continue
 		}
-		for _, task := range ts {
+		for _, u := range l.Unreadable {
+			t.Errorf("%s: a task does not decode: %v", p, u.Err)
+		}
+		for _, task := range l.Tasks {
 			_, ferr := Fingerprint(task)
 			t.Logf("task id=%s title=%q schedule=%q mode=%q skill=%v", task.ID, task.Title(), task.Schedule(), task.PermissionMode, ferr == nil)
 		}
