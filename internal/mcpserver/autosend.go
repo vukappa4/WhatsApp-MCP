@@ -25,7 +25,7 @@ const (
 )
 
 type autosendAllowIn struct {
-	Task  string   `json:"task" jsonschema:"the taskId given to create_scheduled_task, or the task's exact name"`
+	Task  string   `json:"task" jsonschema:"the taskId given to create_scheduled_task, or the task's exact title"`
 	Chats []string `json:"chats" jsonschema:"c_N or p_N ids the task may send to"`
 }
 
