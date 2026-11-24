@@ -24,10 +24,16 @@ type typedPrompt struct {
 	At   time.Time
 }
 
+// transcriptChunk is how much of the transcript lastUserPrompt reads at a
+// time, from the end backwards.
+var transcriptChunk int64 = 64 << 10
+
 // lastUserPrompt finds the newest prompt typed by the user in a Claude Code
 // session transcript (JSONL): a "user" entry whose content is text, not a
-// tool result, not meta and not a subagent's. ok is false when there is
-// none or the file cannot be read.
+// tool result, not meta and not a subagent's. It reads the last
+// transcriptTail bytes from the end in chunks and stops at the first prompt
+// it finds; a line cut by that limit does not count. ok is false when there
+// is none or the file cannot be read.
 func lastUserPrompt(path string) (typedPrompt, bool) {
 	if path == "" {
 		return typedPrompt{}, false
@@ -41,17 +47,30 @@ func lastUserPrompt(path string) (typedPrompt, bool) {
 	if err != nil {
 		return typedPrompt{}, false
 	}
-	off := max(st.Size()-transcriptTail, 0)
-	buf := make([]byte, st.Size()-off)
-	if _, err := f.ReadAt(buf, off); err != nil && err != io.EOF {
-		return typedPrompt{}, false
+	lower := max(st.Size()-transcriptTail, 0)
+	var carry []byte // the start of the line the chunks read so far end in
+	for pos := st.Size(); pos > lower; {
+		n := min(transcriptChunk, pos-lower)
+		pos -= n
+		data := make([]byte, n, n+int64(len(carry)))
+		if _, err := f.ReadAt(data, pos); err != nil && err != io.EOF {
+			return typedPrompt{}, false
+		}
+		data = append(data, carry...)
+		for {
+			i := bytes.LastIndexByte(data, '\n')
+			if i < 0 {
+				break
+			}
+			if p, ok := promptEntry(data[i+1:]); ok {
+				return p, true
+			}
+			data = data[:i]
+		}
+		carry = data
 	}
-	lines := bytes.Split(buf, []byte("\n"))
-	if off > 0 && len(lines) > 0 {
-		lines = lines[1:] // cut mid-line
-	}
-	for i := len(lines) - 1; i >= 0; i-- {
-		if p, ok := promptEntry(lines[i]); ok {
+	if lower == 0 { // the file's first line; past the limit it is cut mid-line
+		if p, ok := promptEntry(carry); ok {
 			return p, true
 		}
 	}
