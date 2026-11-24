@@ -6,7 +6,7 @@
 //
 //	<root>/<accountUuid>/<orgUuid>/scheduled-tasks.json   {"scheduledTasks": [Task...]}
 //	<root>/<accountUuid>/<orgUuid>/local_<id>.json        one Run per session
-//	<filePath>, by default <ConfigDir>/scheduled-tasks/<id>/SKILL.md: the prompt
+//	<filePath>, a task's SKILL.md: the prompt
 package desktop
 
 import (
@@ -503,38 +503,19 @@ func FindTask(ctx context.Context, roots []string, ref string) (Task, error) {
 		func(u Unreadable) bool { return u.mightBeTitle(ref) }, ref)
 }
 
-// ConfigDir is Claude Code's config folder: CLAUDE_CONFIG_DIR, else ~/.claude.
-func ConfigDir() string {
-	if d := os.Getenv("CLAUDE_CONFIG_DIR"); d != "" {
-		return d
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".claude")
-}
-
-// SkillPath is the task's SKILL.md: its filePath, else
-// <ConfigDir>/scheduled-tasks/<id>/SKILL.md. A filePath that is not an
-// absolute path is an error: which file it names would depend on the
-// reader's working folder.
+// SkillPath is the task's SKILL.md: its filePath. A task without one is an
+// error, and so is a filePath that is not an absolute path: which file it
+// names would depend on the reader's environment or working folder, and
+// the gate and the daemon must fingerprint the same file.
 func SkillPath(t Task) (string, error) {
-	if p := t.FilePath; strings.TrimSpace(p) != "" {
-		if p != strings.TrimSpace(p) || !filepath.IsAbs(p) {
-			return "", fmt.Errorf("the task's filePath %q is not an absolute path", p)
-		}
-		return filepath.Clean(p), nil
+	p := t.FilePath
+	switch {
+	case strings.TrimSpace(p) == "":
+		return "", errors.New("the task names no SKILL.md (no filePath)")
+	case p != strings.TrimSpace(p) || !filepath.IsAbs(p):
+		return "", fmt.Errorf("the task's filePath %q is not an absolute path", p)
 	}
-	dir := ConfigDir()
-	if dir == "" || t.ID == "" || strings.ContainsAny(t.ID, `/\.`) {
-		return "", errors.New("the task names no SKILL.md")
-	}
-	p := filepath.Join(dir, "scheduled-tasks", t.ID, "SKILL.md")
-	if !filepath.IsAbs(p) {
-		return "", fmt.Errorf("the task's SKILL.md %q is not an absolute path", p)
-	}
-	return p, nil
+	return filepath.Clean(p), nil
 }
 
 // SkillFile is a parsed SKILL.md.

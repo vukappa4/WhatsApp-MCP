@@ -452,21 +452,21 @@ func TestParseSkill(t *testing.T) {
 	}
 }
 
-// Without a filePath the SKILL.md is the default one in Claude Code's config folder.
-func TestSkillDefaultPath(t *testing.T) {
+// A task without a filePath is refused, even with a SKILL.md where Claude
+// Code's config folder would hold one: the gate and the daemon may see
+// different config folders.
+func TestSkillNeedsFilePath(t *testing.T) {
 	f := newFixture(t)
 	cfg := filepath.Join(f.root, "..", "config")
 	t.Setenv("CLAUDE_CONFIG_DIR", cfg)
 	f.skill("follow-up", "Write to c_5")
-	if _, sk, err := ReadSkill(Task{ID: "follow-up"}); err != nil || sk.Prompt != "Write to c_5" {
-		t.Fatalf("default path: %+v %v", sk, err)
-	}
-	if _, _, err := ReadSkill(Task{ID: "../follow-up"}); err == nil {
-		t.Fatal("id with a path accepted")
-	}
-	t.Setenv("CLAUDE_CONFIG_DIR", "relative")
-	if _, _, err := ReadSkill(Task{ID: "follow-up"}); err == nil {
-		t.Fatal("relative config folder accepted")
+	for _, p := range []string{"", "  "} {
+		if _, _, err := ReadSkill(Task{ID: "follow-up", FilePath: p}); err == nil || !strings.Contains(err.Error(), "no filePath") {
+			t.Fatalf("filePath %q: %v", p, err)
+		}
+		if _, err := FingerprintOf(Task{ID: "follow-up", FilePath: p}, nil); err == nil {
+			t.Fatalf("fingerprint with filePath %q", p)
+		}
 	}
 }
 
