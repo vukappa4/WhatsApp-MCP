@@ -208,6 +208,8 @@ func TestToolsAreTextOnly(t *testing.T) {
 		toolSendMessage:    {"to": chatA, "text": "ok"},
 		toolSendFile:       {"to": chatA, "path": filepath.Join(t.TempDir(), "missing.pdf")},
 		toolRequestHistory: {"chat": chatA},
+		toolAutosendAllow:  {"task": "follow-up", "chats": []string{chatA}},
+		toolAutosendRevoke: {"task": "follow-up"},
 	}
 	for _, tl := range tools.Tools {
 		if tl.OutputSchema != nil {
@@ -244,7 +246,7 @@ func TestToolsEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sends := map[string]bool{toolSendMessage: true, toolSendFile: true, toolRequestHistory: true}
+	sends := map[string]bool{toolSendMessage: true, toolSendFile: true, toolRequestHistory: true, toolAutosendAllow: true, toolAutosendRevoke: true}
 	seen := 0
 	for _, tl := range tools.Tools {
 		if sends[tl.Name] {

@@ -267,6 +267,11 @@ func (s *Server) status(ctx context.Context, _ *mcp.CallToolRequest, _ statusIn)
 		}
 	}
 	b.WriteString(phoneHealth(d.phoneSeen(), s.now()) + "\n")
+	auto, err := s.autosendStatus(ctx, now)
+	if err != nil {
+		return nil, err
+	}
+	b.WriteString(auto + "\n")
 	if len(events) > 0 {
 		b.WriteString("Recent connection events:\n")
 		for _, e := range events {

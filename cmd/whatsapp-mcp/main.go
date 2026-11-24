@@ -26,6 +26,8 @@ import (
 
 	"github.com/vukappa4/whatsapp-mcp/internal/childproc"
 	"github.com/vukappa4/whatsapp-mcp/internal/config"
+	"github.com/vukappa4/whatsapp-mcp/internal/desktop"
+	"github.com/vukappa4/whatsapp-mcp/internal/hooks"
 	"github.com/vukappa4/whatsapp-mcp/internal/instance"
 	"github.com/vukappa4/whatsapp-mcp/internal/logx"
 	"github.com/vukappa4/whatsapp-mcp/internal/mcpserver"
@@ -335,7 +337,10 @@ func runCmd(args []string) error {
 
 	reason := "signal"
 	srv := &mcpserver.Server{DB: db, WA: client, Media: mgr, Profile: string(cfg.Profile), DataDir: cfg.DataDir, Version: version, Log: log,
-		Stop: func() { reason = "stop command"; cancel() }, Sender: client, Ingest: client.Ingestor()}
+		Stop: func() { reason = "stop command"; cancel() }, Sender: client, Ingest: client.Ingestor(), DesktopRoots: desktop.Roots()}
+	if dir, err := hooks.DefaultDir(); err == nil {
+		srv.HooksDir = dir
+	}
 	log.Info("serving MCP", "url", fmt.Sprintf("http://127.0.0.1:%d/mcp", cfg.Port))
 	serveErr := srv.Serve(ctx, ln, token, cfg.Port)
 	if serveErr != nil {

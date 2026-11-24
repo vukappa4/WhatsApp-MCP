@@ -50,6 +50,12 @@ type Server struct {
 	// Files decides which local files whatsapp_send_file may read; nil means
 	// outgoing.LoadPolicy(DataDir).
 	Files *outgoing.Policy
+	// HooksDir holds the send gate's autosend receipts (hooks.DefaultDir);
+	// empty, whatsapp_send_autosend_allow approves nothing.
+	HooksDir string
+	// DesktopRoots are Claude Desktop's session folders (desktop.Roots),
+	// read to tell whether an approved task is unchanged.
+	DesktopRoots []string
 
 	sendMu   sync.Mutex  // one send at a time: idempotency keys stay exact
 	closing  atomic.Bool // the daemon is stopping: new sends are refused (Drain)
