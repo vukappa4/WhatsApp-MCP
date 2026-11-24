@@ -43,8 +43,9 @@ func (s *Server) addAutosendTools(srv *mcp.Server) {
 			"given to create_scheduled_task. chats: c_N or p_N ids; write the same ids in the task's prompt, since its runs must " +
 			"call whatsapp_send_message with to set to one of them. The user confirms a card showing the task, schedule, folder, " +
 			"prompt and chats; a scheduled run can never approve itself. Any other send, file or chat still asks, and so does a " +
-			"send past " + strconv.Itoa(autosend.MaxPerDay) + " a day to one chat. Changing the task's prompt, schedule, permission " +
-			"mode or folder ends the approval; approving again replaces the chats. Never bulk or unsolicited: WhatsApp bans for it.",
+			"send past " + strconv.Itoa(autosend.MaxPerDay) + " a day to one chat; in the run nobody is present, so those are refused. " +
+			"Changing the task's prompt, schedule or folder ends the approval, and a bypassPermissions or dontAsk mode blocks it; " +
+			"approving again replaces the chats. Never bulk or unsolicited: WhatsApp bans for it.",
 		InputSchema: schemaFor[autosendAllowIn](nil),
 		Annotations: &mcp.ToolAnnotations{Title: "Approve WhatsApp autosend", DestructiveHint: &f, OpenWorldHint: &f},
 	}, s.autosendAllow)
@@ -102,7 +103,7 @@ func (s *Server) autosendAllow(ctx context.Context, _ *mcp.CallToolRequest, in a
 		lines = append(lines, "to "+bw.wrap(c.Label))
 	}
 	return textResult(fmt.Sprintf("Approved: this Desktop scheduled task may send text messages with nobody present:\n%s\n"+
-		"Its runs must call %s with to set to one of: %s. Changing the task's prompt, schedule or permission mode ends the "+
+		"Its runs must call %s with to set to one of: %s. Changing the task's prompt, schedule or folder ends the "+
 		"approval. %s ends it now.", w.block(lines), toolSendMessage, strings.Join(ids, ", "), toolAutosendRevoke)), nil
 }
 
@@ -173,7 +174,7 @@ func (s *Server) checkReceipt(ctx context.Context, r autosend.Receipt, ids []str
 		return "the task cannot be read (" + err.Error() + ")", nil
 	}
 	if fp != r.Fingerprint {
-		return "the task's prompt, schedule, permission mode or folder changed", nil
+		return "the task's prompt, schedule or folder changed", nil
 	}
 	return "", nil
 }
@@ -245,12 +246,15 @@ func (s *Server) autosendState(ctx context.Context, r store.AutosendRule) string
 	if filepath.Clean(task.Dir) != filepath.Clean(r.TaskDir) {
 		return "inactive: the task is in another Claude Desktop account or organization"
 	}
+	if task.PermissionMode == "bypassPermissions" || task.PermissionMode == "dontAsk" {
+		return "inactive: the task's permission mode is " + task.PermissionMode
+	}
 	fp, err := desktop.Fingerprint(task)
 	switch {
 	case err != nil:
 		return "unknown: " + err.Error()
 	case fp != r.Fingerprint:
-		return "inactive: the task's prompt, schedule, mode or folder changed since approval"
+		return "inactive: the task's prompt, schedule or folder changed since approval"
 	}
 	return "active"
 }

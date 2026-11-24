@@ -36,8 +36,9 @@ func decodeInput(r io.Reader, v any) (raw []byte, err error) {
 // FlagTTL is how long a send intent stays valid without a new prompt.
 const FlagTTL = 2 * time.Hour
 
-// PreToolBudget bounds the PreToolUse hook: past it the hook asks. The
-// registered hook timeout (10 s) is well above it.
+// PreToolBudget bounds each lookup of the PreToolUse hook: past it the hook
+// asks. The registered timeout (30 s) is well above the hook's worst case:
+// up to 12 s waiting for a scheduled run's file, then two budgets.
 const PreToolBudget = 4 * time.Second
 
 // PreToolMatcher is the PreToolUse matcher registered for the gate: the send
@@ -256,7 +257,8 @@ type PreToolEnv struct {
 // check that overruns PreToolBudget all ask: the gate fails closed. It
 // answers "allow" only for revoking an autosend approval and for a text
 // message an approved Desktop scheduled task sends to an approved chat
-// (see decide), and "deny" for an autosend approval it cannot show the user.
+// (see decide), and "deny" for an autosend approval it cannot show the user
+// and for any other call in a scheduled run with nobody present.
 func PreTool(stdin io.Reader, stdout io.Writer, env PreToolEnv) error {
 	var in toolInput
 	_, err := decodeInput(stdin, &in)
@@ -316,7 +318,7 @@ func askReason(in toolInput, inputErr error, env PreToolEnv) (reason, what strin
 		return lead + "the send gate did not check your last message (its hook did not run). Confirm " + what + ".", what
 	}
 	if rerr != nil {
-		return lead + "cannot check the recipient " + display(target) + " (" + display(rerr.Error()) + "). Confirm " + what + ".", what
+		return lead + "cannot check the recipient " + display(target) + " (" + errText(rerr) + "). Confirm " + what + ".", what
 	}
 	prompt := strings.Fields(fl.Prompt)
 	if !r.NamedIn(prompt) {
@@ -387,7 +389,7 @@ func displayN(s string, n int) string {
 	}, s)
 	s = strings.Join(strings.Fields(s), " ")
 	if r := []rune(s); len(r) > n {
-		s = string(r[:n-1]) + "…"
+		s = string(r[:max(n-3, 0)]) + "..." // ASCII: some hosts mangle other characters in a reason
 	}
 	return s
 }

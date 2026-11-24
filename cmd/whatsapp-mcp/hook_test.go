@@ -220,8 +220,11 @@ func TestAutosendHookEndToEnd(t *testing.T) {
 	skill := filepath.Join(os.Getenv("CLAUDE_CONFIG_DIR"), "scheduled-tasks", "invoice-follow-up", "SKILL.md")
 	files := map[string]string{
 		skill: "---\nname: invoice-follow-up\ndescription: x\n---\nAsk c_5 whether the invoice arrived.\n",
+		// The shape Desktop writes for a one-shot task: fireAt in epoch ms, an absolute filePath.
 		filepath.Join(org, desktop.TasksFile): `{"scheduledTasks":[{"id":"invoice-follow-up","displayName":"Invoice follow-up",` +
-			`"cronExpression":"0 9 * * 1-5","enabled":true,"permissionMode":"default","createdAt":1}]}`,
+			`"fireAt":1795551540000,"enabled":true,"filePath":` + quoted(skill) + `,"createdAt":1795551137428,"cwd":` + quoted(dir) + `,` +
+			`"permissionMode":"auto","permissionModeCarried":true,"madeByClaude":true,"promptWrittenBy":["unknown"],` +
+			`"promptFileHash":"x.y","changedByClaudeAt":1795551143679}],"recordedSkips":{},"sundayAliasBoundaryStamped":true}`,
 		filepath.Join(org, "local_run.json"): `{"sessionId":"local_run","cliSessionId":"sched-1","scheduledTaskId":"invoice-follow-up",` +
 			`"scheduledRunContinued":false,"permissionMode":"default"}`,
 	}
@@ -276,10 +279,15 @@ func TestAutosendHookEndToEnd(t *testing.T) {
 		strings.Contains(lines[0], "fattura") {
 		t.Fatalf("autosend log: %q", b)
 	}
-	// Another recipient in the same run asks.
 	out = hook("pre-tool", map[string]any{"session_id": "sched-1", "hook_event_name": "PreToolUse", "tool_name": "mcp__whatsapp__whatsapp_send_message",
 		"tool_input": map[string]any{"to": "+39 333 999 9999", "text": "x"}, "tool_use_id": "toolu_2"})
-	if !strings.Contains(out, `"ask"`) || !strings.Contains(out, "Autosend: to must be an approved c_N or p_N id") {
+	// Another recipient in the same run is denied: nobody is there to confirm it.
+	if !strings.Contains(out, `"deny"`) || !strings.Contains(out, "(to must be an approved c_N or p_N id, not +39 333 999 9999). Do not retry") {
 		t.Fatalf("unapproved recipient: %q", out)
 	}
+}
+
+func quoted(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
 }

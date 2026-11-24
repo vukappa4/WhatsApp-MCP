@@ -215,8 +215,15 @@ func TestAutosendRevokeAndStatus(t *testing.T) {
 		t.Errorf("other folder:\n%s", text)
 	}
 	a.db.Exec(`UPDATE autosend_rules SET task_dir = ? WHERE task_id = 'follow-up'`, a.org)
+	// The permission mode is not in the fingerprint: a promptless one blocks the rule while it lasts.
+	b, _ := json.Marshal(map[string]any{"scheduledTasks": []map[string]any{{"id": "follow-up", "displayName": "Follow up",
+		"filePath": a.skill, "cronExpression": "0 9 * * 1-5", "permissionMode": "dontAsk"}}})
+	a.writeFile(t, filepath.Join(a.org, desktop.TasksFile), string(b))
+	if text := state(); !strings.Contains(text, "inactive: the task's permission mode is dontAsk") {
+		t.Errorf("dontAsk task:\n%s", text)
+	}
 	a.writeTasks(t, "*/5 * * * *")
-	if text := state(); !strings.Contains(text, "inactive: the task's prompt, schedule, mode or folder changed since approval") {
+	if text := state(); !strings.Contains(text, "inactive: the task's prompt, schedule or folder changed since approval") {
 		t.Errorf("changed task:\n%s", text)
 	}
 	os.Remove(a.skill)

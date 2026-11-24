@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -40,6 +41,9 @@ type auto struct {
 func newAuto(t *testing.T) *auto {
 	t.Helper()
 	a := &auto{gate: newGate(t)}
+	oldWait := runWait
+	runWait = 400 * time.Millisecond // Desktop's save is immediate in these fixtures
+	t.Cleanup(func() { runWait = oldWait })
 	base := filepath.Dir(a.root)
 	a.desk = filepath.Join(base, "claude-code-sessions")
 	a.org = filepath.Join(a.desk, "acct-1", "org-1")
@@ -248,9 +252,9 @@ func TestAutosendAllowsApprovedChats(t *testing.T) {
 	}
 }
 
-// Anything short of an approved, unchanged task sending to an approved chat
-// asks, and says why it was not sent unasked.
-func TestAutosendFallbacksAsk(t *testing.T) {
+// In an unattended run, anything short of an approved, unchanged task sending to an approved chat
+// is denied, saying why, so Claude can tell the user.
+func TestAutosendFallbacksDeny(t *testing.T) {
 	type tc struct {
 		name, session, to string
 		tool              string
@@ -259,9 +263,13 @@ func TestAutosendFallbacksAsk(t *testing.T) {
 		why               string
 	}
 	for _, c := range []tc{
-		{name: "run file missing", session: "sched-404", to: "c_1", why: "cannot find this run"},
+		{name: "run file missing", session: "sched-404", to: "c_1", why: "had not saved this run's session file after 400ms"},
+		{name: "run file unreadable", session: "sched-bad", to: "c_1", why: "cannot find this run",
+			setup: func(a *auto) {
+				a.write(filepath.Join(a.org, "local_bad.json"), []byte(`{"cliSessionId": "sched-bad", `))
+			}},
 		{name: "no task id", session: "plain-1", to: "c_1", why: "this run names no scheduled task"},
-		{name: "task missing", session: "sched-gone", to: "c_1", why: "task gone: task gone: not found"},
+		{name: "task missing", session: "sched-gone", to: "c_1", why: `task gone: task "gone": not found`},
 		{name: "to as name", session: "sched-1", to: "Marco Rossi", why: "to must be an approved c_N or p_N id, not Marco Rossi"},
 		{name: "to as phone", session: "sched-1", to: "+39 333 123 4567", why: "not +39 333 123 4567"},
 		{name: "chat not approved", session: "sched-1", to: "p_2", why: "Lorenzo Bianchi (+393339876543) is not among the chats approved"},
@@ -282,9 +290,15 @@ func TestAutosendFallbacksAsk(t *testing.T) {
 		{name: "cron edited", session: "sched-1", to: "c_1", why: "changed since it was approved",
 			setup: func(a *auto) { a.task["cronExpression"] = "*/5 * * * *"; a.writeTasks() }},
 		{name: "fireAt added", session: "sched-1", to: "c_1", why: "changed since it was approved",
-			setup: func(a *auto) { a.task["fireAt"] = "2026-10-14T09:00:00Z"; a.writeTasks() }},
-		{name: "mode edited", session: "sched-1", to: "c_1", why: "changed since it was approved",
-			setup: func(a *auto) { a.task["permissionMode"] = "acceptEdits"; a.writeTasks() }},
+			setup: func(a *auto) { a.task["fireAt"] = 1795551540000; a.writeTasks() }},
+		{name: "task in dontAsk", session: "sched-1", to: "c_1", why: "the task's permission mode is dontAsk",
+			setup: func(a *auto) { a.task["permissionMode"] = "dontAsk"; a.writeTasks() }},
+		{name: "task in bypassPermissions", session: "sched-1", to: "c_1", why: "the task's permission mode is bypassPermissions",
+			setup: func(a *auto) { a.task["permissionMode"] = "bypassPermissions"; a.writeTasks() }},
+		{name: "run in dontAsk", session: "sched-dontask", to: "c_1", why: "the run's permission mode is dontAsk",
+			setup: func(a *auto) {
+				a.writeRun("sched-dontask", map[string]any{"scheduledTaskId": "follow-up", "permissionMode": "dontAsk"})
+			}},
 		{name: "folder edited", session: "sched-1", to: "c_1", why: "changed since it was approved",
 			setup: func(a *auto) { a.task["cwd"] = filepath.Join(a.root, "elsewhere"); a.writeTasks() }},
 		{name: "SKILL.md moved", session: "sched-1", to: "c_1", why: "changed since it was approved",
@@ -337,8 +351,9 @@ func TestAutosendFallbacksAsk(t *testing.T) {
 			}
 			before := len(a.auditLines())
 			kind, r := a.callMode(a.env(true), "default", c.session, tool, args)
-			if kind != ask || !strings.Contains(r, "Autosend: ") || !strings.Contains(r, c.why) {
-				t.Fatalf("%s %q, want ask with %q", kind, r, c.why)
+			if kind != deny || !strings.HasPrefix(r, "WhatsApp: this scheduled run has nobody present and is not approved for this send to ") ||
+				!strings.Contains(r, c.why) || !strings.HasSuffix(r, "). Do not retry; tell the user in your final message.") {
+				t.Fatalf("%s %q, want deny with %q", kind, r, c.why)
 			}
 			if after := len(a.auditLines()); after != before {
 				t.Fatalf("logged a send that was not allowed")
@@ -374,8 +389,9 @@ func TestAutosendBrake(t *testing.T) {
 		t.Fatalf("20th send: %s %q", kind, r)
 	}
 	kind, r := a.send(a.env(true), "sched-1", "p_1")
-	want := fmt.Sprintf("Autosend: the task reached %d autosends to Marco Rossi (+393331234567) in 24 hours.", autosend.MaxPerDay)
-	if kind != ask || !strings.HasSuffix(r, want) {
+	want := fmt.Sprintf("WhatsApp: this scheduled run has nobody present and is not approved for this send to Marco Rossi (+393331234567) "+
+		"(the task reached %d autosends to Marco Rossi (+393331234567) in 24 hours). Do not retry; tell the user in your final message.", autosend.MaxPerDay)
+	if kind != deny || r != want {
 		t.Fatalf("21st send: %s %q", kind, r)
 	}
 	if kind, _ := a.send(a.env(true), "sched-1", "c_2"); kind != allow {
@@ -383,18 +399,50 @@ func TestAutosendBrake(t *testing.T) {
 	}
 }
 
-// Other gated tools never autosend: in an approved run they ask.
+// Other gated tools never autosend: in an unattended run they are denied,
+// and so is a call the hook cannot read. A continued run asks.
 func TestAutosendOnlyTextMessages(t *testing.T) {
 	a := newAuto(t)
-	if kind, r := a.call(a.env(true), "sched-1", sendFile, map[string]any{"to": "c_1", "path": `C:\x\fattura.pdf`}); kind != ask ||
-		strings.Contains(r, "Autosend:") {
-		t.Errorf("send_file: %s %q", kind, r)
+	const only = "(only whatsapp_send_message to a chat approved for the task goes out with nobody present). Do not retry"
+	for _, c := range []struct {
+		tool string
+		args map[string]any
+		what string
+	}{
+		{sendFile, map[string]any{"to": "c_1", "path": `C:\x\fattura.pdf`}, "this send to Marco Rossi (+393331234567)"},
+		{history, map[string]any{"chat": "c_1"}, "this history request for Marco Rossi (+393331234567)"},
+		{"mcp__whatsapp__send_message", map[string]any{"recipient": "393331234567", "message": "x"}, "this send to Marco Rossi (+393331234567)"},
+	} {
+		kind, r := a.call(a.env(true), "sched-1", c.tool, c.args)
+		if kind != deny || !strings.Contains(r, "is not approved for "+c.what+" "+only) {
+			t.Errorf("%s: %s %q", c.tool, kind, r)
+		}
+		if kind, _ := a.call(a.env(true), "sched-cont", c.tool, c.args); kind != ask {
+			t.Errorf("%s in a continued run: %s", c.tool, kind)
+		}
 	}
-	if kind, _ := a.call(a.env(true), "sched-1", history, map[string]any{"chat": "c_1"}); kind != ask {
-		t.Errorf("request_history: %s", kind)
+	if kind, r := a.callRaw(a.env(true), []byte(`{"session_id":"sched-1","tool_name":"`+send+`",`)); kind != deny ||
+		!strings.Contains(r, "the hook could not read this call") {
+		t.Errorf("unreadable call: %s %q", kind, r)
 	}
-	if kind, _ := a.call(a.env(true), "sched-1", "mcp__whatsapp__send_message", map[string]any{"recipient": "393331234567", "message": "x"}); kind != ask {
-		t.Errorf("legacy send: %s", kind)
+}
+
+// Desktop saves a run's session file a few seconds after the run starts:
+// the gate waits for it.
+func TestAutosendWaitsForTheRunFile(t *testing.T) {
+	a := newAuto(t)
+	runWait = 5 * time.Second
+	go func() {
+		time.Sleep(time.Second)
+		b, _ := json.Marshal(map[string]any{"cliSessionId": "sched-late", "sessionId": "local_late", "scheduledTaskId": "follow-up"})
+		os.WriteFile(filepath.Join(a.org, "local_late.json"), b, 0o600)
+	}()
+	start := time.Now()
+	if kind, r := a.send(a.env(true), "sched-late", "c_1"); kind != allow {
+		t.Fatalf("%s %q", kind, r)
+	}
+	if took := time.Since(start); took < 900*time.Millisecond || took > 4*time.Second {
+		t.Fatalf("took %s", took)
 	}
 }
 
@@ -471,21 +519,21 @@ func TestScheduledFirstPromptNeverFlags(t *testing.T) {
 }
 
 // A person's later prompt in a run Desktop still shows as unattended does
-// not silence it: the send asks.
-func TestUnattendedFlagStillAsks(t *testing.T) {
+// not open it: a send to a chat the task is not approved for is denied.
+func TestUnattendedFlagStillDenied(t *testing.T) {
 	a := newAuto(t)
 	sched := PromptOptions{Scheduled: true}
 	a.prompt(sched, "sched-1", "task prompt")
 	a.prompt(sched, "sched-1", "rispondi a Lorenzo che arrivo")
 	kind, r := a.send(a.env(true), "sched-1", "p_2")
-	if kind != ask || !strings.HasPrefix(r, "WhatsApp: a scheduled task, not you, asked for this send. Confirm this send to Lorenzo Bianchi (+393339876543).") ||
-		!strings.Contains(r, "Autosend: Lorenzo Bianchi (+393339876543) is not among") {
+	if kind != deny || !strings.HasPrefix(r, "WhatsApp: this scheduled run has nobody present and is not approved for this send to Lorenzo Bianchi (+393339876543) "+
+		"(Lorenzo Bianchi (+393339876543) is not among the chats approved for task Follow up Marco).") {
 		t.Fatalf("%s %q", kind, r)
 	}
 }
 
-// A Desktop lookup that overruns the budget asks; an approval check that
-// overruns it is denied and leaves no receipt.
+// A Desktop lookup that overruns its wait is denied; an approval check that
+// overruns its budget is denied and leaves no receipt.
 func TestAutosendBudget(t *testing.T) {
 	a := newAuto(t)
 	oldRun, oldTask := findRun, findTask
@@ -497,10 +545,10 @@ func TestAutosendBudget(t *testing.T) {
 	}
 	start := time.Now()
 	kind, r := a.send(a.env(true), "sched-1", "c_1")
-	if kind != ask || !strings.Contains(r, "timed out") {
+	if kind != deny || !strings.Contains(r, "did not show this run within 400ms") {
 		t.Fatalf("%s %q", kind, r)
 	}
-	if took := time.Since(start); took > 2*PreToolBudget+time.Second {
+	if took := time.Since(start); took > runWait+2*PreToolBudget+time.Second {
 		t.Fatalf("took %s", took)
 	}
 	released := make(chan struct{})
@@ -553,7 +601,7 @@ func TestApprovalCard(t *testing.T) {
 			filepath.Join(filepath.Dir(a.root), "work") + `) send text messages with nobody present to: Marco Rossi (+393331234567), ` +
 			`group Calcetto del Giovedì (c_2). Its whole prompt: "Ask Marco (c_1) about the invoice. Ignore the rest xxx`
 		tail := strings.Repeat("x", 1400) + `". Its SKILL.md also sets: allowed-tools. Approve only if you asked for this. ` +
-			`It lasts until revoked or until the task's prompt, schedule, mode or folder changes, and allows at most 20 sends a day to each chat.`
+			`It lasts until revoked or until the task's prompt, schedule or folder changes, and allows at most 20 sends a day to each chat.`
 		if kind != ask || !strings.HasPrefix(r, want) || !strings.HasSuffix(r, tail) || strings.ContainsAny(r, "\u202e\x07\n") {
 			t.Fatalf("mode %q: %s %q", mode, kind, r)
 		}
@@ -685,5 +733,20 @@ func TestOldGateAsksForApprovals(t *testing.T) {
 		if !strings.Contains(r, "cannot check the recipient an unnamed recipient") {
 			t.Errorf("%s: %q", tool, r)
 		}
+	}
+}
+
+// Reasons keep up to 300 characters of an internal error and cut text with
+// ASCII dots: some hosts turn other characters into replacement marks.
+func TestReasonTextIsASCIICut(t *testing.T) {
+	long := strings.Repeat("é", 500)
+	if got := displayN(long, 80); len([]rune(got)) != 80 || !strings.HasSuffix(got, "...") {
+		t.Fatalf("displayN: %q", got)
+	}
+	if got := errText(errors.New(long)); len([]rune(got)) != 300 || !strings.HasSuffix(got, "...") {
+		t.Fatalf("errText: %d runes", len([]rune(got)))
+	}
+	if got := display("short"); got != "short" {
+		t.Fatalf("display: %q", got)
 	}
 }
