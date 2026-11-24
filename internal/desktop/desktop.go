@@ -109,6 +109,9 @@ func (f *FireAt) UnmarshalJSON(b []byte) error {
 	}
 	var s string
 	if json.Unmarshal(b, &s) == nil {
+		if s == "" {
+			return errors.New("fireAt is an empty string")
+		}
 		if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
 			*f = FireAt{ms: t.UnixMilli(), set: true}
 		} else {
@@ -135,16 +138,17 @@ func (f *FireAt) UnmarshalJSON(b []byte) error {
 // Set reports whether the task has a fireAt.
 func (f FireAt) Set() bool { return f.set }
 
-// Canonical is the fireAt the fingerprint holds: decimal epoch ms, the
-// string itself when it is not a time, "" when unset.
+// Canonical is the fireAt the fingerprint holds: "ms:<epoch ms>" for a
+// number or an RFC 3339 string, "raw:<string>" for any other string, ""
+// when unset. The prefix keeps a number and a string from ever sharing it.
 func (f FireAt) Canonical() string {
 	switch {
 	case !f.set:
 		return ""
 	case f.raw != "":
-		return f.raw
+		return "raw:" + f.raw
 	}
-	return strconv.FormatInt(f.ms, 10)
+	return "ms:" + strconv.FormatInt(f.ms, 10)
 }
 
 // rome is where the user lives: schedules are shown in its time.
@@ -172,14 +176,17 @@ func (t Task) Title() string {
 	return t.ID
 }
 
-// Schedule describes when the task runs: the human-readable schedule, else
-// "cron <expression>", else "once at <fireAt>", else "manual only".
+// Schedule describes when the task runs: "cron <expression>", with the
+// human-readable form in parentheses when the record has one, else "once at
+// <fireAt>", else "manual only". The expression is what Desktop runs: a
+// description written beside it is never shown alone.
 func (t Task) Schedule() string {
+	cron := strings.TrimSpace(t.Cron)
 	switch {
-	case strings.TrimSpace(string(t.CronHuman)) != "":
-		return strings.TrimSpace(string(t.CronHuman))
-	case strings.TrimSpace(t.Cron) != "":
-		return "cron " + strings.TrimSpace(t.Cron)
+	case cron != "" && strings.TrimSpace(string(t.CronHuman)) != "":
+		return "cron " + cron + " (" + strings.TrimSpace(string(t.CronHuman)) + ")"
+	case cron != "":
+		return "cron " + cron
 	case t.FireAt.Set():
 		return "once at " + t.FireAt.String()
 	}
@@ -259,6 +266,9 @@ func FindRun(ctx context.Context, roots []string, id string) (Run, error) {
 			return Run{}, fmt.Errorf("%s is over %d MB", filepath.Base(f.path), maxFile>>20)
 		}
 		var r Run
+		if err := exactKeys(b, runKeys); err != nil {
+			return Run{}, fmt.Errorf("read %s: %w", filepath.Base(f.path), err)
+		}
 		if err := json.Unmarshal(b, &r); err != nil {
 			return Run{}, fmt.Errorf("read %s: %w", filepath.Base(f.path), err)
 		}
@@ -313,13 +323,20 @@ func LoadTasks(dir string) List {
 	var f struct {
 		ScheduledTasks []json.RawMessage `json:"scheduledTasks"`
 	}
+	if err := exactKeys(b, []string{"scheduledTasks"}); err != nil {
+		return List{Broken: []error{fmt.Errorf("read %s: %w", path, err)}}
+	}
 	if err := json.Unmarshal(b, &f); err != nil {
 		return List{Broken: []error{fmt.Errorf("read %s: %w", path, err)}}
 	}
 	var l List
 	for _, raw := range f.ScheduledTasks {
 		var t Task
-		if err := json.Unmarshal(raw, &t); err != nil {
+		err := exactKeys(raw, taskKeys)
+		if err == nil {
+			err = json.Unmarshal(raw, &t)
+		}
+		if err != nil {
 			l.Unreadable = append(l.Unreadable, unreadable(dir, raw, err))
 			continue
 		}
@@ -335,20 +352,69 @@ func unreadable(dir string, raw json.RawMessage, err error) Unreadable {
 	if json.Unmarshal(raw, &m) != nil {
 		return u
 	}
-	var s string
-	if v, ok := m["id"]; ok && json.Unmarshal(v, &s) == nil {
-		id := s
-		u.ID = &id
+	present := func(k string) (json.RawMessage, bool) {
+		v, ok := m[k]
+		if !ok || string(bytes.TrimSpace(v)) == "null" {
+			return nil, false // null is absent, as in Desktop's record check
+		}
+		return v, true
 	}
-	v, ok := m["displayName"]
-	switch {
-	case !ok:
+	if v, ok := present("id"); ok {
+		var id string
+		if json.Unmarshal(v, &id) == nil {
+			u.ID = &id
+		}
+	}
+	if v, ok := present("displayName"); !ok {
 		u.TitleKnown = true
-	case json.Unmarshal(v, &s) == nil:
-		name := s
-		u.DisplayName, u.TitleKnown = &name, true
+	} else {
+		var name string
+		if json.Unmarshal(v, &name) == nil {
+			u.DisplayName, u.TitleKnown = &name, true
+		}
 	}
 	return u
+}
+
+// taskKeys and runKeys are the record fields the gate reads. A record that
+// spells one in another case, or holds one twice, is refused: Go's decoder
+// would match it where Desktop's JavaScript reads another value.
+var (
+	taskKeys = []string{"id", "displayName", "filePath", "cronExpression", "cronHumanReadable", "fireAt", "enabled", "cwd", "permissionMode"}
+	runKeys  = []string{"sessionId", "cliSessionId", "scheduledTaskId", "scheduledRunContinued", "permissionMode"}
+)
+
+// exactKeys checks the keys of the JSON object raw: each of fields at most
+// once and spelled exactly. Other keys are free.
+func exactKeys(raw []byte, fields []string) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return errors.New("not a JSON object")
+	}
+	seen := map[string]bool{}
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		k, _ := t.(string)
+		for _, f := range fields {
+			switch {
+			case k == f && seen[f]:
+				return fmt.Errorf("field %q appears twice", f)
+			case k == f:
+				seen[f] = true
+			case strings.EqualFold(k, f):
+				return fmt.Errorf("field %q is spelled %q", f, k)
+			}
+		}
+		var v json.RawMessage
+		if err := dec.Decode(&v); err != nil {
+			return err
+		}
+	}
+	_, err := dec.Token()
+	return err
 }
 
 // mightBeID reports whether an unreadable record could have this id.

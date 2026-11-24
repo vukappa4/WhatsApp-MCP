@@ -279,7 +279,7 @@ func TestRealRecordShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.ID != "wamcp-test" || got.Title() != "wamcp-test" || got.FireAt.Canonical() != "1795551540000" || got.Enabled == nil || *got.Enabled ||
+	if got.ID != "wamcp-test" || got.Title() != "wamcp-test" || got.FireAt.Canonical() != "ms:1795551540000" || got.Enabled == nil || *got.Enabled ||
 		got.PermissionMode != "auto" || got.FilePath != skill || !strings.HasSuffix(got.Cwd, `scratch-2026-11-24-3a3b81`) || got.Cron != "" {
 		t.Fatalf("task %+v", got)
 	}
@@ -296,12 +296,14 @@ func TestFireAt(t *testing.T) {
 		json, canonical, shown string
 		err                    bool
 	}{
-		{`1795551540000`, "1795551540000", "24 Nov 2026 21:19", false},
-		{`1.79555154e12`, "1795551540000", "24 Nov 2026 21:19", false},
-		{`"2026-11-24T20:19:00Z"`, "1795551540000", "24 Nov 2026 21:19", false},
-		{`"2026-11-24T21:19:00+01:00"`, "1795551540000", "24 Nov 2026 21:19", false},
-		{`"tomorrow"`, "tomorrow", "tomorrow", false},
+		{`1795551540000`, "ms:1795551540000", "24 Nov 2026 21:19", false},
+		{`1.79555154e12`, "ms:1795551540000", "24 Nov 2026 21:19", false},
+		{`"2026-11-24T20:19:00Z"`, "ms:1795551540000", "24 Nov 2026 21:19", false},
+		{`"2026-11-24T21:19:00+01:00"`, "ms:1795551540000", "24 Nov 2026 21:19", false},
+		{`"tomorrow"`, "raw:tomorrow", "tomorrow", false},
+		{`"1795551540000"`, "raw:1795551540000", "1795551540000", false}, // never the number's fingerprint
 		{`null`, "", "", false},
+		{`""`, "", "", true},
 		{`1.5`, "", "", true},
 		{`true`, "", "", true},
 	} {
@@ -324,7 +326,8 @@ func TestTaskTitleAndSchedule(t *testing.T) {
 		task         Task
 		title, sched string
 	}{
-		{Task{ID: "a", DisplayName: "Morning", CronHuman: "Every day at 9:00", Cron: "0 9 * * *"}, "Morning", "Every day at 9:00"},
+		{Task{ID: "a", DisplayName: "Morning", CronHuman: "Every day at 9:00", Cron: "0 9 * * *"}, "Morning", "cron 0 9 * * * (Every day at 9:00)"},
+		{Task{ID: "a", CronHuman: "Every day at 9:00"}, "a", "manual only"},
 		{Task{ID: "a", Cron: "0 9 * * *"}, "a", "cron 0 9 * * *"},
 		{Task{ID: "a", FireAt: FireAtMs(1795551540000)}, "a", "once at 24 Nov 2026 21:19"},
 		{Task{ID: "a"}, "a", "manual only"},
@@ -512,6 +515,74 @@ func TestRealDesktop(t *testing.T) {
 			start := time.Now()
 			got, err := FindRun(ctx, roots, r.CLISessionID)
 			t.Logf("scheduled run task=%s continued=%v: FindRun %s (%v, task %s)", r.TaskID, r.Continued, time.Since(start), err, got.TaskID)
+		}
+	}
+}
+
+// Records that spell a field the gate reads in another case, or hold it
+// twice, do not decode: Desktop's JavaScript would read another value.
+func TestExactKeys(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	roots := []string{f.root}
+	f.write(filepath.Join(f.org, TasksFile), `{"scheduledTasks": [
+		{"id": "good", "displayName": "Good", "enabled": true, "filePath": "x", "createdAt": 1, "unknownField": 1},
+		{"id": "cased", "displayName": "Cased", "enabled": true, "CronExpression": "* * * * *"},
+		{"id": "twice", "displayName": "Twice", "enabled": true, "cwd": "a", "cwd": "b"}
+	]}`, time.Time{})
+	if got, err := FindTask(ctx, roots, "good"); err != nil || got.ID != "good" {
+		t.Fatalf("good: %+v %v", got, err)
+	}
+	for _, ref := range []string{"cased", "twice", "Cased", "Twice"} {
+		if _, err := FindTask(ctx, roots, ref); err == nil || !strings.Contains(err.Error(), "cannot be read") {
+			t.Errorf("%s: %v", ref, err)
+		}
+	}
+	for name, top := range map[string]string{
+		"cased top": `{"ScheduledTasks": [{"id": "good", "enabled": true, "filePath": "x"}]}`,
+		"top twice": `{"scheduledTasks": [], "scheduledTasks": [{"id": "good", "enabled": true, "filePath": "x"}]}`,
+	} {
+		f.write(filepath.Join(f.org, TasksFile), top, time.Time{})
+		if l := LoadTasks(f.org); len(l.Broken) != 1 || len(l.Tasks) != 0 {
+			t.Errorf("%s: %+v", name, l)
+		}
+	}
+	// Run files: a matching file with a cased or doubled field is an error.
+	f.run("cased", map[string]any{"cliSessionId": "cli-1", "ScheduledTaskId": "x"}, time.Now())
+	if _, err := FindRun(ctx, roots, "cli-1"); err == nil || errors.Is(err, ErrNotFound) {
+		t.Errorf("cased run field: %v", err)
+	}
+	f.write(filepath.Join(f.org, "local_twice.json"), `{"cliSessionId": "cli-2", "scheduledRunContinued": false, "scheduledRunContinued": true}`, time.Time{})
+	if _, err := FindRun(ctx, roots, "cli-2"); err == nil || !strings.Contains(err.Error(), "appears twice") {
+		t.Errorf("doubled run field: %v", err)
+	}
+}
+
+// An unreadable record's id and display name are read each on its own, and
+// null counts as absent.
+func TestUnreadableNullFields(t *testing.T) {
+	for _, tc := range []struct {
+		raw        string
+		id         string // "" for unknown
+		titleKnown bool
+		title      string
+	}{
+		{`{"id": "a", "displayName": "A", "enabled": "x"}`, "a", true, "A"},
+		{`{"id": null, "displayName": null, "enabled": "x"}`, "", true, ""},
+		{`{"id": "a", "displayName": 3, "enabled": "x"}`, "a", false, ""},
+		{`{"id": 3, "displayName": "A", "enabled": "x"}`, "", true, "A"},
+	} {
+		u := unreadable("d", json.RawMessage(tc.raw), errors.New("x"))
+		id := ""
+		if u.ID != nil {
+			id = *u.ID
+		}
+		title := ""
+		if u.DisplayName != nil {
+			title = *u.DisplayName
+		}
+		if id != tc.id || u.TitleKnown != tc.titleKnown || title != tc.title {
+			t.Errorf("%s: id %q title %q known %v", tc.raw, id, title, u.TitleKnown)
 		}
 	}
 }
