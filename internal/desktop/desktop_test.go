@@ -206,13 +206,16 @@ func TestSkillAndFingerprint(t *testing.T) {
 	f := newFixture(t)
 	path := f.skill("follow-up", "Write to c_5: are we still on?\n")
 	base := Task{ID: "follow-up", DisplayName: "Follow up", FilePath: path, Cron: "0 9 * * 1-5", PermissionMode: "default", Cwd: `C:\x`}
-	_, body, err := Skill(base)
-	if err != nil || body != "Write to c_5: are we still on?" {
-		t.Fatalf("body %q %v", body, err)
+	file, sk, err := ReadSkill(base)
+	if err != nil || sk.Prompt != "Write to c_5: are we still on?" || len(sk.Extra) != 0 {
+		t.Fatalf("skill %+v %v", sk, err)
 	}
 	fp, err := Fingerprint(base)
 	if err != nil || len(fp) != 64 {
 		t.Fatalf("fingerprint %q %v", fp, err)
+	}
+	if of, err := FingerprintOf(base, file); err != nil || of != fp {
+		t.Fatalf("FingerprintOf the same bytes: %q %v", of, err)
 	}
 	same := func(name string, task Task, want bool) {
 		t.Helper()
@@ -225,17 +228,22 @@ func TestSkillAndFingerprint(t *testing.T) {
 		}
 	}
 	x := base
-	x.DisplayName, x.Cwd, x.Dir, x.CronHuman = "Other", `D:\y`, "elsewhere", "Weekdays at 9"
-	same("display name, cwd, dir, human schedule", x, true)
+	x.DisplayName, x.Dir, x.CronHuman = "Other", "elsewhere", "Weekdays at 9"
+	same("display name, dir, human schedule", x, true)
+	for name, edit := range map[string]func(*Task){
+		"cron":   func(t *Task) { t.Cron = "0 10 * * 1-5" },
+		"fireAt": func(t *Task) { t.FireAt = "2026-12-01T09:00:00Z" },
+		"mode":   func(t *Task) { t.PermissionMode = "acceptEdits" },
+		"cwd":    func(t *Task) { t.Cwd = `D:\y` },
+	} {
+		x := base
+		edit(&x)
+		same(name, x, false)
+	}
+	other := f.skill("other", "Write to c_5: are we still on?\n")
 	x = base
-	x.Cron = "0 10 * * 1-5"
-	same("cron", x, false)
-	x = base
-	x.FireAt = "2026-12-01T09:00:00Z"
-	same("fireAt", x, false)
-	x = base
-	x.PermissionMode = "acceptEdits"
-	same("mode", x, false)
+	x.FilePath = other
+	same("same file at another path", x, false)
 	f.write(path, "---\nname: follow-up\ndescription: a test task\n---\nWrite to c_6: are we still on?\n", time.Time{})
 	same("prompt", base, false)
 	f.write(path, "---\nname: follow-up\ndescription: changed\n---\nWrite to c_5: are we still on?\n", time.Time{})
@@ -251,34 +259,61 @@ func TestSkillAndFingerprint(t *testing.T) {
 		t.Errorf("bookkeeping changed the fingerprint")
 	}
 
-	// Fail closed: missing, unreadable, oversized or empty SKILL.md.
+	// Fail closed: missing, unreadable, oversized SKILL.md, a relative filePath.
+	big := filepath.Join(f.root, "big.md")
+	f.write(big, strings.Repeat("x", maxSkill+1), time.Time{})
 	for name, task := range map[string]Task{
-		"missing": {ID: "x", FilePath: filepath.Join(f.root, "nope", "SKILL.md")},
-		"folder":  {ID: "x", FilePath: f.root},
+		"missing":  {ID: "x", FilePath: filepath.Join(f.root, "nope", "SKILL.md")},
+		"folder":   {ID: "x", FilePath: f.root},
+		"relative": {ID: "x", FilePath: filepath.Join("scheduled-tasks", "x", "SKILL.md")},
+		"spaced":   {ID: "x", FilePath: " " + path},
+		"oversize": {ID: "x", FilePath: big},
 	} {
 		if _, err := Fingerprint(task); err == nil {
 			t.Errorf("%s: no error", name)
 		}
 	}
-	empty := f.skill("empty", "\n  \n")
-	if _, err := Fingerprint(Task{ID: "empty", FilePath: empty}); err == nil || !strings.Contains(err.Error(), "no prompt") {
-		t.Errorf("empty body: %v", err)
-	}
-	open := filepath.Join(f.root, "open.md")
-	f.write(open, "---\nname: x\nWrite to c_5", time.Time{})
-	if _, err := Fingerprint(Task{ID: "x", FilePath: open}); err == nil {
-		t.Error("unclosed front matter accepted")
-	}
-	big := filepath.Join(f.root, "big.md")
-	f.write(big, strings.Repeat("x", maxSkill+1), time.Time{})
-	if _, err := Fingerprint(Task{ID: "x", FilePath: big}); err == nil || !strings.Contains(err.Error(), "over 1 MB") {
-		t.Errorf("oversize: %v", err)
-	}
-	// No front matter: the whole file is the prompt.
-	plain := filepath.Join(f.root, "plain.md")
-	f.write(plain, "Just do it", time.Time{})
-	if _, body, err := Skill(Task{ID: "x", FilePath: plain}); err != nil || body != "Just do it" {
-		t.Errorf("plain: %q %v", body, err)
+}
+
+// ParseSkill splits a SKILL.md like Claude Desktop's parser, and refuses
+// what Desktop would not run or might read differently.
+func TestParseSkill(t *testing.T) {
+	for _, tc := range []struct {
+		name, file, prompt string
+		extra              []string
+		err                string
+	}{
+		{"desktop's own format", "---\nname: follow-up\ndescription: Follow up\n---\n\nAsk c_5.\n", "Ask c_5.", nil, ""},
+		{"CRLF", "---\r\nname: x\r\ndescription: d\r\n---\r\nAsk c_5.\r\n\r\n", "Ask c_5.", nil, ""},
+		{"model and extra keys", "---\nname: x\ndescription: d\nmodel: opus\nallowed-tools: Bash\nhooks: x\n---\nAsk", "Ask", []string{"allowed-tools", "hooks"}, ""},
+		{"empty description before a key", "---\nname: x\ndescription:\nmodel: y\n---\nAsk", "Ask", nil, ""},
+		{"empty description last", "---\nname: x\ndescription: \t\n---\nAsk", "Ask", nil, ""},
+		{"body keeps leading spaces and inner ---", "---\nname: x\ndescription: d\n---\n  Ask\n---\nmore  \n", "  Ask\n---\nmore", nil, ""},
+		{"trailing js whitespace", "---\nname: x\ndescription: d\n---\nAsk\u00a0\ufeff\u2028 ", "Ask", nil, ""},
+		{"no front matter", "Just do it", "", nil, "no front matter"},
+		{"BOM", "\ufeff---\nname: x\ndescription: d\n---\nAsk", "", nil, "no front matter"},
+		{"opening with spaces", "--- \nname: x\ndescription: d\n---\nAsk", "", nil, "no front matter"},
+		{"unclosed", "---\nname: x\ndescription: d\nAsk", "", nil, "no front matter"},
+		{"closing with spaces then real", "---\nname: x\ndescription: d\n--- \ny: z\n---\nAsk", "", nil, "--- line with spaces"},
+		{"no name", "---\ndescription: d\n---\nAsk", "", nil, "no name"},
+		{"name without space", "---\nname:x\ndescription: d\n---\nAsk", "", nil, "no name"},
+		{"no description", "---\nname: x\n---\nAsk", "", nil, "no description"},
+		{"empty description before a non-key", "---\nname: x\ndescription:\n  indented\n---\nAsk", "", nil, "no description"},
+		{"lone CR", "---\nname: x\rdescription: d\n---\nAsk", "", nil, "line break"},
+		{"line separator", "---\nname: x\u2028description: d\n---\nAsk", "", nil, "line break"},
+		{"empty body", "---\nname: x\ndescription: d\n---\n \n\t\n", "", nil, "no prompt"},
+		{"not UTF-8", "---\nname: x\ndescription: d\n---\nAsk \xff", "", nil, "not UTF-8"},
+	} {
+		got, err := ParseSkill([]byte(tc.file))
+		if tc.err != "" {
+			if err == nil || !strings.Contains(err.Error(), tc.err) {
+				t.Errorf("%s: %+v %v, want error %q", tc.name, got, err, tc.err)
+			}
+			continue
+		}
+		if err != nil || got.Prompt != tc.prompt || strings.Join(got.Extra, ",") != strings.Join(tc.extra, ",") {
+			t.Errorf("%s: %+v %v, want %q %v", tc.name, got, err, tc.prompt, tc.extra)
+		}
 	}
 }
 
@@ -288,11 +323,15 @@ func TestSkillDefaultPath(t *testing.T) {
 	cfg := filepath.Join(f.root, "..", "config")
 	t.Setenv("CLAUDE_CONFIG_DIR", cfg)
 	f.skill("follow-up", "Write to c_5")
-	if _, body, err := Skill(Task{ID: "follow-up"}); err != nil || body != "Write to c_5" {
-		t.Fatalf("default path: %q %v", body, err)
+	if _, sk, err := ReadSkill(Task{ID: "follow-up"}); err != nil || sk.Prompt != "Write to c_5" {
+		t.Fatalf("default path: %+v %v", sk, err)
 	}
-	if _, _, err := Skill(Task{ID: "../follow-up"}); err == nil {
+	if _, _, err := ReadSkill(Task{ID: "../follow-up"}); err == nil {
 		t.Fatal("id with a path accepted")
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", "relative")
+	if _, _, err := ReadSkill(Task{ID: "follow-up"}); err == nil {
+		t.Fatal("relative config folder accepted")
 	}
 }
 

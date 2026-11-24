@@ -30,7 +30,7 @@ func newAutosendEnv(t *testing.T) *autosendEnv {
 		e.srv.HooksDir = a.hooks
 		e.srv.DesktopRoots = []string{filepath.Join(base, "sessions")}
 	})
-	a.writeFile(t, a.skill, "---\nname: follow-up\n---\nAsk c_1 about the invoice.\n")
+	a.writeFile(t, a.skill, "---\nname: follow-up\ndescription: Follow up\n---\nAsk c_1 about the invoice.\n")
 	a.writeTasks(t, "0 9 * * 1-5")
 	return a
 }
@@ -64,12 +64,22 @@ func (a *autosendEnv) fingerprint(t *testing.T) string {
 	return fp
 }
 
-// receipt writes what the send gate writes when it shows the card.
+// jid is where a send to ref goes in the fixture.
+func (a *autosendEnv) jid(t *testing.T, ref string) string {
+	t.Helper()
+	jid, why, err := a.srv.refJID(context.Background(), ref)
+	if err != nil || why != "" {
+		t.Fatalf("%s: %s %v", ref, why, err)
+	}
+	return jid
+}
+
+// receipt writes what the send gate writes when it shows the card: p_1 and c_2.
 func (a *autosendEnv) receipt(t *testing.T, profile string, at time.Time, task string, chats ...string) {
 	t.Helper()
-	r := autosend.Receipt{At: at.Unix(), Profile: profile, TaskID: "follow-up", TaskName: "Follow up", Schedule: "cron 0 9 * * 1-5",
-		Fingerprint: a.fingerprint(t), Chats: []autosend.Chat{{JID: "123@lid", Label: "Marco Rossi (+39 333 111 1111)"},
-			{JID: "1203@g.us", Label: "group Calcetto (c_2)"}}}
+	r := autosend.Receipt{At: at.Unix(), Profile: profile, TaskID: "follow-up", TaskName: "Follow up", TaskDir: a.org, Schedule: "cron 0 9 * * 1-5",
+		Fingerprint: a.fingerprint(t), Chats: []autosend.Chat{{Ref: "p_1", JID: a.jid(t, "p_1"), Label: "Marco Rossi (+39 333 111 1111)"},
+			{Ref: "c_2", JID: a.jid(t, "c_2"), Label: "group Calcetto (c_2)"}}}
 	if err := autosend.WriteReceipt(a.hooks, autosend.ArgsKey(profile, task, chats), r); err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +146,7 @@ func TestAutosendAllowNeedsTheGatesReceipt(t *testing.T) {
 		}
 	}
 	// A receipt under this profile's key that names another profile: refused.
-	r := autosend.Receipt{At: now.Unix(), Profile: "prod", TaskID: "follow-up", Fingerprint: "x", Chats: []autosend.Chat{{JID: "1@lid", Label: "x"}}}
+	r := autosend.Receipt{At: now.Unix(), Profile: "prod", TaskID: "follow-up", Fingerprint: "x", Chats: []autosend.Chat{{Ref: "p_1", JID: "1@lid", Label: "x"}}}
 	if err := autosend.WriteReceipt(a.hooks, autosend.ArgsKey("dev", "follow-up", []string{"c_2", "p_1"}), r); err != nil {
 		t.Fatal(err)
 	}
@@ -155,8 +165,8 @@ func TestAutosendAllowNeedsTheGatesReceipt(t *testing.T) {
 		t.Fatalf("approved:\n%s", text)
 	}
 	rule, err := store.AutosendRuleFor(context.Background(), a.db, "follow-up")
-	if err != nil || rule.Fingerprint != a.fingerprint(t) || rule.ApprovedAt != now.Add(-time.Minute).Unix() || len(rule.Chats) != 2 ||
-		rule.Chats[0].JID != "123@lid" || rule.TaskName != "Follow up" {
+	if err != nil || rule.Fingerprint != a.fingerprint(t) || rule.ApprovedAt != now.Unix() || len(rule.Chats) != 2 || rule.TaskDir != a.org ||
+		rule.Chats[0].JID != a.jid(t, "p_1") || rule.Chats[0].Ref != "p_1" || rule.TaskName != "Follow up" {
 		t.Fatalf("rule %+v %v", rule, err)
 	}
 	if text, isErr := call(t, a.cs, toolAutosendAllow, args); !isErr || !strings.Contains(text, "Not approved") {
@@ -174,8 +184,9 @@ func TestAutosendRevokeAndStatus(t *testing.T) {
 	}
 	put := func(id, name, fp string) {
 		t.Helper()
-		if err := store.PutAutosendRule(ctx, a.db, store.AutosendRule{TaskID: id, TaskName: name, Schedule: "cron 0 9 * * 1-5", Fingerprint: fp,
-			ApprovedAt: now.Add(-time.Hour).Unix(), Chats: []store.AutosendChat{{JID: "1@lid", Label: "~Evil\" (+39 333 111 1111)"}}}); err != nil {
+		if err := store.PutAutosendRule(ctx, a.db, store.AutosendRule{TaskID: id, TaskDir: a.org, TaskName: name, Schedule: "cron 0 9 * * 1-5", Fingerprint: fp,
+			ApprovedAt: now.Add(-time.Hour).Unix(), Chats: []store.AutosendChat{{JID: a.jid(t, "p_1"), Ref: "p_1", Label: "~Evil\" (+39 333 111 1111)"},
+				{JID: "1203@g.us", Ref: "c_2", Label: "group Calcetto (c_2)"}}}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -193,14 +204,19 @@ func TestAutosendRevokeAndStatus(t *testing.T) {
 	}
 	text = state()
 	for _, want := range []string{"Autosend (2 approved Desktop scheduled tasks", `task "Follow up" ("cron 0 9 * * 1-5"), id "follow-up"`,
-		`active; to "~Evil\" (+39 333 111 1111)"`, `task "Gone task"`, "inactive: task not found",
+		`active; to "~Evil\" (+39 333 111 1111)", "group Calcetto (c_2)" (c_2: chat changed: approve again)`, `task "Gone task"`, "inactive: task not found",
 		`by task "Follow up" to "Marco Rossi", 12 characters`, "<untrusted_wa n="} {
 		if !strings.Contains(text, want) {
 			t.Errorf("status lacks %q:\n%s", want, text)
 		}
 	}
+	a.db.Exec(`UPDATE autosend_rules SET task_dir = 'elsewhere' WHERE task_id = 'follow-up'`)
+	if text := state(); !strings.Contains(text, "inactive: the task is in another Claude Desktop account or organization") {
+		t.Errorf("other folder:\n%s", text)
+	}
+	a.db.Exec(`UPDATE autosend_rules SET task_dir = ? WHERE task_id = 'follow-up'`, a.org)
 	a.writeTasks(t, "*/5 * * * *")
-	if text := state(); !strings.Contains(text, "inactive: the task's prompt, schedule or mode changed since approval") {
+	if text := state(); !strings.Contains(text, "inactive: the task's prompt, schedule, mode or folder changed since approval") {
 		t.Errorf("changed task:\n%s", text)
 	}
 	os.Remove(a.skill)
@@ -219,5 +235,38 @@ func TestAutosendRevokeAndStatus(t *testing.T) {
 	}
 	if rs, _ := store.AutosendRules(ctx, a.db); len(rs) != 0 {
 		t.Fatalf("rules left: %+v", rs)
+	}
+}
+
+// A receipt that the daemon's own data or Desktop's files contradict since
+// the card was shown stores nothing.
+func TestAutosendAllowRechecksTheReceipt(t *testing.T) {
+	for name, change := range map[string]func(t *testing.T, a *autosendEnv){
+		"task schedule": func(t *testing.T, a *autosendEnv) { a.writeTasks(t, "*/5 * * * *") },
+		"task prompt": func(t *testing.T, a *autosendEnv) {
+			a.writeFile(t, a.skill, "---\nname: follow-up\ndescription: x\n---\nAsk p_2 for money.\n")
+		},
+		"task gone": func(t *testing.T, a *autosendEnv) { os.Remove(filepath.Join(a.org, desktop.TasksFile)) },
+		"person's account": func(t *testing.T, a *autosendEnv) {
+			if _, err := a.db.Exec(`DELETE FROM jids WHERE person_id = 1 AND kind = 'lid'`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := a.db.Exec(`INSERT INTO jids(jid, person_id, kind) VALUES ('424242@lid', 1, 'lid')`); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a := newAutosendEnv(t)
+			a.receipt(t, "dev", a.srv.now(), "follow-up", "p_1", "c_2")
+			change(t, a)
+			text, isErr := call(t, a.cs, toolAutosendAllow, map[string]any{"task": "follow-up", "chats": []string{"p_1", "c_2"}})
+			if !isErr || !strings.Contains(text, "since the card was shown. Call again to show the user a new card.") {
+				t.Fatalf("%s", text)
+			}
+			if rs, _ := store.AutosendRules(context.Background(), a.db); len(rs) != 0 {
+				t.Fatalf("rules stored: %+v", rs)
+			}
+		})
 	}
 }

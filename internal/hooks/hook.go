@@ -84,6 +84,7 @@ type toolInput struct {
 	TranscriptPath string          `json:"transcript_path"`
 	ToolName       string          `json:"tool_name"`
 	ToolInput      json.RawMessage `json:"tool_input"`
+	PermissionMode string          `json:"permission_mode"`
 }
 
 var safeID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,100}$`)
@@ -113,14 +114,15 @@ var reSessionID = regexp.MustCompile(`"session_id"\s*:\s*"([^"\\]{1,200})"`)
 
 // PromptOptions is what the UserPromptSubmit hook reads besides its input.
 type PromptOptions struct {
-	Scheduled    bool     // CLAUDE_CODE_HOST_SCHEDULED_RUN=1: Claude Desktop started this session for a scheduled task
-	DesktopRoots []string // desktop.Roots
+	Scheduled bool // CLAUDE_CODE_HOST_SCHEDULED_RUN=1: Claude Desktop started this session for a scheduled task
 }
 
 // UserPrompt handles UserPromptSubmit: it writes the session's flag (the
 // time and the folded prompt, readable by the user only) when the prompt
-// asks to send, and removes it otherwise. In a scheduled run nobody opened
-// the prompt is the task's, not the user's: it removes the flag. Any
+// asks to send, and removes it otherwise. The first prompt of a session
+// Claude Desktop started for a scheduled task is the task's SKILL.md, not
+// the user's words, also when the user started the run by hand: it removes
+// the flag; later prompts there are typed by a person. Any
 // failure removes the flag when the session is known, even from input that
 // is not valid JSON: an old intent never survives a prompt. It never writes
 // to stdout: Claude Code adds a UserPromptSubmit hook's stdout to the context.
@@ -137,7 +139,7 @@ func UserPrompt(stdin io.Reader, dir string, now time.Time, opts PromptOptions) 
 		return errors.New("hook input has no session_id")
 	}
 	path := flagPath(dir, in.SessionID)
-	if opts.Scheduled && unattendedPrompt(opts.DesktopRoots, in.SessionID) {
+	if opts.Scheduled && firstScheduledPrompt(dir, in.SessionID, now) {
 		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}

@@ -1,11 +1,14 @@
 package hooks
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -20,8 +23,11 @@ import (
 	"github.com/vukappa4/whatsapp-mcp/internal/useracl"
 )
 
-// findRun is desktop.FindRun; tests replace it.
-var findRun = desktop.FindRun
+// findRun and findTask are the desktop readers; tests replace them.
+var (
+	findRun  = desktop.FindRun
+	findTask = desktop.FindTask
+)
 
 // Decision kinds of the PreToolUse hook. Silent ("") leaves the call to
 // Claude Code's normal permission flow.
@@ -42,39 +48,64 @@ type decision struct {
 // sendTool is the only tool an approved scheduled task may call unasked.
 const sendTool = "whatsapp_send_message"
 
+// maxCardPrompt is the longest task prompt the approval card shows whole.
+const maxCardPrompt = 1500
+
+// autosendProfile maps the exact MCP server names setup-claude registers
+// (install's mcpServerName) to their profile. Autosend decisions are made
+// only for these: any other server named like whatsapp gets the user-prompt
+// gate, which asks.
+func autosendProfile(server string) (string, bool) {
+	switch server {
+	case "whatsapp":
+		return "prod", true
+	case "whatsapp-dev":
+		return "dev", true
+	}
+	return "", false
+}
+
+// promptlessModes settle a confirmation without showing it to the user:
+// dontAsk denies it, unless a mod approves it, and bypassPermissions skips
+// prompts. An approval card needs a person to read it. Auto mode shows a
+// hook's "ask" to the user (the classifier does not decide it).
+var promptlessModes = map[string]bool{"bypassPermissions": true, "dontAsk": true}
+
 // decide answers one gated call:
 //
 //  1. Revoking an autosend approval only narrows what may be sent: allow.
 //  2. An autosend approval always shows the user a card (ask), or is denied
 //     when it cannot be shown truthfully (approvalCard). Never silent.
-//  3. Within PreToolBudget, it looks up the Desktop session: the call is
-//     unattended when Claude Desktop says this session is a scheduled run
-//     (CLAUDE_CODE_HOST_SCHEDULED_RUN=1) or its session file names a task,
-//     unless the user opened and continued the run.
-//  4. A whatsapp_send_message in an unattended scheduled run whose task is
-//     approved, unchanged since, and sends to an approved chat: allow, once
-//     the autosend log holds the send.
+//  3. Only in a session Claude Desktop started for a scheduled task
+//     (CLAUDE_CODE_HOST_SCHEDULED_RUN=1), within PreToolBudget, it reads the
+//     Desktop session file: the call is unattended unless the file shows the
+//     user opened the run and continued it.
+//  4. A whatsapp_send_message in an unattended run whose task is approved,
+//     unchanged since, and sends to an approved chat less than
+//     autosend.MaxPerDay times a day: allow, once the autosend log holds it.
 //  5. Otherwise the user-prompt gate decides (askReason), and an unattended
 //     call it would leave silent asks anyway: no prompt of the user's
 //     backs it.
 //
-// Nothing here turns an ask of the user-prompt gate into silence.
+// Steps 1, 2 and 4 hold only for the exact server names setup-claude
+// registers. Nothing here turns an ask of the user-prompt gate into silence.
 func decide(in toolInput, inputErr error, env PreToolEnv) decision {
 	server, tool, _ := gatedTool(in.ToolName)
+	profile, exact := autosendProfile(server)
 	switch {
-	case inputErr == nil && tool == autosend.ToolRevoke:
+	case exact && inputErr == nil && tool == autosend.ToolRevoke:
 		return decision{allow, "WhatsApp autosend: ending an approval only narrows what may be sent."}
-	case tool == autosend.ToolAllow:
+	case exact && tool == autosend.ToolAllow:
 		ctx, cancel := context.WithTimeout(context.Background(), PreToolBudget)
 		defer cancel()
-		d, ok := withBudget(ctx, func(ctx context.Context) decision { return approvalCard(ctx, in, inputErr, server, env) })
+		d, ok := withBudget(ctx, func(ctx context.Context) decision { return approvalCard(ctx, in, inputErr, profile, env) })
 		if !ok {
 			return decision{deny, "WhatsApp autosend: the approval check timed out. Call again."}
 		}
 		return d
 	}
 	var l lookup
-	if inputErr == nil {
+	if inputErr == nil && env.Scheduled {
 		ctx, cancel := context.WithTimeout(context.Background(), PreToolBudget)
 		var ok bool
 		l, ok = withBudget(ctx, func(ctx context.Context) lookup { return lookupRun(ctx, in, server, tool, env) })
@@ -83,12 +114,20 @@ func decide(in toolInput, inputErr error, env PreToolEnv) decision {
 			l = lookup{unattended: true, why: "the check of Claude Desktop's files timed out"}
 		}
 	}
-	if l.allow != nil {
-		if err := writeAudit(env, ProfileOf(server), in.SessionID, l.allow); err != nil {
-			l.why = "cannot write the autosend log (" + err.Error() + ")"
-		} else {
-			return decision{allow, fmt.Sprintf("WhatsApp autosend: task %s approved %s sends to %s.", display(l.allow.taskName),
-				time.Unix(l.allow.approvedAt, 0).Format("2006-01-02"), display(l.allow.label))}
+	if a := l.allow; a != nil {
+		n, err := countAutosends(env, profile, a.taskID, a.jid)
+		switch {
+		case err != nil:
+			l.why = "cannot read the autosend log (" + err.Error() + ")"
+		case n >= autosend.MaxPerDay:
+			l.why = fmt.Sprintf("the task reached %d autosends to %s in 24 hours", autosend.MaxPerDay, display(a.label))
+		default:
+			if err := writeAudit(env, profile, in.SessionID, a); err != nil {
+				l.why = "cannot write the autosend log (" + err.Error() + ")"
+				break
+			}
+			return decision{allow, fmt.Sprintf("WhatsApp autosend: task %s approved %s sends to %s.", display(a.taskName),
+				time.Unix(a.approvedAt, 0).Format("2006-01-02"), display(a.label))}
 		}
 	}
 	r, what := askReason(in, inputErr, env)
@@ -121,7 +160,7 @@ func withBudget[T any](ctx context.Context, fn func(context.Context) T) (v T, ok
 type lookup struct {
 	unattended bool
 	why        string    // why an unattended send is not autosent
-	allow      *autoSend // an approved autosend, to log before allowing
+	allow      *autoSend // an approved autosend, to check and log before allowing
 }
 
 // autoSend is one send an approved task may make.
@@ -132,19 +171,14 @@ type autoSend struct {
 	textChars        int
 }
 
-// lookupRun runs steps 3 and 4 of decide.
+// lookupRun runs steps 3 and 4 of decide in a scheduled session.
 func lookupRun(ctx context.Context, in toolInput, server, tool string, env PreToolEnv) lookup {
 	run, err := findRun(ctx, env.DesktopRoots, in.SessionID)
-	var l lookup
-	switch {
-	case err == nil && run.Continued:
-		return l // the user opened the run and wrote in it: the user-prompt gate decides
-	case env.Scheduled:
-		l.unattended = true
-	case err == nil && run.TaskID != "":
-		l.unattended = true
+	if err == nil && run.Continued {
+		return lookup{} // the user opened the run and wrote in it: the user-prompt gate decides
 	}
-	if !l.unattended || tool != sendTool {
+	l := lookup{unattended: true}
+	if tool != sendTool {
 		return l
 	}
 	if l.why = autosendCheck(ctx, in, server, env, run, err, &l); l.why != "" {
@@ -153,24 +187,76 @@ func lookupRun(ctx context.Context, in toolInput, server, tool string, env PreTo
 	return l
 }
 
+// sendArgKeys are the arguments of whatsapp_send_message, spelled exactly.
+var sendArgKeys = map[string]bool{"to": true, "text": true, "reply_to": true, "idempotency_key": true}
+
+// sendArgs are whatsapp_send_message's arguments as an autosend reads them.
+type sendArgs struct {
+	To             string `json:"to"`
+	Text           string `json:"text"`
+	ReplyTo        string `json:"reply_to"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
+// strictSendArgs decodes whatsapp_send_message's arguments for an autosend:
+// one JSON object whose keys are exactly the tool's, each once, with string
+// values. Go's decoder matches keys in any case and keeps the last of a
+// repeated one; an argument the gate and the server could read differently
+// is refused.
+func strictSendArgs(raw json.RawMessage) (sendArgs, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return sendArgs{}, errors.New("the arguments are not a JSON object")
+	}
+	seen := map[string]bool{}
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			return sendArgs{}, err
+		}
+		k, _ := t.(string)
+		if !sendArgKeys[k] || seen[k] {
+			return sendArgs{}, fmt.Errorf("unexpected argument %s", strconv.Quote(displayN(k, 40)))
+		}
+		seen[k] = true
+		var v json.RawMessage
+		if err := dec.Decode(&v); err != nil {
+			return sendArgs{}, err
+		}
+	}
+	if _, err := dec.Token(); err != nil {
+		return sendArgs{}, err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return sendArgs{}, errors.New("data after the arguments")
+	}
+	var a sendArgs
+	strict := json.NewDecoder(bytes.NewReader(raw))
+	strict.DisallowUnknownFields()
+	if err := strict.Decode(&a); err != nil {
+		return sendArgs{}, err
+	}
+	return a, nil
+}
+
 // autosendCheck sets l.allow when an approved task may send this message,
 // and returns why not otherwise.
 func autosendCheck(ctx context.Context, in toolInput, server string, env PreToolEnv, run desktop.Run, runErr error, l *lookup) string {
+	profile, exact := autosendProfile(server)
 	switch {
-	case !env.Scheduled:
-		return "Claude Code does not say this session is a Desktop scheduled run"
+	case !exact:
+		return "the server " + display(server) + " is not one setup-claude registers"
 	case runErr != nil:
 		return "cannot find this run in Claude Desktop's files (" + runErr.Error() + ")"
 	case run.TaskID == "":
 		return "this run names no scheduled task"
-	case run.PermissionMode == "bypassPermissions":
-		return "the run bypasses permissions"
+	case promptlessModes[run.PermissionMode]:
+		return "the run's permission mode is " + run.PermissionMode
 	}
-	var args struct {
-		To   string `json:"to"`
-		Text string `json:"text"`
+	args, err := strictSendArgs(in.ToolInput)
+	if err != nil {
+		return err.Error()
 	}
-	_ = json.Unmarshal(in.ToolInput, &args)
 	to := strings.TrimSpace(args.To)
 	if _, kind := parseRef(to); kind == "" {
 		return "to must be an approved c_N or p_N id, not " + display(to)
@@ -179,7 +265,7 @@ func autosendCheck(ctx context.Context, in toolInput, server string, env PreTool
 	if err != nil {
 		return "task " + display(run.TaskID) + ": " + err.Error()
 	}
-	db, err := openProfileDB(env.AppDir, ProfileOf(server))
+	db, err := openProfileDB(env.AppDir, profile)
 	if err != nil {
 		return err.Error()
 	}
@@ -191,12 +277,19 @@ func autosendCheck(ctx context.Context, in toolInput, server string, env PreTool
 	if err != nil {
 		return "cannot read the approvals (" + err.Error() + ")"
 	}
-	fp, err := desktop.Fingerprint(task)
+	if !samePath(rule.TaskDir, run.Dir) {
+		return "this run's task is in another Claude Desktop account or organization than the approved one"
+	}
+	file, _, err := desktop.ReadSkill(task)
+	if err != nil {
+		return err.Error()
+	}
+	fp, err := desktop.FingerprintOf(task, file)
 	if err != nil {
 		return err.Error()
 	}
 	if fp != rule.Fingerprint {
-		return "the task's prompt, schedule or permission mode changed since it was approved"
+		return "the task's prompt, schedule, permission mode or folder changed since it was approved"
 	}
 	dest, err := destination(ctx, db, to)
 	if err != nil {
@@ -210,45 +303,56 @@ func autosendCheck(ctx context.Context, in toolInput, server string, env PreTool
 	return ""
 }
 
+// samePath compares two folder paths read from the same roots.
+func samePath(a, b string) bool {
+	a, b = filepath.Clean(a), filepath.Clean(b)
+	return a == b || filepath.Separator == '\\' && strings.EqualFold(a, b)
+}
+
 // approvalCard answers whatsapp_send_autosend_allow: an "ask" whose reason is
 // the card the user approves, after writing the receipt the daemon needs to
 // store the approval, or a "deny" telling Claude why no card can be shown.
-func approvalCard(ctx context.Context, in toolInput, inputErr error, server string, env PreToolEnv) decision {
+func approvalCard(ctx context.Context, in toolInput, inputErr error, profile string, env PreToolEnv) decision {
 	const lead = "WhatsApp autosend: "
 	no := func(why string) decision { return decision{deny, lead + why} }
 	var args autosend.Args
 	if inputErr != nil || in.SessionID == "" || json.Unmarshal(in.ToolInput, &args) != nil {
 		return no("the hook could not read this call.")
 	}
-	never := no("an approval can only be given in a session with you, never by a scheduled run.")
 	if env.Scheduled {
-		return never
+		return no("an approval can only be given in a session with you, never by a scheduled run.")
 	}
-	if run, err := findRun(ctx, env.DesktopRoots, in.SessionID); err == nil && run.TaskID != "" && !run.Continued {
-		return never
+	if promptlessModes[in.PermissionMode] {
+		return no("this session's permission mode " + in.PermissionMode + " would settle the approval without showing it to you: " +
+			"switch to another mode, then call again.")
 	}
-	task, err := desktop.FindTask(ctx, env.DesktopRoots, args.Task)
+	task, err := findTask(ctx, env.DesktopRoots, args.Task)
 	switch {
 	case errors.Is(err, desktop.ErrNotFound):
-		return no("no Claude Desktop scheduled task has the id or name " + strconv.Quote(display(args.Task)) +
+		return no("no Claude Desktop scheduled task has the id or title " + strconv.Quote(display(args.Task)) +
 			": create it first, then call again with the taskId given to create_scheduled_task.")
 	case err != nil:
 		return no("cannot find the task (" + display(err.Error()) + ").")
 	}
-	fp, err := desktop.Fingerprint(task)
+	file, skill, err := desktop.ReadSkill(task)
 	if err != nil {
 		return no("cannot read what the task runs (" + display(err.Error()) + ").")
 	}
-	_, prompt, _ := desktop.Skill(task)
-	if task.PermissionMode == "bypassPermissions" {
-		return no("the task runs with permission mode bypassPermissions, which lets a run rewrite any file, the send gate's " +
-			"included: give it another mode first.")
+	fp, err := desktop.FingerprintOf(task, file)
+	if err != nil {
+		return no("cannot read what the task runs (" + display(err.Error()) + ").")
+	}
+	if promptlessModes[task.PermissionMode] {
+		return no("the task runs with permission mode " + task.PermissionMode + ", where a run settles confirmations without " +
+			"you or rewrites any file, the send gate's included: give it another mode first.")
+	}
+	if n := len([]rune(skill.Prompt)); n > maxCardPrompt {
+		return no(fmt.Sprintf("the task's prompt is too long to show on a card (%d chars): shorten it to %d.", n, maxCardPrompt))
 	}
 	refs := autosend.Normalize(args.Chats)
 	if len(refs) == 0 {
 		return no("name at least one chat: use c_N or p_N ids.")
 	}
-	profile := ProfileOf(server)
 	db, err := openProfileDB(env.AppDir, profile)
 	if err != nil {
 		return no(err.Error() + ".")
@@ -267,9 +371,18 @@ func approvalCard(ctx context.Context, in toolInput, inputErr error, server stri
 	if env.Dir == "" {
 		return no("the hook has no folder for the approval.")
 	}
-	r := autosend.Receipt{At: env.Now.Unix(), Profile: profile, TaskID: task.ID, TaskName: task.Title(), Schedule: task.Schedule(),
-		Fingerprint: fp, Chats: chats}
-	if err := autosend.WriteReceipt(env.Dir, autosend.ArgsKey(profile, args.Task, args.Chats), r); err != nil {
+	// Past the budget the hook has already answered: no receipt may outlive it.
+	if ctx.Err() != nil {
+		return no("the approval check timed out. Call again.")
+	}
+	r := autosend.Receipt{At: env.Now.Unix(), Profile: profile, TaskID: task.ID, TaskName: task.Title(), TaskDir: task.Dir,
+		Schedule: task.Schedule(), Fingerprint: fp, Chats: chats}
+	err = autosend.WriteReceipt(env.Dir, autosend.ArgsKey(profile, args.Task, args.Chats), r)
+	switch {
+	case errors.Is(err, autosend.ErrReceiptConflict):
+		return no(fmt.Sprintf("another approval card for these arguments is waiting with other content: answer it, or wait %d minutes, then call again.",
+			int(autosend.ReceiptTTL.Minutes())))
+	case err != nil:
 		return no("cannot record the approval (" + display(err.Error()) + ").")
 	}
 	labels := make([]string, len(chats))
@@ -280,9 +393,19 @@ func approvalCard(ctx context.Context, in toolInput, inputErr error, server stri
 	if mode == "" {
 		mode = "default"
 	}
-	return decision{ask, fmt.Sprintf("%slet the Desktop scheduled task %q (%s, mode %s) send text messages with nobody present to: %s. "+
-		"Its prompt: %q. Approve only if you asked for this. It lasts until revoked or until the task's prompt, schedule or mode changes.",
-		lead, display(task.Title()), display(task.Schedule()), display(mode), strings.Join(labels, ", "), displayN(prompt, 240))}
+	folder := "no folder"
+	if strings.TrimSpace(task.Cwd) != "" {
+		folder = "folder " + displayN(task.Cwd, 200)
+	}
+	extra := ""
+	if len(skill.Extra) > 0 {
+		extra = " Its SKILL.md also sets: " + displayN(strings.Join(skill.Extra, ", "), 200) + "."
+	}
+	return decision{ask, fmt.Sprintf("%slet the Desktop scheduled task %q (%s, mode %s, %s) send text messages with nobody present to: %s. "+
+		"Its whole prompt: %q.%s Approve only if you asked for this. It lasts until revoked or until the task's prompt, schedule, "+
+		"mode or folder changes, and allows at most %d sends a day to each chat.",
+		lead, display(task.Title()), display(task.Schedule()), display(mode), folder, strings.Join(labels, ", "),
+		displayN(skill.Prompt, maxCardPrompt+1), extra, autosend.MaxPerDay)}
 }
 
 // openProfileDB opens <appDir>/<profile>/data.db read-only, as the resolver does.
@@ -309,28 +432,33 @@ func openProfileDB(appDir, profile string) (*sql.DB, error) {
 func destination(ctx context.Context, db *sql.DB, ref string) (autosend.Chat, error) {
 	ref = strings.TrimSpace(ref)
 	id, kind := parseRef(ref)
+	var c autosend.Chat
+	var err error
 	switch kind {
 	case "p":
-		return personDestination(ctx, db, id)
+		c, err = personDestination(ctx, db, id)
 	case "c":
 		var chatKind, name, jid string
 		var person sql.NullInt64
-		err := db.QueryRowContext(ctx, `SELECT kind, person_id, name, jid FROM chats WHERE id = ?`, id).Scan(&chatKind, &person, &name, &jid)
-		if err != nil {
+		if err := db.QueryRowContext(ctx, `SELECT kind, person_id, name, jid FROM chats WHERE id = ?`, id).Scan(&chatKind, &person, &name, &jid); err != nil {
 			return autosend.Chat{}, fmt.Errorf("chat %s: %w", ref, err)
 		}
 		switch {
 		case chatKind == "dm" && person.Valid:
-			return personDestination(ctx, db, person.Int64)
+			c, err = personDestination(ctx, db, person.Int64)
 		case chatKind == "group":
 			if name == "" {
 				name = "unnamed"
 			}
-			return autosend.Chat{JID: jid, Label: "group " + name + " (" + ref + ")"}, nil
+			c = autosend.Chat{JID: jid, Label: "group " + name + " (" + ref + ")"}
+		default:
+			return autosend.Chat{}, fmt.Errorf("chat %s is a %s: only people and groups receive messages", ref, chatKind)
 		}
-		return autosend.Chat{}, fmt.Errorf("chat %s is a %s: only people and groups receive messages", ref, chatKind)
+	default:
+		return autosend.Chat{}, fmt.Errorf("%s is not a c_N or p_N id", display(ref))
 	}
-	return autosend.Chat{}, fmt.Errorf("%s is not a c_N or p_N id", display(ref))
+	c.Ref = ref
+	return c, err
 }
 
 func personDestination(ctx context.Context, db *sql.DB, id int64) (autosend.Chat, error) {
@@ -385,17 +513,60 @@ type auditEntry struct {
 	TextChars int    `json:"text_chars"`
 }
 
+func auditPath(env PreToolEnv, profile string) (string, error) {
+	if env.AppDir == "" {
+		return "", errors.New("no WhatsApp MCP folder")
+	}
+	return filepath.Join(env.AppDir, profile, "logs", autosend.LogName), nil
+}
+
+// countAutosends counts the sends the autosend log (and its rotated copy)
+// records for the task to jid in the 24 hours before env.Now.
+func countAutosends(env PreToolEnv, profile, taskID, jid string) (int, error) {
+	path, err := auditPath(env, profile)
+	if err != nil {
+		return 0, err
+	}
+	since := env.Now.Add(-24 * time.Hour)
+	n := 0
+	for _, p := range []string{path + ".1", path} {
+		f, err := os.Open(p)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return 0, err
+		}
+		sc := bufio.NewScanner(f)
+		sc.Buffer(make([]byte, 64<<10), 1<<20)
+		for sc.Scan() {
+			var e auditEntry
+			if json.Unmarshal(sc.Bytes(), &e) != nil || e.TaskID != taskID || e.JID != jid {
+				continue
+			}
+			if at, err := time.Parse(time.RFC3339, e.At); err == nil && at.After(since) {
+				n++
+			}
+		}
+		err = sc.Err()
+		f.Close()
+		if err != nil {
+			return 0, err
+		}
+	}
+	return n, nil
+}
+
 // writeAudit appends the send to <AppDir>/<profile>/logs/autosend.log,
 // readable by the user only. The send is allowed only once it is logged.
 func writeAudit(env PreToolEnv, profile, session string, a *autoSend) error {
-	if env.AppDir == "" {
-		return errors.New("no WhatsApp MCP folder")
-	}
-	dir := filepath.Join(env.AppDir, profile, "logs")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	path, err := auditPath(env, profile)
+	if err != nil {
 		return err
 	}
-	path := filepath.Join(dir, autosend.LogName)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
 	if st, err := os.Stat(path); err == nil && st.Size() > maxAuditLog {
 		if err := os.Rename(path, path+".1"); err != nil {
 			return err
@@ -424,15 +595,37 @@ func writeAudit(env PreToolEnv, profile, session string, a *autoSend) error {
 	return err
 }
 
-// unattendedPrompt reports whether a prompt in a session Claude Desktop
-// started for a scheduled task comes from the task: always, unless the
-// session file shows the user opened the run and continued it.
-func unattendedPrompt(roots []string, session string) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), PreToolBudget)
-	defer cancel()
-	continued, ok := withBudget(ctx, func(ctx context.Context) bool {
-		run, err := findRun(ctx, roots, session)
-		return err == nil && run.Continued
-	})
-	return !ok || !continued
+// scheduledDir holds a marker per scheduled session whose first prompt the
+// UserPromptSubmit hook saw. It is a folder, which pruneFlags leaves alone.
+func scheduledDir(dir string) string { return filepath.Join(dir, "scheduled") }
+
+// markerTTL is how long a scheduled session's marker is kept.
+const markerTTL = 30 * 24 * time.Hour
+
+// firstScheduledPrompt reports whether this is the first prompt of a
+// session Claude Desktop started for a scheduled task, and records that it
+// saw one. That prompt is the task's SKILL.md, also when the user starts the
+// run by hand. When it cannot tell, it says first: the caller then writes no
+// send-intent flag, and a send asks.
+func firstScheduledPrompt(dir, session string, now time.Time) bool {
+	md := scheduledDir(dir)
+	if err := os.MkdirAll(md, 0o700); err != nil {
+		return true
+	}
+	if useracl.Restrict(dir, true) != nil || useracl.Restrict(md, true) != nil {
+		return true
+	}
+	if entries, err := os.ReadDir(md); err == nil {
+		for _, e := range entries {
+			if info, err := e.Info(); err == nil && now.Sub(info.ModTime()) > markerTTL {
+				_ = os.Remove(filepath.Join(md, e.Name()))
+			}
+		}
+	}
+	f, err := os.OpenFile(flagPath(md, session), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return !errors.Is(err, fs.ErrExist)
+	}
+	f.Close()
+	return true
 }

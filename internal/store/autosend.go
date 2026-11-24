@@ -8,9 +8,11 @@ import (
 	"strings"
 )
 
-// AutosendChat is one approved destination: a JID and the label the user saw.
+// AutosendChat is one approved destination: a JID, the c_N or p_N id it was
+// approved as, and the label the user saw.
 type AutosendChat struct {
 	JID   string
+	Ref   string
 	Label string
 }
 
@@ -18,6 +20,7 @@ type AutosendChat struct {
 // task's fingerprint stays Fingerprint.
 type AutosendRule struct {
 	TaskID      string
+	TaskDir     string // the Desktop account/org folder the task is read from
 	TaskName    string
 	Schedule    string
 	Fingerprint string
@@ -38,13 +41,13 @@ func PutAutosendRule(ctx context.Context, db *DB, r AutosendRule) error {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM autosend_rules WHERE task_id = ?`, r.TaskID); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO autosend_rules(task_id, task_name, schedule, fingerprint, approved_at) VALUES (?, ?, ?, ?, ?)`,
-			r.TaskID, r.TaskName, r.Schedule, r.Fingerprint, r.ApprovedAt); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO autosend_rules(task_id, task_dir, task_name, schedule, fingerprint, approved_at) VALUES (?, ?, ?, ?, ?, ?)`,
+			r.TaskID, r.TaskDir, r.TaskName, r.Schedule, r.Fingerprint, r.ApprovedAt); err != nil {
 			return err
 		}
 		for _, c := range r.Chats {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO autosend_chats(task_id, jid, label) VALUES (?, ?, ?)
-				ON CONFLICT(task_id, jid) DO NOTHING`, r.TaskID, c.JID, c.Label); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO autosend_chats(task_id, jid, ref, label) VALUES (?, ?, ?, ?)
+				ON CONFLICT(task_id, jid) DO NOTHING`, r.TaskID, c.JID, c.Ref, c.Label); err != nil {
 				return err
 			}
 		}
@@ -70,7 +73,7 @@ func AutosendRuleFor(ctx context.Context, e Execer, taskID string) (AutosendRule
 }
 
 func autosendRules(ctx context.Context, e Execer, where string, args ...any) ([]AutosendRule, error) {
-	rows, err := e.QueryContext(ctx, `SELECT task_id, task_name, schedule, fingerprint, approved_at FROM autosend_rules `+where+`
+	rows, err := e.QueryContext(ctx, `SELECT task_id, task_dir, task_name, schedule, fingerprint, approved_at FROM autosend_rules `+where+`
 		ORDER BY approved_at DESC, task_id`, args...)
 	if err != nil {
 		return nil, err
@@ -78,7 +81,7 @@ func autosendRules(ctx context.Context, e Execer, where string, args ...any) ([]
 	var out []AutosendRule
 	for rows.Next() {
 		var r AutosendRule
-		if err := rows.Scan(&r.TaskID, &r.TaskName, &r.Schedule, &r.Fingerprint, &r.ApprovedAt); err != nil {
+		if err := rows.Scan(&r.TaskID, &r.TaskDir, &r.TaskName, &r.Schedule, &r.Fingerprint, &r.ApprovedAt); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -89,13 +92,13 @@ func autosendRules(ctx context.Context, e Execer, where string, args ...any) ([]
 		return nil, err
 	}
 	for i := range out {
-		crow, err := e.QueryContext(ctx, `SELECT jid, label FROM autosend_chats WHERE task_id = ? ORDER BY rowid`, out[i].TaskID)
+		crow, err := e.QueryContext(ctx, `SELECT jid, ref, label FROM autosend_chats WHERE task_id = ? ORDER BY rowid`, out[i].TaskID)
 		if err != nil {
 			return nil, err
 		}
 		for crow.Next() {
 			var c AutosendChat
-			if err := crow.Scan(&c.JID, &c.Label); err != nil {
+			if err := crow.Scan(&c.JID, &c.Ref, &c.Label); err != nil {
 				crow.Close()
 				return nil, err
 			}

@@ -36,7 +36,7 @@ func TestArgsKeyNormalizes(t *testing.T) {
 
 func receipt(at time.Time) Receipt {
 	return Receipt{At: at.Unix(), Profile: "prod", TaskID: "follow-up", TaskName: "Follow up", Schedule: "cron 0 9 * * *",
-		Fingerprint: "abc", Chats: []Chat{{JID: "123@lid", Label: "Marco Rossi (+393331234567)"}}}
+		TaskDir: "org-1", Fingerprint: "abc", Chats: []Chat{{Ref: "p_1", JID: "123@lid", Label: "Marco Rossi (+393331234567)"}}}
 }
 
 func TestReceiptRoundTripAndConsumeOnce(t *testing.T) {
@@ -129,5 +129,32 @@ func TestReceiptsAreUserOnly(t *testing.T) {
 		if err := useracl.Check(p); err != nil {
 			t.Error(err)
 		}
+	}
+}
+
+// A fresh receipt is replaced only by one with the same content: a second
+// card for the same arguments cannot swap what the first one showed.
+func TestReceiptConflict(t *testing.T) {
+	hooks := filepath.Join(t.TempDir(), "hooks")
+	now := time.Date(2026, 10, 13, 10, 0, 0, 0, time.UTC)
+	key := ArgsKey("prod", "t", []string{"c_1"})
+	if err := WriteReceipt(hooks, key, receipt(now)); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteReceipt(hooks, key, receipt(now.Add(time.Minute))); err != nil {
+		t.Fatalf("same content: %v", err)
+	}
+	other := receipt(now.Add(time.Minute))
+	other.Chats[0].JID = "999@lid"
+	if err := WriteReceipt(hooks, key, other); !errors.Is(err, ErrReceiptConflict) {
+		t.Fatalf("other content: %v", err)
+	}
+	if r, err := TakeReceipt(hooks, key, now.Add(time.Minute)); err != nil || r.Chats[0].JID != "123@lid" {
+		t.Fatalf("kept receipt %+v %v", r, err)
+	}
+	// Once the first expires, a new card may replace it.
+	WriteReceipt(hooks, key, receipt(now))
+	if err := WriteReceipt(hooks, key, func() Receipt { r := other; r.At = now.Add(ReceiptTTL + time.Second).Unix(); return r }()); err != nil {
+		t.Fatalf("after expiry: %v", err)
 	}
 }

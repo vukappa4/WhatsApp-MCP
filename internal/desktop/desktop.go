@@ -20,10 +20,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // maxFile caps every Desktop JSON file read.
@@ -294,71 +297,148 @@ func ConfigDir() string {
 }
 
 // SkillPath is the task's SKILL.md: its filePath, else
-// <ConfigDir>/scheduled-tasks/<id>/SKILL.md.
+// <ConfigDir>/scheduled-tasks/<id>/SKILL.md. A filePath that is not an
+// absolute path is an error: which file it names would depend on the
+// reader's working folder.
 func SkillPath(t Task) (string, error) {
-	if p := strings.TrimSpace(t.FilePath); p != "" {
-		return p, nil
+	if p := t.FilePath; strings.TrimSpace(p) != "" {
+		if p != strings.TrimSpace(p) || !filepath.IsAbs(p) {
+			return "", fmt.Errorf("the task's filePath %q is not an absolute path", p)
+		}
+		return filepath.Clean(p), nil
 	}
 	dir := ConfigDir()
 	if dir == "" || t.ID == "" || strings.ContainsAny(t.ID, `/\.`) {
 		return "", errors.New("the task names no SKILL.md")
 	}
-	return filepath.Join(dir, "scheduled-tasks", t.ID, "SKILL.md"), nil
+	p := filepath.Join(dir, "scheduled-tasks", t.ID, "SKILL.md")
+	if !filepath.IsAbs(p) {
+		return "", fmt.Errorf("the task's SKILL.md %q is not an absolute path", p)
+	}
+	return p, nil
 }
 
-// Skill reads the task's SKILL.md: the whole file and its body, the prompt
-// a run is given (the text after the YAML front matter between --- lines).
-// A file that is missing, unreadable, over 1 MB or with an empty body is an
-// error: the gate cannot tell what the task does.
-func Skill(t Task) (file []byte, body string, err error) {
+// SkillFile is a parsed SKILL.md.
+type SkillFile struct {
+	Prompt string   // the body: what a run is told
+	Extra  []string // front matter keys other than name, description and model
+}
+
+var (
+	// skillRe, nameRe and descRe are Claude Desktop's own expressions for a
+	// task file (its I3 parser): "---\n", the front matter up to the first
+	// "\n---\n", any further newlines, then the body.
+	skillRe     = regexp.MustCompile(`(?s)\A---\n(.*?)\n---\n+(.*)\z`)
+	nameRe      = regexp.MustCompile(`(?m)^name: (.+)$`)
+	descRe      = regexp.MustCompile(`^description: (.+)$`)
+	descEmptyRe = regexp.MustCompile(`^description:[ \t]*$`)
+	keyRe       = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_-]*):`)
+)
+
+// ParseSkill reads a SKILL.md as Claude Desktop does: a file it would not
+// run (no front matter, no name or description, an empty body) is an
+// error, and so is anything this reader might read differently from it: a
+// file that is not UTF-8, a carriage return or line separator left in the
+// front matter, or a line that is a delimiter but for spaces.
+func ParseSkill(file []byte) (SkillFile, error) {
+	if !utf8.Valid(file) {
+		return SkillFile{}, errors.New("the task's SKILL.md is not UTF-8")
+	}
+	s := strings.ReplaceAll(string(file), "\r\n", "\n")
+	m := skillRe.FindStringSubmatch(s)
+	if m == nil {
+		return SkillFile{}, errors.New("the task's SKILL.md has no front matter between --- lines")
+	}
+	fm, body := m[1], m[2]
+	if strings.ContainsAny(fm, "\r  ") {
+		return SkillFile{}, errors.New("the task's SKILL.md front matter holds a line break other than \n")
+	}
+	lines := strings.Split(fm, "\n")
+	for _, l := range lines {
+		if strings.TrimSpace(l) == "---" {
+			return SkillFile{}, errors.New("the task's SKILL.md front matter holds a --- line with spaces")
+		}
+	}
+	if !nameRe.MatchString(fm) {
+		return SkillFile{}, errors.New("the task's SKILL.md front matter has no name")
+	}
+	desc := false
+	for i, l := range lines {
+		if descRe.MatchString(l) || descEmptyRe.MatchString(l) && (i == len(lines)-1 || keyRe.MatchString(lines[i+1])) {
+			desc = true
+			break
+		}
+	}
+	if !desc {
+		return SkillFile{}, errors.New("the task's SKILL.md front matter has no description")
+	}
+	var f SkillFile
+	for _, l := range lines {
+		if k := keyRe.FindStringSubmatch(l); k != nil && k[1] != "name" && k[1] != "description" && k[1] != "model" &&
+			!slices.Contains(f.Extra, k[1]) {
+			f.Extra = append(f.Extra, k[1])
+		}
+	}
+	f.Prompt = strings.TrimRightFunc(body, jsSpace)
+	if f.Prompt == "" {
+		return SkillFile{}, errors.New("the task's SKILL.md has no prompt")
+	}
+	return f, nil
+}
+
+// jsSpace is JavaScript's whitespace, which String.prototype.trimEnd removes.
+func jsSpace(r rune) bool {
+	switch r {
+	case '\t', '\n', '\v', '\f', '\r', ' ', 0xA0, 0xFEFF, 0x2028, 0x2029:
+		return true
+	}
+	return unicode.Is(unicode.Zs, r)
+}
+
+// ReadSkill reads and parses the task's SKILL.md once: callers fingerprint
+// and show the same bytes. A file that is missing, unreadable or over 1 MB
+// is an error, and so is one ParseSkill refuses.
+func ReadSkill(t Task) (file []byte, f SkillFile, err error) {
 	p, err := SkillPath(t)
 	if err != nil {
-		return nil, "", err
+		return nil, SkillFile{}, err
 	}
 	b, tooBig, err := readCapped(p, maxSkill)
 	if err != nil {
-		return nil, "", fmt.Errorf("read the task's SKILL.md: %w", err)
+		return nil, SkillFile{}, fmt.Errorf("read the task's SKILL.md: %w", err)
 	}
 	if tooBig {
-		return nil, "", fmt.Errorf("the task's SKILL.md is over %d MB", maxSkill>>20)
+		return nil, SkillFile{}, fmt.Errorf("the task's SKILL.md is over %d MB", maxSkill>>20)
 	}
-	body = strings.TrimSpace(skillBody(string(b)))
-	if body == "" {
-		return nil, "", errors.New("the task's SKILL.md has no prompt")
+	if f, err = ParseSkill(b); err != nil {
+		return nil, SkillFile{}, err
 	}
-	return b, body, nil
+	return b, f, nil
 }
 
-// skillBody strips YAML front matter: a first line "---" up to the next
-// line "---".
-func skillBody(s string) string {
-	s = strings.TrimPrefix(s, "\xEF\xBB\xBF")
-	lines := strings.SplitAfter(s, "\n")
-	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
-		return s
-	}
-	for i := 1; i < len(lines); i++ {
-		if strings.TrimSpace(lines[i]) == "---" {
-			return strings.Join(lines[i+1:], "")
-		}
-	}
-	return "" // front matter never closed: no body
-}
-
-// Fingerprint identifies what a task runs and when: the hex SHA-256 of the
-// JSON array [SHA-256 of its whole SKILL.md, cron expression, fireAt,
-// permission mode]. Its display name, folder and bookkeeping fields do not
-// count. A SKILL.md Skill cannot read is an error.
-func Fingerprint(t Task) (string, error) {
-	file, _, err := Skill(t)
+// FingerprintOf identifies what a task runs, where and when, given the bytes
+// of its SKILL.md: the hex SHA-256 of the JSON array [SHA-256 of the file,
+// cron expression, fireAt, permission mode, cwd, the SKILL.md's absolute
+// path]. Its display name and bookkeeping fields do not count.
+func FingerprintOf(t Task, file []byte) (string, error) {
+	p, err := SkillPath(t)
 	if err != nil {
 		return "", err
 	}
 	sum := sha256.Sum256(file)
-	b, err := json.Marshal([]string{hex.EncodeToString(sum[:]), t.Cron, t.FireAt, t.PermissionMode})
+	b, err := json.Marshal([]string{hex.EncodeToString(sum[:]), t.Cron, t.FireAt, t.PermissionMode, t.Cwd, p})
 	if err != nil {
 		return "", err
 	}
 	sum = sha256.Sum256(b)
 	return hex.EncodeToString(sum[:]), nil
+}
+
+// Fingerprint reads the task's SKILL.md and returns FingerprintOf it.
+func Fingerprint(t Task) (string, error) {
+	file, _, err := ReadSkill(t)
+	if err != nil {
+		return "", err
+	}
+	return FingerprintOf(t, file)
 }

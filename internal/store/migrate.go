@@ -382,13 +382,15 @@ CREATE TRIGGER media_fts_transcript AFTER UPDATE OF transcript ON media BEGIN
 END;
 `
 
-// schemaV13: autosend approvals. A rule lets one Desktop scheduled task send
-// to fixed JIDs while the task's fingerprint is unchanged. Rules hold JIDs,
-// never chat or person ids (a reingest reuses those), and no foreign key to
-// chats: ResetDerived leaves them alone.
+// schemaV13: autosend approvals. A rule lets one Desktop scheduled task, of
+// one Desktop account/org folder, send to fixed JIDs while the task's
+// fingerprint is unchanged. Rules match sends on JIDs, never on chat or
+// person ids (a reingest reuses those): ref only records the id approved.
+// No foreign key to chats: ResetDerived leaves the rules alone.
 const schemaV13 = `
 CREATE TABLE autosend_rules (
 	task_id     TEXT PRIMARY KEY,
+	task_dir    TEXT    NOT NULL,  -- the account/org folder of the task's scheduled-tasks.json
 	task_name   TEXT    NOT NULL,
 	schedule    TEXT    NOT NULL,
 	fingerprint TEXT    NOT NULL,
@@ -397,6 +399,7 @@ CREATE TABLE autosend_rules (
 CREATE TABLE autosend_chats (
 	task_id TEXT NOT NULL REFERENCES autosend_rules(task_id) ON DELETE CASCADE,
 	jid     TEXT NOT NULL,
+	ref     TEXT NOT NULL,  -- the c_N or p_N id approved
 	label   TEXT NOT NULL,
 	PRIMARY KEY (task_id, jid)
 );

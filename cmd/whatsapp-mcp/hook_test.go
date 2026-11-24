@@ -241,8 +241,8 @@ func TestAutosendHookEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.PutAutosendRule(ctx, db, store.AutosendRule{TaskID: task.ID, TaskName: task.Title(), Schedule: task.Schedule(),
-		Fingerprint: fp, ApprovedAt: time.Now().Unix(), Chats: []store.AutosendChat{{JID: "555@lid", Label: "Marco Rossi (+393331234567)"}}}); err != nil {
+	if err := store.PutAutosendRule(ctx, db, store.AutosendRule{TaskID: task.ID, TaskDir: task.Dir, TaskName: task.Title(), Schedule: task.Schedule(),
+		Fingerprint: fp, ApprovedAt: time.Now().Unix(), Chats: []store.AutosendChat{{JID: "555@lid", Ref: "c_5", Label: "Marco Rossi (+393331234567)"}}}); err != nil {
 		t.Fatal(err)
 	}
 

@@ -32,7 +32,7 @@ func hookCmd(args []string, stdin io.Reader, stdout io.Writer) int {
 	switch args[0] {
 	case "user-prompt":
 		if err == nil {
-			_ = hooks.UserPrompt(stdin, dir, time.Now(), hooks.PromptOptions{Scheduled: scheduledRun(), DesktopRoots: desktop.Roots()})
+			_ = hooks.UserPrompt(stdin, dir, time.Now(), hooks.PromptOptions{Scheduled: scheduledRun()})
 		}
 		return 0
 	case "pre-tool":

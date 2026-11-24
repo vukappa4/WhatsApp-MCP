@@ -41,16 +41,18 @@ func TestAutosendRules(t *testing.T) {
 	db, _ := open(t)
 	ctx := context.Background()
 	r := AutosendRule{TaskID: "follow-up", TaskName: "Follow up", Schedule: "cron 0 9 * * *", Fingerprint: "f1", ApprovedAt: 100,
-		Chats: []AutosendChat{{"123@lid", "Marco Rossi (+393331234567)"}, {"1203@g.us", "group Calcetto (c_2)"}, {"123@lid", "dup"}}}
+		TaskDir: "org-1",
+		Chats:   []AutosendChat{{"123@lid", "p_1", "Marco Rossi (+393331234567)"}, {"1203@g.us", "c_2", "group Calcetto (c_2)"}, {"123@lid", "c_1", "dup"}}}
 	if err := PutAutosendRule(ctx, db, r); err != nil {
 		t.Fatal(err)
 	}
 	got, err := AutosendRuleFor(ctx, db, "follow-up")
-	if err != nil || got.Fingerprint != "f1" || got.ApprovedAt != 100 || len(got.Chats) != 2 || got.Chats[0].Label != "Marco Rossi (+393331234567)" {
+	if err != nil || got.Fingerprint != "f1" || got.ApprovedAt != 100 || got.TaskDir != "org-1" || len(got.Chats) != 2 ||
+		got.Chats[0].Label != "Marco Rossi (+393331234567)" || got.Chats[0].Ref != "p_1" || got.Chats[1].Ref != "c_2" {
 		t.Fatalf("rule %+v %v", got, err)
 	}
 	// Approving again replaces the chats.
-	r.Fingerprint, r.ApprovedAt, r.Chats = "f2", 200, []AutosendChat{{"999@lid", "Lorenzo"}}
+	r.Fingerprint, r.ApprovedAt, r.Chats = "f2", 200, []AutosendChat{{"999@lid", "p_2", "Lorenzo"}}
 	if err := PutAutosendRule(ctx, db, r); err != nil {
 		t.Fatal(err)
 	}
@@ -60,8 +62,8 @@ func TestAutosendRules(t *testing.T) {
 	if err := PutAutosendRule(ctx, db, AutosendRule{TaskID: "x"}); err == nil {
 		t.Fatal("rule without chats stored")
 	}
-	PutAutosendRule(ctx, db, AutosendRule{TaskID: "weekly", TaskName: "Weekly", Fingerprint: "f", ApprovedAt: 300, Chats: []AutosendChat{{"1@lid", "A"}}})
-	PutAutosendRule(ctx, db, AutosendRule{TaskID: "weekly-2", TaskName: "weekly", Fingerprint: "f", ApprovedAt: 50, Chats: []AutosendChat{{"1@lid", "A"}}})
+	PutAutosendRule(ctx, db, AutosendRule{TaskID: "weekly", TaskName: "Weekly", Fingerprint: "f", ApprovedAt: 300, Chats: []AutosendChat{{"1@lid", "p_3", "A"}}})
+	PutAutosendRule(ctx, db, AutosendRule{TaskID: "weekly-2", TaskName: "weekly", Fingerprint: "f", ApprovedAt: 50, Chats: []AutosendChat{{"1@lid", "p_3", "A"}}})
 	rs, err := AutosendRules(ctx, db)
 	if err != nil || len(rs) != 3 || rs[0].TaskID != "weekly" || rs[2].TaskID != "weekly-2" {
 		t.Fatalf("rules %+v %v", rs, err)

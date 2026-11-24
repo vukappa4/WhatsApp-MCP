@@ -34,8 +34,14 @@ const (
 	ToolRevoke = "whatsapp_send_autosend_revoke"
 )
 
-// ReceiptTTL is how long a receipt waits for the tool call it was written for.
-const ReceiptTTL = 15 * time.Minute
+// ReceiptTTL is how long a receipt waits for the tool call it was written
+// for: the user answers the card, then Claude Code calls the tool at once.
+const ReceiptTTL = 2 * time.Minute
+
+// MaxPerDay is the most sends the gate lets one approved task make to one
+// chat in 24 hours without asking: a task gone wrong must not flood a chat,
+// and WhatsApp bans for bulk sends.
+const MaxPerDay = 20
 
 // LogName is the autosend log in a profile's logs folder.
 const LogName = "autosend.log"
@@ -43,9 +49,14 @@ const LogName = "autosend.log"
 // ErrNoReceipt means the gate wrote no receipt for these arguments, or it expired.
 var ErrNoReceipt = errors.New("no approval receipt")
 
+// ErrReceiptConflict means a fresh receipt for the same arguments says
+// something else: two cards for one call cannot both stand.
+var ErrReceiptConflict = errors.New("another approval card for the same arguments is waiting with other content")
+
 // Chat is one approved destination: the JID the daemon sends to and the
 // label the user saw.
 type Chat struct {
+	Ref   string `json:"ref"` // the c_N or p_N id approved
 	JID   string `json:"jid"`
 	Label string `json:"label"`
 }
@@ -56,6 +67,7 @@ type Receipt struct {
 	Profile     string `json:"profile"`
 	TaskID      string `json:"task_id"`
 	TaskName    string `json:"task_name"`
+	TaskDir     string `json:"task_dir"` // the account/org folder of the task's scheduled-tasks.json
 	Schedule    string `json:"schedule"`
 	Fingerprint string `json:"fingerprint"`
 	Chats       []Chat `json:"chats"`
@@ -99,12 +111,27 @@ func receiptPath(hooksDir, key string) (string, error) {
 	return filepath.Join(ReceiptDir(hooksDir), key+".json"), nil
 }
 
-// WriteReceipt stores r under key, readable by the user only, replacing any
-// earlier receipt for the same arguments.
+// sameContent reports whether two receipts show the same thing, whenever written.
+func sameContent(a, b Receipt) bool {
+	a.At, b.At = 0, 0
+	x, _ := json.Marshal(a)
+	y, _ := json.Marshal(b)
+	return string(x) == string(y)
+}
+
+// WriteReceipt stores r under key, readable by the user only. It replaces
+// an expired receipt or one with the same content, and refuses with
+// ErrReceiptConflict a fresh one that shows something else.
 func WriteReceipt(hooksDir, key string, r Receipt) error {
 	path, err := receiptPath(hooksDir, key)
 	if err != nil {
 		return err
+	}
+	if b, err := os.ReadFile(path); err == nil {
+		var old Receipt
+		if json.Unmarshal(b, &old) == nil && fresh(old.At, time.Unix(r.At, 0)) && !sameContent(old, r) {
+			return ErrReceiptConflict
+		}
 	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {

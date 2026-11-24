@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -40,10 +41,10 @@ func (s *Server) addAutosendTools(srv *mcp.Server) {
 		Description: "Let one Claude Desktop scheduled task send WhatsApp text messages to a fixed set of chats with nobody present. " +
 			"Call it only in a session with the user, right after creating the task, when the user asked for it. task: the taskId " +
 			"given to create_scheduled_task. chats: c_N or p_N ids; write the same ids in the task's prompt, since its runs must " +
-			"call whatsapp_send_message with to set to one of them. The user confirms a card showing the task, schedule, prompt and " +
-			"chats; a scheduled run can never approve itself. Any other send, file or chat still asks. Changing the task's prompt, " +
-			"schedule or permission mode ends the approval; approving again replaces the chats. Never bulk or unsolicited: " +
-			"WhatsApp bans for it.",
+			"call whatsapp_send_message with to set to one of them. The user confirms a card showing the task, schedule, folder, " +
+			"prompt and chats; a scheduled run can never approve itself. Any other send, file or chat still asks, and so does a " +
+			"send past " + strconv.Itoa(autosend.MaxPerDay) + " a day to one chat. Changing the task's prompt, schedule, permission " +
+			"mode or folder ends the approval; approving again replaces the chats. Never bulk or unsolicited: WhatsApp bans for it.",
 		InputSchema: schemaFor[autosendAllowIn](nil),
 		Annotations: &mcp.ToolAnnotations{Title: "Approve WhatsApp autosend", DestructiveHint: &f, OpenWorldHint: &f},
 	}, s.autosendAllow)
@@ -78,9 +79,18 @@ func (s *Server) autosendAllow(ctx context.Context, _ *mcp.CallToolRequest, in a
 	case r.TaskID == "" || len(r.Chats) == 0:
 		return errResult("%s", notApproved)
 	}
-	rule := store.AutosendRule{TaskID: r.TaskID, TaskName: r.TaskName, Schedule: r.Schedule, Fingerprint: r.Fingerprint, ApprovedAt: r.At}
+	// The receipt says what the card showed; the daemon checks it against
+	// its own data and Desktop's files before trusting it.
+	if why, err := s.checkReceipt(ctx, r, ids); err != nil || why != "" {
+		if err != nil {
+			return nil, err
+		}
+		return errResult("Not approved: %s since the card was shown. Call again to show the user a new card.", why)
+	}
+	rule := store.AutosendRule{TaskID: r.TaskID, TaskDir: r.TaskDir, TaskName: r.TaskName, Schedule: r.Schedule, Fingerprint: r.Fingerprint,
+		ApprovedAt: s.now().Unix()}
 	for _, c := range r.Chats {
-		rule.Chats = append(rule.Chats, store.AutosendChat{JID: c.JID, Label: c.Label})
+		rule.Chats = append(rule.Chats, store.AutosendChat{JID: c.JID, Ref: c.Ref, Label: c.Label})
 	}
 	if err := store.PutAutosendRule(ctx, s.DB, rule); err != nil {
 		return nil, err
@@ -114,6 +124,60 @@ func (s *Server) autosendRevoke(ctx context.Context, _ *mcp.CallToolRequest, in 
 		w.wrap(r.TaskName), w.wrap(r.TaskID))), nil
 }
 
+// refJID resolves a c_N or p_N id to the JID a send to it goes to, as
+// whatsapp_send_message does; why says why it cannot.
+func (s *Server) refJID(ctx context.Context, ref string) (jid, why string, err error) {
+	_, isChat := parseID(ref, "c_")
+	_, isPerson := parseID(ref, "p_")
+	if !isChat && !isPerson {
+		return "", ref + " is not a c_N or p_N id", nil
+	}
+	r, msg, err := s.resolveRecipient(ctx, ref)
+	if err != nil || msg != "" {
+		return "", msg, err
+	}
+	return r.jid.String(), "", nil
+}
+
+// checkReceipt compares a receipt with the daemon's own view: every chat id
+// still goes to the JID the card showed, and the task in Claude Desktop's
+// files, in the same account/org folder, still has the card's fingerprint.
+func (s *Server) checkReceipt(ctx context.Context, r autosend.Receipt, ids []string) (why string, err error) {
+	want := map[string]bool{}
+	for _, c := range r.Chats {
+		want[c.JID] = true
+	}
+	got := map[string]bool{}
+	for _, id := range ids {
+		jid, why, err := s.refJID(ctx, id)
+		if err != nil || why != "" {
+			return "cannot resolve " + id + " (" + why + ")", err
+		}
+		if !want[jid] {
+			return id + " goes to another chat", nil
+		}
+		got[jid] = true
+	}
+	if len(got) != len(want) {
+		return "the chats changed", nil
+	}
+	task, err := desktop.FindTaskByID(ctx, s.DesktopRoots, r.TaskID)
+	if err != nil {
+		return "the task cannot be read (" + err.Error() + ")", nil
+	}
+	if filepath.Clean(task.Dir) != filepath.Clean(r.TaskDir) {
+		return "the task moved to another Claude Desktop account or organization", nil
+	}
+	fp, err := desktop.Fingerprint(task)
+	if err != nil {
+		return "the task cannot be read (" + err.Error() + ")", nil
+	}
+	if fp != r.Fingerprint {
+		return "the task's prompt, schedule, permission mode or folder changed", nil
+	}
+	return "", nil
+}
+
 // autosendLogLines is how many of the newest autosend log lines whatsapp_status shows.
 const autosendLogLines = 5
 
@@ -133,12 +197,20 @@ func (s *Server) autosendStatus(ctx context.Context, now time.Time) (string, err
 	bw := w.inner()
 	var lines []string
 	for _, r := range rules {
+		state := s.autosendState(ctx, r)
 		labels := make([]string, len(r.Chats))
 		for i, c := range r.Chats {
 			labels[i] = bw.wrap(c.Label)
+			if state != "active" || c.Ref == "" {
+				continue
+			}
+			// A reingest can give the id to another chat, or the person a new account.
+			if jid, why, err := s.refJID(ctx, c.Ref); err != nil || why != "" || jid != c.JID {
+				labels[i] += " (" + c.Ref + ": chat changed: approve again)"
+			}
 		}
 		lines = append(lines, fmt.Sprintf("task %s (%s), id %s, approved %s, %s; to %s", bw.wrap(r.TaskName), bw.wrap(r.Schedule),
-			bw.wrap(r.TaskID), fmtTS(r.ApprovedAt, now), s.autosendState(ctx, r), strings.Join(labels, ", ")))
+			bw.wrap(r.TaskID), fmtTS(r.ApprovedAt, now), state, strings.Join(labels, ", ")))
 	}
 	for _, l := range logLines {
 		var e struct {
@@ -170,12 +242,15 @@ func (s *Server) autosendState(ctx context.Context, r store.AutosendRule) string
 	if err != nil {
 		return "unknown: " + err.Error()
 	}
+	if filepath.Clean(task.Dir) != filepath.Clean(r.TaskDir) {
+		return "inactive: the task is in another Claude Desktop account or organization"
+	}
 	fp, err := desktop.Fingerprint(task)
 	switch {
 	case err != nil:
 		return "unknown: " + err.Error()
 	case fp != r.Fingerprint:
-		return "inactive: the task's prompt, schedule or mode changed since approval"
+		return "inactive: the task's prompt, schedule, mode or folder changed since approval"
 	}
 	return "active"
 }
