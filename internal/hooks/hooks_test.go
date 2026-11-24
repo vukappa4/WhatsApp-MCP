@@ -138,7 +138,7 @@ func userPrompt(t *testing.T, dir, session, prompt string, now time.Time) {
 		"session_id": session, "transcript_path": "x.jsonl", "cwd": `C:\x`, "permission_mode": "default",
 		"hook_event_name": "UserPromptSubmit", "prompt": prompt,
 	})
-	if err := UserPrompt(bytes.NewReader(in), dir, now); err != nil {
+	if err := UserPrompt(bytes.NewReader(in), dir, now, PromptOptions{}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -472,11 +472,11 @@ func TestUserPromptFiles(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "old")); !os.IsNotExist(err) {
 		t.Fatalf("expired flag kept: %v", err)
 	}
-	if err := UserPrompt(strings.NewReader("garbage"), dir, now); err == nil {
+	if err := UserPrompt(strings.NewReader("garbage"), dir, now, PromptOptions{}); err == nil {
 		t.Fatal("garbage input accepted")
 	}
 	// Input that fails to parse still clears the session's flag when its id can be read.
-	if err := UserPrompt(strings.NewReader(`{"session_id":"s1","prompt":`), dir, now); err == nil {
+	if err := UserPrompt(strings.NewReader(`{"session_id":"s1","prompt":`), dir, now, PromptOptions{}); err == nil {
 		t.Fatal("truncated input accepted")
 	}
 	if _, err := os.Stat(filepath.Join(dir, "s1")); !os.IsNotExist(err) {
@@ -529,7 +529,7 @@ func TestPreToolMatcher(t *testing.T) {
 func TestHookInputWithBOM(t *testing.T) {
 	g := newGate(t)
 	bom := "\xEF\xBB\xBF"
-	if err := UserPrompt(strings.NewReader(bom+`{"session_id":"s1","prompt":"rispondi a Marco che arrivo"}`), g.dir, g.now); err != nil {
+	if err := UserPrompt(strings.NewReader(bom+`{"session_id":"s1","prompt":"rispondi a Marco che arrivo"}`), g.dir, g.now, PromptOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	in := bom + `{"session_id":"s1","tool_name":"mcp__whatsapp__whatsapp_send_message","tool_input":{"to":"Marco"}}`

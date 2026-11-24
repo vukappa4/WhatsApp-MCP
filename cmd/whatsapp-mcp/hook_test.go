@@ -9,9 +9,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vukappa4/whatsapp-mcp/internal/claudecode"
 	"github.com/vukappa4/whatsapp-mcp/internal/config"
+	"github.com/vukappa4/whatsapp-mcp/internal/desktop"
 	"github.com/vukappa4/whatsapp-mcp/internal/store"
 )
 
@@ -173,5 +175,111 @@ func TestRegisteredHookSubcommandsExist(t *testing.T) {
 		if code := hookCmd(args[1:], bytes.NewReader(in), &out); code != 0 {
 			t.Errorf("hook %s exit %d: %s", args[1], code, out.String())
 		}
+	}
+}
+
+// A Desktop scheduled run of an approved task sends to an approved chat
+// unasked: hook pre-tool, run as Claude Code runs it in such a session,
+// prints an allow decision and logs the send. Its prompt never leaves a
+// send-intent flag.
+func TestAutosendHookEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	tempAppDir(t, dir)
+	t.Setenv("APPDATA", filepath.Join(dir, "home", "AppData", "Roaming"))
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(dir, "home", ".claude"))
+	t.Setenv("CLAUDE_CODE_HOST_SCHEDULED_RUN", "1")
+	roots := desktop.Roots()
+	if len(roots) == 0 {
+		t.Skip("no Claude Desktop on this OS")
+	}
+	ctx := context.Background()
+	root, err := config.AppDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "prod"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(ctx, filepath.Join(root, "prod", "data.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, q := range []string{
+		`INSERT INTO persons(id, display_name, name_source, phone_e164, full_name, first_name, saved_contact, updated_at)
+			VALUES (17, 'Marco Rossi', 'full_name', '+393331234567', 'Marco Rossi', 'Marco', 1, 0)`,
+		`INSERT INTO jids(jid, person_id, kind) VALUES ('393331234567@s.whatsapp.net', 17, 'pn'), ('555@lid', 17, 'lid')`,
+		`INSERT INTO chats(id, jid, kind, person_id, name, created_at) VALUES (5, '555@lid', 'dm', 17, '', 0)`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The task, as Desktop writes it: the prompt in the default SKILL.md.
+	org := filepath.Join(roots[0], "acct", "org")
+	skill := filepath.Join(os.Getenv("CLAUDE_CONFIG_DIR"), "scheduled-tasks", "invoice-follow-up", "SKILL.md")
+	files := map[string]string{
+		skill: "---\nname: invoice-follow-up\ndescription: x\n---\nAsk c_5 whether the invoice arrived.\n",
+		filepath.Join(org, desktop.TasksFile): `{"scheduledTasks":[{"id":"invoice-follow-up","displayName":"Invoice follow-up",` +
+			`"cronExpression":"0 9 * * 1-5","enabled":true,"permissionMode":"default","createdAt":1}]}`,
+		filepath.Join(org, "local_run.json"): `{"sessionId":"local_run","cliSessionId":"sched-1","scheduledTaskId":"invoice-follow-up",` +
+			`"scheduledRunContinued":false,"permissionMode":"default"}`,
+	}
+	for p, s := range files {
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(s), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	task, err := desktop.TaskByID(org, "invoice-follow-up")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp, err := desktop.Fingerprint(task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutAutosendRule(ctx, db, store.AutosendRule{TaskID: task.ID, TaskName: task.Title(), Schedule: task.Schedule(),
+		Fingerprint: fp, ApprovedAt: time.Now().Unix(), Chats: []store.AutosendChat{{JID: "555@lid", Label: "Marco Rossi (+393331234567)"}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	hook := func(sub string, input map[string]any) string {
+		t.Helper()
+		in, _ := json.Marshal(input)
+		var out bytes.Buffer
+		if code := hookCmd([]string{sub}, bytes.NewReader(in), &out); code != 0 {
+			t.Fatalf("hook %s exit %d: %s", sub, code, out.String())
+		}
+		return out.String()
+	}
+	hook("user-prompt", map[string]any{"session_id": "sched-1", "hook_event_name": "UserPromptSubmit", "prompt": "Ask c_5 whether the invoice arrived."})
+	if _, err := os.Stat(filepath.Join(root, "hooks", "sched-1")); !os.IsNotExist(err) {
+		t.Fatalf("the scheduled prompt left a flag: %v", err)
+	}
+	out := hook("pre-tool", map[string]any{"session_id": "sched-1", "hook_event_name": "PreToolUse", "tool_name": "mcp__whatsapp__whatsapp_send_message",
+		"tool_input": map[string]any{"to": "c_5", "text": "Ciao Marco, è arrivata la fattura?"}, "tool_use_id": "toolu_1", "permission_mode": "default"})
+	var dec struct {
+		HookSpecificOutput map[string]string `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal([]byte(out), &dec); err != nil || dec.HookSpecificOutput["permissionDecision"] != "allow" ||
+		!strings.Contains(dec.HookSpecificOutput["permissionDecisionReason"], "task Invoice follow-up approved") {
+		t.Fatalf("not an allow decision: %q", out)
+	}
+	b, err := os.ReadFile(filepath.Join(root, "prod", "logs", "autosend.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lines := strings.Split(strings.TrimSpace(string(b)), "\n"); len(lines) != 1 || !strings.Contains(lines[0], `"jid":"555@lid"`) ||
+		strings.Contains(lines[0], "fattura") {
+		t.Fatalf("autosend log: %q", b)
+	}
+	// Another recipient in the same run asks.
+	out = hook("pre-tool", map[string]any{"session_id": "sched-1", "hook_event_name": "PreToolUse", "tool_name": "mcp__whatsapp__whatsapp_send_message",
+		"tool_input": map[string]any{"to": "+39 333 999 9999", "text": "x"}, "tool_use_id": "toolu_2"})
+	if !strings.Contains(out, `"ask"`) || !strings.Contains(out, "Autosend: to must be an approved c_N or p_N id") {
+		t.Fatalf("unapproved recipient: %q", out)
 	}
 }

@@ -2,11 +2,18 @@ package main
 
 import (
 	"io"
+	"os"
 	"time"
 
 	"github.com/vukappa4/whatsapp-mcp/internal/config"
+	"github.com/vukappa4/whatsapp-mcp/internal/desktop"
 	"github.com/vukappa4/whatsapp-mcp/internal/hooks"
 )
+
+// scheduledRun reports whether Claude Desktop started this Claude Code
+// session for a scheduled task: it sets CLAUDE_CODE_HOST_SCHEDULED_RUN=1,
+// and the hooks inherit it.
+func scheduledRun() bool { return os.Getenv("CLAUDE_CODE_HOST_SCHEDULED_RUN") == "1" }
 
 // hookCmd runs a Claude Code hook and returns its exit code. user-prompt
 // always exits 0: a failing user-prompt hook must not block the prompt (it
@@ -25,14 +32,15 @@ func hookCmd(args []string, stdin io.Reader, stdout io.Writer) int {
 	switch args[0] {
 	case "user-prompt":
 		if err == nil {
-			_ = hooks.UserPrompt(stdin, dir, time.Now())
+			_ = hooks.UserPrompt(stdin, dir, time.Now(), hooks.PromptOptions{Scheduled: scheduledRun(), DesktopRoots: desktop.Roots()})
 		}
 		return 0
 	case "pre-tool":
 		root, rerr := config.AppDir()
-		env := hooks.PreToolEnv{Dir: dir, Now: time.Now()}
+		env := hooks.PreToolEnv{Dir: dir, Now: time.Now(), Scheduled: scheduledRun(), DesktopRoots: desktop.Roots()}
 		if rerr == nil {
 			env.Resolver = hooks.DBResolver{Root: root}
+			env.AppDir = root
 		}
 		if err := hooks.PreTool(stdin, stdout, env); err != nil {
 			return 2
