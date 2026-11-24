@@ -451,8 +451,18 @@ func approvalCard(ctx context.Context, in toolInput, inputErr error, profile str
 	if inputErr != nil || in.SessionID == "" || json.Unmarshal(in.ToolInput, &args) != nil {
 		return no("the hook could not read this call.")
 	}
+	const scheduledRun = "an approval can only be given in a session with you, never by a scheduled run."
 	if env.Scheduled {
-		return no("an approval can only be given in a session with you, never by a scheduled run.")
+		return no(scheduledRun)
+	}
+	// Desktop's file for the session also says whether it runs a task, in
+	// case the variable did not reach the hook. A session with no file is
+	// not one of Desktop's.
+	switch run, err := findRun(ctx, env.DesktopRoots, in.SessionID); {
+	case err == nil && run.TaskID != "":
+		return no(scheduledRun)
+	case err != nil && !errors.Is(err, desktop.ErrNotFound):
+		return no("cannot tell whether this session is a scheduled run (" + errText(err) + "). Call again.")
 	}
 	if !autosend.PromptMode(in.PermissionMode) {
 		return no(autosend.ModeProblem("this session", in.PermissionMode) + ", which may settle the approval without showing it to you: " +

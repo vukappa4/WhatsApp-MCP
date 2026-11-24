@@ -542,9 +542,9 @@ func TestAutosendRetriesABrokenRunFile(t *testing.T) {
 	}
 }
 
-// Without CLAUDE_CODE_HOST_SCHEDULED_RUN=1 the session is the user's: no
-// Desktop folder is read, nothing is autosent, and the user-prompt gate
-// decides as it always has.
+// Without CLAUDE_CODE_HOST_SCHEDULED_RUN=1 the session is the user's: a
+// send reads no Desktop folder, nothing is autosent, and the user-prompt
+// gate decides as it always has.
 func TestInteractiveSessionsSkipDesktop(t *testing.T) {
 	a := newAuto(t)
 	noScan(t)
@@ -555,9 +555,6 @@ func TestInteractiveSessionsSkipDesktop(t *testing.T) {
 	a.prompt(PromptOptions{}, "sched-1", "rispondi a Marco che arrivo")
 	if kind, r := a.send(a.env(false), "sched-1", "c_1"); kind != silent {
 		t.Fatalf("flag naming Marco: %s %q", kind, r)
-	}
-	if kind, _ := a.call(a.env(false), "s1", allowTool, map[string]any{"task": "follow-up", "chats": []string{"c_1"}}); kind != ask {
-		t.Fatalf("approval card: %s", kind)
 	}
 	if lines := a.auditLines(); len(lines) != 0 {
 		t.Fatalf("autosent: %q", lines)
@@ -700,6 +697,7 @@ func TestAutosendBudget(t *testing.T) {
 	if took := time.Since(start); took > a.env(true).RunWait+2*PreToolBudget+time.Second {
 		t.Fatalf("took %s", took)
 	}
+	findRun = oldRun
 	released := make(chan struct{})
 	findTask = func(ctx context.Context, roots []string, ref string) (desktop.Task, error) {
 		<-ctx.Done()
@@ -767,6 +765,10 @@ func TestApprovalCard(t *testing.T) {
 		rc.Chats[1].JID != calcettoJ || rc.Chats[1].Ref != "c_2" || rc.At != a.now.Add(time.Minute).Unix() {
 		t.Fatalf("receipt %+v", rc)
 	}
+	// A Desktop session that runs no task gets the card too.
+	if kind, r := a.call(a.env(false), "plain-1", allowTool, args); kind != ask {
+		t.Fatalf("Desktop session without a task: %s %q", kind, r)
+	}
 	// The receipt folder survives the flag pruning of the next prompt.
 	a.call(a.env(false), "s1", allowTool, args)
 	userPrompt(t, a.dir, "s2", "leggi", a.now)
@@ -804,6 +806,11 @@ func TestApprovalCardDenies(t *testing.T) {
 		{name: "no session", session: "", args: ok, why: "could not read this call"},
 		{name: "scheduled env", session: "s1", scheduled: true, args: ok, why: "never by a scheduled run"},
 		{name: "scheduled env, continued run", session: "sched-cont", scheduled: true, args: ok, why: "never by a scheduled run"},
+		// Desktop's file names a task though the variable did not reach the hook.
+		{name: "run file names a task", session: "sched-1", args: ok, why: "never by a scheduled run"},
+		{name: "run file of a continued run", session: "sched-cont", args: ok, why: "never by a scheduled run"},
+		{name: "run file unreadable", session: "sched-bad", args: ok, why: "cannot tell whether this session is a scheduled run",
+			setup: func(a *auto) { a.write(filepath.Join(a.org, "local_bad.json"), []byte(`{"cliSessionId": "sched-bad", `)) }},
 		{name: "session in bypassPermissions", session: "s1", mode: "bypassPermissions", args: ok, why: "this session's permission mode is bypassPermissions, which may settle"},
 		{name: "session in dontAsk", session: "s1", mode: "dontAsk", args: ok, why: "this session's permission mode is dontAsk, which may settle"},
 		{name: "session without a mode", session: "s1", mode: "none", args: ok, why: "this session has no permission mode"},
