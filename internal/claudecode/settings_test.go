@@ -57,6 +57,10 @@ func TestRegisterFresh(t *testing.T) {
 			t.Errorf("hook %+v", h)
 		}
 	}
+	// The gate's worst case: the wait for a scheduled run's file, then two budgets.
+	if worst := 12 + 2*int(hooks.PreToolBudget.Seconds()); pre.Timeout < worst+5 {
+		t.Errorf("pre-tool timeout %d s, worst case %d s", pre.Timeout, worst)
+	}
 	if strings.Join(up.Args, " ") != "hook user-prompt" || up.OnFailure == "block" {
 		t.Errorf("user-prompt hook %+v: a failure must not block the user's prompts", up)
 	}
@@ -353,6 +357,37 @@ func TestCheck(t *testing.T) {
 	d := check(exe, "whatsapp")
 	if len(d) != 2 || !strings.Contains(d[0], "PreToolUse") || d[1] != "no allow rule for mcp__whatsapp__whatsapp_get_media" {
 		t.Fatalf("older registration: %q", d)
+	}
+
+	// A gate registered with the 10 s timeout cannot wait for a scheduled
+	// run's file: stale, and Register rewrites it.
+	ten := strings.Replace(string(sorted), `"timeout":30`, `"timeout":10`, 1)
+	if ten == string(sorted) {
+		t.Fatalf("test edit did not apply: %s", sorted)
+	}
+	if err := os.WriteFile(file, []byte(ten), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if d := check(exe, "whatsapp"); len(d) != 1 || !strings.Contains(d[0], "PreToolUse") {
+		t.Fatalf("10 s gate: %q", d)
+	}
+	if err := Register(file, exe, "whatsapp"); err != nil {
+		t.Fatal(err)
+	}
+	if d := check(exe, "whatsapp"); d != nil {
+		t.Fatalf("after Register: %v", d)
+	}
+	s, _ := load(t, file)
+	var ours []hook
+	for _, g := range s.Hooks["PreToolUse"] {
+		for _, h := range g.Hooks {
+			if h.Command == filepath.ToSlash(exe) {
+				ours = append(ours, h)
+			}
+		}
+	}
+	if len(ours) != 1 || ours[0].Timeout != PreToolTimeout {
+		t.Fatalf("PreToolUse after Register: %+v", s.Hooks["PreToolUse"])
 	}
 
 	if err := os.WriteFile(file, []byte(`{"hooks": `), 0o600); err != nil {

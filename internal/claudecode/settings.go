@@ -24,8 +24,15 @@ var ReadTools = []string{
 	"whatsapp_search_people", "whatsapp_search_messages", "whatsapp_get_media",
 }
 
-// HookTimeout is the timeout, in seconds, of both registered hooks.
-const HookTimeout = 10
+// PromptTimeout is the timeout, in seconds, of the UserPromptSubmit hook.
+const PromptTimeout = 10
+
+// PreToolTimeout is the timeout, in seconds, of the PreToolUse gate. In a
+// Desktop scheduled run the gate waits up to 12 s for Desktop to save the
+// run's session file, then checks within its budgets: 30 s leaves room. A
+// settings file registered with another timeout is stale (Check), so
+// setup-claude rewrites it.
+const PreToolTimeout = 30
 
 // ConfigDir is Claude Code's user config dir: $CLAUDE_CONFIG_DIR, else ~/.claude.
 func ConfigDir() (string, error) {
@@ -56,10 +63,10 @@ func hookGroups(exe string) map[string]*object {
 	exe = filepath.ToSlash(exe)
 	return map[string]*object{
 		"UserPromptSubmit": obj("hooks", []any{
-			obj("type", "command", "command", exe, "args", []any{"hook", "user-prompt"}, "timeout", HookTimeout),
+			obj("type", "command", "command", exe, "args", []any{"hook", "user-prompt"}, "timeout", PromptTimeout),
 		}),
 		"PreToolUse": obj("matcher", hooks.PreToolMatcher, "hooks", []any{
-			obj("type", "command", "command", exe, "args", []any{"hook", "pre-tool"}, "timeout", HookTimeout, "onFailure", "block"),
+			obj("type", "command", "command", exe, "args", []any{"hook", "pre-tool"}, "timeout", PreToolTimeout, "onFailure", "block"),
 		}),
 	}
 }
