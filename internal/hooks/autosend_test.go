@@ -140,8 +140,22 @@ func (a *auto) exec(q string, args ...any) {
 func (a *auto) env(scheduled bool) PreToolEnv {
 	// Desktop's save is immediate in these fixtures: a short wait.
 	return PreToolEnv{Dir: a.dir, Now: a.now.Add(time.Minute), Resolver: DBResolver{Root: a.root}, Scheduled: scheduled,
-		DesktopRoots: []string{a.desk}, AppDir: a.root, RunWait: 400 * time.Millisecond}
+		DesktopRoots: []string{a.desk}, AppDir: a.root, RunWait: 400 * time.Millisecond, ClaudeDir: a.claudeDir()}
 }
+
+// claudeDir is the test's Claude config folder; userSettings and
+// projectSettings write the settings a task without a mode takes its mode from.
+func (a *auto) claudeDir() string { return filepath.Join(filepath.Dir(a.root), "claude-config") }
+
+func (a *auto) userSettings(body string) {
+	a.write(filepath.Join(a.claudeDir(), "settings.json"), []byte(body))
+}
+
+func (a *auto) projectSettings(name, body string) {
+	a.write(filepath.Join(filepath.Dir(a.root), "work", ".claude", name), []byte(body))
+}
+
+func (a *auto) dropTaskMode() { delete(a.task, "permissionMode"); a.writeTasks() }
 
 // call runs PreTool in permission mode default and returns the decision and
 // its reason ("" twice when silent).
@@ -293,8 +307,26 @@ func TestAutosendFallbacksDeny(t *testing.T) {
 			setup: func(a *auto) { a.task["permissionMode"] = "dontAsk"; a.writeTasks() }},
 		{name: "task in bypassPermissions", session: "sched-1", to: "c_1", why: "the task's permission mode is bypassPermissions",
 			setup: func(a *auto) { a.task["permissionMode"] = "bypassPermissions"; a.writeTasks() }},
-		{name: "task without a mode", session: "sched-1", to: "c_1", why: "the task has no permission mode",
-			setup: func(a *auto) { delete(a.task, "permissionMode"); a.writeTasks() }},
+		{name: "task without a mode, bypass in user settings", session: "sched-1", to: "c_1",
+			why: filepath.Join("claude-config", "settings.json") + " sets permissions.defaultMode to bypassPermissions",
+			setup: func(a *auto) {
+				a.dropTaskMode()
+				a.userSettings(`{"permissions": {"defaultMode": "bypassPermissions"}}`)
+			}},
+		{name: "task without a mode, dontAsk in local settings over plan in project", session: "sched-1", to: "c_1",
+			why: filepath.Join("work", ".claude", "settings.local.json") + " sets permissions.defaultMode to dontAsk",
+			setup: func(a *auto) {
+				a.dropTaskMode()
+				a.projectSettings("settings.json", `{"permissions": {"defaultMode": "plan"}}`)
+				a.projectSettings("settings.local.json", `{"permissions": {"defaultMode": "dontAsk"}}`)
+			}},
+		{name: "task without a mode, broken project settings", session: "sched-1", to: "c_1",
+			why: "the default mode from your Claude Code settings cannot be read",
+			setup: func(a *auto) {
+				a.dropTaskMode()
+				a.userSettings(`{"permissions": {"defaultMode": "default"}}`)
+				a.projectSettings("settings.json", `{"permissions": `)
+			}},
 		{name: "run in an unknown mode", session: "sched-new", to: "c_1", why: "the run's permission mode is yolo",
 			setup: func(a *auto) {
 				a.writeRun("sched-new", map[string]any{"scheduledTaskId": "follow-up", "permissionMode": "yolo"})
@@ -766,8 +798,15 @@ func TestApprovalCardDenies(t *testing.T) {
 		{name: "session in bypassPermissions", session: "s1", mode: "bypassPermissions", args: ok, why: "this session's permission mode is bypassPermissions, which may settle"},
 		{name: "session in dontAsk", session: "s1", mode: "dontAsk", args: ok, why: "this session's permission mode is dontAsk, which may settle"},
 		{name: "session without a mode", session: "s1", mode: "none", args: ok, why: "this session has no permission mode"},
-		{name: "task without a mode", session: "s1", args: ok, why: "the task has no permission mode: a run must use",
-			setup: func(a *auto) { delete(a.task, "permissionMode"); a.writeTasks() }},
+		{name: "task without a mode, bypass in project settings", session: "s1", args: ok,
+			why: "sets permissions.defaultMode to bypassPermissions: a run must use",
+			setup: func(a *auto) {
+				a.dropTaskMode()
+				a.projectSettings("settings.json", `{"permissions": {"defaultMode": "bypassPermissions"}}`)
+			}},
+		{name: "task without a mode, unreadable user settings", session: "s1", args: ok,
+			why:   "the default mode from your Claude Code settings cannot be read (read ",
+			setup: func(a *auto) { a.dropTaskMode(); a.userSettings(`not json`) }},
 		{name: "task in an unknown mode", session: "s1", args: ok, why: "the task's permission mode is yolo",
 			setup: func(a *auto) { a.task["permissionMode"] = "yolo"; a.writeTasks() }},
 		{name: "task not found", session: "s1", args: map[string]any{"task": "nope", "chats": []string{"c_1"}}, why: "no Claude Desktop scheduled task has the id or title \"nope\""},
@@ -864,5 +903,45 @@ func TestReasonTextIsASCIICut(t *testing.T) {
 	}
 	if got := display("short"); got != "short" {
 		t.Fatalf("display: %q", got)
+	}
+}
+
+// A task saved without a mode runs in the default mode its settings give
+// it: the card shows where the mode comes from, and runs autosend while
+// that mode prompts.
+func TestTaskModeFromSettings(t *testing.T) {
+	a := newAuto(t)
+	a.dropTaskMode()
+	args := map[string]any{"task": "follow-up", "chats": []string{"c_1", "c_2"}}
+	for _, tc := range []struct{ user, project, local, card string }{
+		{card: "mode default (from your settings)"},
+		{user: "plan", card: "mode plan (from your settings)"},
+		{user: "bypassPermissions", project: "acceptEdits", card: "mode acceptEdits (from your settings)"},
+		{user: "bypassPermissions", project: "dontAsk", local: "auto", card: "mode auto (from your settings)"},
+	} {
+		for file, mode := range map[string]string{"user": tc.user, "settings.json": tc.project, "settings.local.json": tc.local} {
+			body := `{}`
+			if mode != "" {
+				body = `{"permissions": {"defaultMode": "` + mode + `"}}`
+			}
+			if file == "user" {
+				a.userSettings(body)
+			} else {
+				a.projectSettings(file, body)
+			}
+		}
+		if kind, r := a.callMode(a.env(false), "default", "s1", allowTool, args); kind != ask || !strings.Contains(r, ", "+tc.card+", folder ") {
+			t.Fatalf("%+v: %s %q", tc, kind, r)
+		}
+		if kind, r := a.send(a.env(true), "sched-1", "c_1"); kind != allow {
+			t.Fatalf("%+v autosend: %s %q", tc, kind, r)
+		}
+	}
+	// The task's own mode wins over every settings file.
+	a.task["permissionMode"] = "plan"
+	a.writeTasks()
+	a.projectSettings("settings.local.json", `{"permissions": {"defaultMode": "bypassPermissions"}}`)
+	if kind, r := a.callMode(a.env(false), "default", "s1", allowTool, args); kind != ask || !strings.Contains(r, ", mode plan, folder ") {
+		t.Fatalf("task mode: %s %q", kind, r)
 	}
 }

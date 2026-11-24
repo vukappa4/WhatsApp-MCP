@@ -26,6 +26,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/vukappa4/whatsapp-mcp/internal/desktop"
 	"github.com/vukappa4/whatsapp-mcp/internal/useracl"
 )
 
@@ -256,10 +257,8 @@ var promptModes = map[string]bool{"default": true, "acceptEdits": true, "plan": 
 func PromptMode(mode string) bool { return promptModes[mode] }
 
 // ModeProblem says why a permission mode rules out an approval or an
-// autosend, "" when it does not. who names the holder ("the task"). An
-// empty mode is refused: a task without one runs in the user's default
-// mode from Claude settings, which the gate does not read and which may be
-// bypassPermissions.
+// autosend, "" when it does not. who names the holder ("the run"). An
+// empty mode is refused.
 func ModeProblem(who, mode string) string {
 	switch {
 	case promptModes[mode]:
@@ -267,11 +266,47 @@ func ModeProblem(who, mode string) string {
 	case mode == "":
 		return who + " has no permission mode"
 	}
+	return who + "'s permission mode is " + showMode(mode)
+}
+
+// TaskModeProblem says why the mode a task's runs use (desktop.EffectiveMode
+// and its error) rules out an approval or an autosend, "" when it does not.
+// A task without a mode runs in the default mode its settings give it: a
+// settings file that cannot be read refuses.
+func TaskModeProblem(m desktop.Mode, err error) string {
+	switch {
+	case err != nil:
+		e := []rune(err.Error())
+		if len(e) > 300 {
+			e = append(e[:300], []rune("...")...)
+		}
+		return "the task has no permission mode, and the default mode from your Claude Code settings cannot be read (" + string(e) + ")"
+	case promptModes[m.Name]:
+		return ""
+	case !m.FromSettings:
+		return ModeProblem("the task", m.Name)
+	}
+	return "the task has no permission mode, and " + m.Source + " sets permissions.defaultMode to " + showMode(m.Name)
+}
+
+// ShowTaskMode is the task's mode as a card shows it: "default", or
+// "default (from your settings)" when the task holds none.
+func ShowTaskMode(m desktop.Mode) string {
+	if m.FromSettings {
+		return showMode(m.Name) + " (from your settings)"
+	}
+	return showMode(m.Name)
+}
+
+// showMode is a mode for a message: cut at 40 characters, and quoted when it
+// holds more than letters and dots, which escapes what a file may hold
+// beyond a plain name.
+func showMode(mode string) string {
 	if r := []rune(mode); len(r) > 40 {
 		mode = string(r[:40]) + "..."
 	}
 	if strings.IndexFunc(mode, func(r rune) bool { return !unicode.IsLetter(r) && r != '.' }) >= 0 {
-		mode = strconv.Quote(mode) // escapes what Desktop's file may hold beyond a plain name
+		mode = strconv.Quote(mode)
 	}
-	return who + "'s permission mode is " + mode
+	return mode
 }

@@ -386,7 +386,7 @@ func autosendCheck(ctx context.Context, in toolInput, server string, env PreTool
 	if err != nil {
 		return "task " + display(run.TaskID) + ": " + errText(err)
 	}
-	if why := autosend.ModeProblem("the task", task.PermissionMode); why != "" {
+	if why := autosend.TaskModeProblem(desktop.EffectiveMode(task, env.ClaudeDir)); why != "" {
 		return why
 	}
 	db, err := openProfileDB(env.AppDir, profile)
@@ -471,8 +471,8 @@ func approvalCard(ctx context.Context, in toolInput, inputErr error, profile str
 	if err != nil {
 		return no("cannot read what the task runs (" + errText(err) + ").")
 	}
-	if why := autosend.ModeProblem("the task", task.PermissionMode); why != "" {
-		// A task without a mode runs in the user's default mode, which the gate does not read: it may skip prompts.
+	mode, modeErr := desktop.EffectiveMode(task, env.ClaudeDir)
+	if why := autosend.TaskModeProblem(mode, modeErr); why != "" {
 		return no(why + ": a run must use default, acceptEdits, plan or auto mode, where it cannot settle confirmations " +
 			"without you or rewrite the send gate. Give the task one of them first.")
 	}
@@ -519,10 +519,6 @@ func approvalCard(ctx context.Context, in toolInput, inputErr error, profile str
 	for i, c := range chats {
 		labels[i] = display(c.Label)
 	}
-	mode := task.PermissionMode
-	if mode == "" {
-		mode = "default"
-	}
 	folder := "no folder"
 	if strings.TrimSpace(task.Cwd) != "" {
 		folder = "folder " + displayN(task.Cwd, 200)
@@ -534,7 +530,7 @@ func approvalCard(ctx context.Context, in toolInput, inputErr error, profile str
 	return decision{ask, fmt.Sprintf("%slet the Desktop scheduled task %q (%s, mode %s, %s) send text messages with nobody present to: %s. "+
 		"Its whole prompt: %q.%s Approve only if you asked for this. It lasts until revoked or until the task's prompt, schedule "+
 		"or folder changes, and allows at most %d sends a day to each chat.",
-		lead, display(task.Title()), display(task.Schedule()), display(mode), folder, strings.Join(labels, ", "),
+		lead, display(task.Title()), display(task.Schedule()), display(autosend.ShowTaskMode(mode)), folder, strings.Join(labels, ", "),
 		displayN(skill.Prompt, maxCardPrompt+1), extra, autosend.MaxPerDay)}
 }
 

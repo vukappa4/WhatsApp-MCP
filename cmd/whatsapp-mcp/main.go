@@ -25,6 +25,7 @@ import (
 	"unicode"
 
 	"github.com/vukappa4/whatsapp-mcp/internal/childproc"
+	"github.com/vukappa4/whatsapp-mcp/internal/claudecode"
 	"github.com/vukappa4/whatsapp-mcp/internal/config"
 	"github.com/vukappa4/whatsapp-mcp/internal/desktop"
 	"github.com/vukappa4/whatsapp-mcp/internal/hooks"
@@ -340,6 +341,9 @@ func runCmd(args []string) error {
 		Stop: func() { reason = "stop command"; cancel() }, Sender: client, Ingest: client.Ingestor(), DesktopRoots: desktop.Roots()}
 	if dir, err := hooks.DefaultDir(); err == nil {
 		srv.HooksDir = dir
+	}
+	if dir, err := claudecode.ConfigDir(); err == nil {
+		srv.ClaudeDir = dir
 	}
 	log.Info("serving MCP", "url", fmt.Sprintf("http://127.0.0.1:%d/mcp", cfg.Port))
 	serveErr := srv.Serve(ctx, ln, token, cfg.Port)

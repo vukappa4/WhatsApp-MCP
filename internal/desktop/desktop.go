@@ -663,3 +663,81 @@ func Fingerprint(t Task) (string, error) {
 	}
 	return FingerprintOf(t, file)
 }
+
+// Mode is the permission mode a task's runs use.
+type Mode struct {
+	Name         string // the mode
+	FromSettings bool   // the task holds no mode: Name comes from Claude Code's settings
+	Source       string // with FromSettings, the settings file that sets it; "" when none does and Name is "default"
+}
+
+// EffectiveMode is the permission mode a run of t uses: the task's own,
+// else permissions.defaultMode from the Claude Code settings that apply to
+// the run, highest precedence first: <cwd>/.claude/settings.local.json,
+// <cwd>/.claude/settings.json, then <userDir>/settings.json (userDir is
+// CLAUDE_CONFIG_DIR, else ~/.claude). Set nowhere, it is "default". Managed
+// settings, which outrank all of them, are not read: their location is not
+// known here. A settings file that exists but cannot be read or parsed is
+// an error, and so is a task without an absolute folder or a missing
+// userDir: the gate fails closed.
+func EffectiveMode(t Task, userDir string) (Mode, error) {
+	if t.PermissionMode != "" {
+		return Mode{Name: t.PermissionMode}, nil
+	}
+	if userDir == "" || !filepath.IsAbs(userDir) {
+		return Mode{}, errors.New("no Claude config folder to read the default mode from")
+	}
+	cwd := strings.TrimSpace(t.Cwd)
+	if cwd == "" || !filepath.IsAbs(cwd) {
+		return Mode{}, errors.New("the task has no absolute folder, so its project settings cannot be found")
+	}
+	m := Mode{Name: "default", FromSettings: true}
+	for _, f := range []string{
+		filepath.Join(cwd, ".claude", "settings.local.json"),
+		filepath.Join(cwd, ".claude", "settings.json"),
+		filepath.Join(userDir, "settings.json"),
+	} {
+		mode, ok, err := settingsDefaultMode(f)
+		if err != nil {
+			return Mode{}, fmt.Errorf("read %s: %w", f, err)
+		}
+		if ok && m.Source == "" {
+			m.Name, m.Source = mode, f
+		}
+	}
+	return m, nil
+}
+
+// settingsDefaultMode reads permissions.defaultMode from a Claude Code
+// settings file: ok is false when the file does not exist or does not set
+// it. Only the exact keys count; null and "" are unset.
+func settingsDefaultMode(file string) (mode string, ok bool, err error) {
+	b, err := os.ReadFile(file)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(bytes.TrimPrefix(b, []byte("\xEF\xBB\xBF")), &root); err != nil {
+		return "", false, err
+	}
+	p, found := root["permissions"]
+	if !found || string(bytes.TrimSpace(p)) == "null" {
+		return "", false, nil
+	}
+	var perms map[string]json.RawMessage
+	if err := json.Unmarshal(p, &perms); err != nil {
+		return "", false, errors.New("permissions is not an object")
+	}
+	v, found := perms["defaultMode"]
+	if !found || string(bytes.TrimSpace(v)) == "null" {
+		return "", false, nil
+	}
+	if err := json.Unmarshal(v, &mode); err != nil {
+		return "", false, errors.New("permissions.defaultMode is not a string")
+	}
+	mode = strings.TrimSpace(mode)
+	return mode, mode != "", nil
+}

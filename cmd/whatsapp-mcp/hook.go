@@ -53,6 +53,9 @@ func hookCmd(args []string, stdin io.Reader, stdout io.Writer) int {
 	case "pre-tool":
 		root, rerr := config.AppDir()
 		env := hooks.PreToolEnv{Dir: dir, Now: time.Now(), Scheduled: scheduledRun(), DesktopRoots: desktop.Roots()}
+		if cd, err := claudecode.ConfigDir(); err == nil {
+			env.ClaudeDir = cd
+		}
 		if env.Scheduled {
 			env.RunWait = hooks.RunWaitFor(gateTimeout())
 		}

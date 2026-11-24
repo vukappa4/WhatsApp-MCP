@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vukappa4/whatsapp-mcp/internal/desktop"
 	"github.com/vukappa4/whatsapp-mcp/internal/useracl"
 )
 
@@ -172,6 +173,30 @@ func TestModeProblem(t *testing.T) {
 	} {
 		if got := ModeProblem("the task", mode); got != want || PromptMode(mode) != (want == "") {
 			t.Errorf("%q: %q, PromptMode %v", mode, got, PromptMode(mode))
+		}
+	}
+}
+
+func TestTaskModeProblem(t *testing.T) {
+	for _, tc := range []struct {
+		m    desktop.Mode
+		err  error
+		want string
+		card string
+	}{
+		{desktop.Mode{Name: "plan"}, nil, "", "plan"},
+		{desktop.Mode{Name: "dontAsk"}, nil, "the task's permission mode is dontAsk", "dontAsk"},
+		{desktop.Mode{Name: "default", FromSettings: true}, nil, "", "default (from your settings)"},
+		{desktop.Mode{Name: "bypassPermissions", FromSettings: true, Source: "/u/settings.json"}, nil,
+			"the task has no permission mode, and /u/settings.json sets permissions.defaultMode to bypassPermissions", ""},
+		{desktop.Mode{}, errors.New("read /u/settings.json: bad"),
+			"the task has no permission mode, and the default mode from your Claude Code settings cannot be read (read /u/settings.json: bad)", ""},
+	} {
+		if got := TaskModeProblem(tc.m, tc.err); got != tc.want {
+			t.Errorf("%+v %v: %q", tc.m, tc.err, got)
+		}
+		if tc.card != "" && ShowTaskMode(tc.m) != tc.card {
+			t.Errorf("%+v shows %q", tc.m, ShowTaskMode(tc.m))
 		}
 	}
 }

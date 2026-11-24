@@ -249,6 +249,7 @@ type PreToolEnv struct {
 	DesktopRoots []string      // desktop.Roots
 	AppDir       string        // config.AppDir: <AppDir>/<profile> holds data.db and logs/autosend.log
 	RunWait      time.Duration // how long to wait for Desktop to save a scheduled run's file (RunWaitFor)
+	ClaudeDir    string        // the Claude config folder (CLAUDE_CONFIG_DIR, else ~/.claude): its settings.json gives a task without a mode its mode
 }
 
 // PreTool handles PreToolUse for the gated tools. In a session with a

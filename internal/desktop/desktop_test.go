@@ -586,3 +586,79 @@ func TestUnreadableNullFields(t *testing.T) {
 		}
 	}
 }
+
+// A task without a mode runs in the default mode its settings give it:
+// local over project over user, "default" when none sets it, and an error
+// for any settings file that exists but cannot be read.
+func TestEffectiveMode(t *testing.T) {
+	base := t.TempDir()
+	user := filepath.Join(base, "claude-config")
+	cwd := filepath.Join(base, "work")
+	local, project, userFile := filepath.Join(cwd, ".claude", "settings.local.json"), filepath.Join(cwd, ".claude", "settings.json"),
+		filepath.Join(user, "settings.json")
+	write := func(file, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(file, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mode := func(m string) string { return `{"permissions": {"allow": [], "defaultMode": "` + m + `"}}` }
+	task := Task{ID: "t", Cwd: cwd}
+	check := func(name, want, source string) {
+		t.Helper()
+		got, err := EffectiveMode(task, user)
+		if err != nil || got.Name != want || !got.FromSettings || got.Source != source {
+			t.Errorf("%s: %+v %v, want %s from %q", name, got, err, want, source)
+		}
+	}
+	check("absent everywhere", "default", "")
+	write(userFile, `{"model": "x"}`)
+	check("user file without the key", "default", "")
+	write(userFile, mode("bypassPermissions"))
+	check("user", "bypassPermissions", userFile)
+	write(project, mode("plan"))
+	check("project over user", "plan", project)
+	write(local, mode("acceptEdits"))
+	check("local over project", "acceptEdits", local)
+	write(local, `{"permissions": {"DefaultMode": "auto", "defaultMode": null}, "Permissions": {"defaultMode": "auto"}}`)
+	check("case variants and null ignored", "plan", project)
+	write(local, `{"permissions": {"defaultMode": ""}}`)
+	check("empty string ignored", "plan", project)
+
+	// The task's own mode wins without reading anything.
+	if got, err := EffectiveMode(Task{PermissionMode: "auto"}, ""); err != nil || got != (Mode{Name: "auto"}) {
+		t.Errorf("task mode: %+v %v", got, err)
+	}
+
+	// Any settings file that exists but cannot be read refuses, even below one that sets the mode.
+	for name, setup := range map[string]func(){
+		"broken user file":    func() { write(userFile, `{"permissions": `) },
+		"non-string mode":     func() { write(project, `{"permissions": {"defaultMode": 3}}`) },
+		"permissions not obj": func() { write(project, `{"permissions": []}`) },
+		"empty local file":    func() { write(local, ``) },
+		"folder in its place": func() { os.MkdirAll(filepath.Join(user, "settings.json"), 0o700) },
+	} {
+		os.RemoveAll(base)
+		write(local, mode("default"))
+		setup()
+		if got, err := EffectiveMode(task, user); err == nil {
+			t.Errorf("%s: %+v", name, got)
+		}
+	}
+	os.RemoveAll(base)
+	for name, tc := range map[string]struct {
+		task Task
+		user string
+	}{
+		"no folder":       {Task{ID: "t"}, user},
+		"relative folder": {Task{ID: "t", Cwd: "work"}, user},
+		"no config dir":   {task, ""},
+	} {
+		if got, err := EffectiveMode(tc.task, tc.user); err == nil {
+			t.Errorf("%s: %+v", name, got)
+		}
+	}
+}

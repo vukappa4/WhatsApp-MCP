@@ -176,7 +176,7 @@ func (s *Server) checkReceipt(ctx context.Context, r autosend.Receipt, ids []str
 	if fp != r.Fingerprint {
 		return "the task's prompt, schedule or folder changed", nil
 	}
-	if why := autosend.ModeProblem("the task", task.PermissionMode); why != "" {
+	if why := autosend.TaskModeProblem(desktop.EffectiveMode(task, s.ClaudeDir)); why != "" {
 		return why, nil
 	}
 	return "", nil
@@ -249,7 +249,7 @@ func (s *Server) autosendState(ctx context.Context, r store.AutosendRule) string
 	if filepath.Clean(task.Dir) != filepath.Clean(r.TaskDir) {
 		return "inactive: the task is in another Claude Desktop account or organization"
 	}
-	if why := autosend.ModeProblem("the task", task.PermissionMode); why != "" {
+	if why := autosend.TaskModeProblem(desktop.EffectiveMode(task, s.ClaudeDir)); why != "" {
 		return "inactive: " + why
 	}
 	fp, err := desktop.Fingerprint(task)

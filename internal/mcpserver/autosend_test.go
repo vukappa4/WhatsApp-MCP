@@ -19,16 +19,19 @@ import (
 type autosendEnv struct {
 	*sendEnv
 	hooks, org, skill string
+	claude, work      string // the Claude config folder and the task's folder
 }
 
 func newAutosendEnv(t *testing.T) *autosendEnv {
 	t.Helper()
 	base := t.TempDir()
 	a := &autosendEnv{hooks: filepath.Join(base, "hooks"), org: filepath.Join(base, "sessions", "acct", "org"),
-		skill: filepath.Join(base, "claude", "scheduled-tasks", "follow-up", "SKILL.md")}
+		skill:  filepath.Join(base, "claude", "scheduled-tasks", "follow-up", "SKILL.md"),
+		claude: filepath.Join(base, "claude-config"), work: filepath.Join(base, "work")}
 	a.sendEnv = newSendEnvWith(t, func(e *sendEnv) {
 		e.srv.HooksDir = a.hooks
 		e.srv.DesktopRoots = []string{filepath.Join(base, "sessions")}
+		e.srv.ClaudeDir = a.claude
 	})
 	a.writeFile(t, a.skill, "---\nname: follow-up\ndescription: Follow up\n---\nAsk c_1 about the invoice.\n")
 	a.writeTasks(t, "0 9 * * 1-5")
@@ -47,14 +50,14 @@ func (a *autosendEnv) writeFile(t *testing.T, path, s string) {
 
 func (a *autosendEnv) writeTasks(t *testing.T, cron string) {
 	b, _ := json.Marshal(map[string]any{"scheduledTasks": []map[string]any{{"id": "follow-up", "displayName": "Follow up",
-		"filePath": a.skill, "cronExpression": cron, "permissionMode": "default"}}})
+		"filePath": a.skill, "cronExpression": cron, "permissionMode": "default", "cwd": a.work}}})
 	a.writeFile(t, filepath.Join(a.org, desktop.TasksFile), string(b))
 }
 
 // writeTaskMode writes the task on the approved schedule with mode, or
 // without the field when mode is "".
 func (a *autosendEnv) writeTaskMode(t *testing.T, mode string) {
-	task := map[string]any{"id": "follow-up", "displayName": "Follow up", "filePath": a.skill, "cronExpression": "0 9 * * 1-5"}
+	task := map[string]any{"id": "follow-up", "displayName": "Follow up", "filePath": a.skill, "cronExpression": "0 9 * * 1-5", "cwd": a.work}
 	if mode != "" {
 		task["permissionMode"] = mode
 	}
@@ -229,16 +232,38 @@ func TestAutosendRevokeAndStatus(t *testing.T) {
 	// The permission mode is not in the fingerprint: a mode outside the
 	// allowlist, or none, blocks the rule while it lasts.
 	for mode, want := range map[string]string{"dontAsk": "inactive: the task's permission mode is dontAsk",
-		"yolo": "inactive: the task's permission mode is yolo", "": "inactive: the task has no permission mode"} {
+		"yolo": "inactive: the task's permission mode is yolo"} {
 		a.writeTaskMode(t, mode)
 		if text := state(); !strings.Contains(text, want) {
 			t.Errorf("mode %q:\n%s", mode, text)
 		}
 	}
-	a.writeTaskMode(t, "auto")
-	if text := state(); strings.Contains(text, "inactive: the task's") || strings.Contains(text, "inactive: the task has") {
-		t.Errorf("auto task:\n%s", text)
+	active := func(what string) {
+		t.Helper()
+		if text := state(); strings.Contains(text, "inactive: the task's") || strings.Contains(text, "inactive: the task has") {
+			t.Errorf("%s:\n%s", what, text)
+		}
 	}
+	a.writeTaskMode(t, "auto")
+	active("auto task")
+	// Without a mode, the task runs in the default mode its settings give it.
+	a.writeTaskMode(t, "")
+	active("no mode, no settings")
+	user := filepath.Join(a.claude, "settings.json")
+	a.writeFile(t, user, `{"permissions": {"defaultMode": "bypassPermissions"}}`)
+	if text := state(); !strings.Contains(text, "inactive: the task has no permission mode, and ") ||
+		!strings.Contains(text, "sets permissions.defaultMode to bypassPermissions") {
+		t.Errorf("bypass in user settings:\n%s", text)
+	}
+	a.writeFile(t, filepath.Join(a.work, ".claude", "settings.local.json"), `{"permissions": {"defaultMode": "acceptEdits"}}`)
+	active("local settings over user")
+	a.writeFile(t, filepath.Join(a.work, ".claude", "settings.json"), `{"permissions"`)
+	if text := state(); !strings.Contains(text, "inactive: the task has no permission mode, and the default mode from your Claude Code settings cannot be read") {
+		t.Errorf("broken project settings:\n%s", text)
+	}
+	os.RemoveAll(filepath.Join(a.work, ".claude"))
+	os.Remove(user)
+	a.writeTaskMode(t, "default")
 	a.writeTasks(t, "*/5 * * * *")
 	if text := state(); !strings.Contains(text, "inactive: the task's prompt, schedule or folder changed since approval") {
 		t.Errorf("changed task:\n%s", text)
@@ -270,9 +295,16 @@ func TestAutosendAllowRechecksTheReceipt(t *testing.T) {
 		"task prompt": func(t *testing.T, a *autosendEnv) {
 			a.writeFile(t, a.skill, "---\nname: follow-up\ndescription: x\n---\nAsk p_2 for money.\n")
 		},
-		"task gone":         func(t *testing.T, a *autosendEnv) { os.Remove(filepath.Join(a.org, desktop.TasksFile)) },
-		"task mode":         func(t *testing.T, a *autosendEnv) { a.writeTaskMode(t, "bypassPermissions") },
-		"task mode dropped": func(t *testing.T, a *autosendEnv) { a.writeTaskMode(t, "") },
+		"task gone": func(t *testing.T, a *autosendEnv) { os.Remove(filepath.Join(a.org, desktop.TasksFile)) },
+		"task mode": func(t *testing.T, a *autosendEnv) { a.writeTaskMode(t, "bypassPermissions") },
+		"task mode dropped, bypass in settings": func(t *testing.T, a *autosendEnv) {
+			a.writeTaskMode(t, "")
+			a.writeFile(t, filepath.Join(a.claude, "settings.json"), `{"permissions": {"defaultMode": "bypassPermissions"}}`)
+		},
+		"task mode dropped, unreadable settings": func(t *testing.T, a *autosendEnv) {
+			a.writeTaskMode(t, "")
+			a.writeFile(t, filepath.Join(a.work, ".claude", "settings.json"), `[`)
+		},
 		"person's account": func(t *testing.T, a *autosendEnv) {
 			if _, err := a.db.Exec(`DELETE FROM jids WHERE person_id = 1 AND kind = 'lid'`); err != nil {
 				t.Fatal(err)

@@ -56,6 +56,9 @@ type Server struct {
 	// DesktopRoots are Claude Desktop's session folders (desktop.Roots),
 	// read to tell whether an approved task is unchanged.
 	DesktopRoots []string
+	// ClaudeDir is the Claude config folder (claudecode.ConfigDir): its
+	// settings.json gives a task without a permission mode its mode.
+	ClaudeDir string
 
 	sendMu   sync.Mutex  // one send at a time: idempotency keys stay exact
 	closing  atomic.Bool // the daemon is stopping: new sends are refused (Drain)
