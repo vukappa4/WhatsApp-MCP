@@ -1,0 +1,216 @@
+// Package autosend holds what the send gate and the daemon share about
+// autosend approvals: the receipt the gate writes when it shows the user the
+// approval card, and the key that ties it to the tool call's arguments.
+//
+// The gate writes a receipt only when it asks the user to approve exactly
+// these arguments; the daemon stores an approval only by consuming one. A
+// call that never passed through the gate (an older gate, a client without
+// hooks) finds no receipt and approves nothing.
+package autosend
+
+import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/vukappa4/whatsapp-mcp/internal/useracl"
+)
+
+// Tool names. Both start with whatsapp_send_: every install's PreToolUse
+// matcher gates that range.
+const (
+	ToolAllow  = "whatsapp_send_autosend_allow"
+	ToolRevoke = "whatsapp_send_autosend_revoke"
+)
+
+// ReceiptTTL is how long a receipt waits for the tool call it was written for.
+const ReceiptTTL = 15 * time.Minute
+
+// LogName is the autosend log in a profile's logs folder.
+const LogName = "autosend.log"
+
+// ErrNoReceipt means the gate wrote no receipt for these arguments, or it expired.
+var ErrNoReceipt = errors.New("no approval receipt")
+
+// Chat is one approved destination: the JID the daemon sends to and the
+// label the user saw.
+type Chat struct {
+	JID   string `json:"jid"`
+	Label string `json:"label"`
+}
+
+// Receipt is what the approval card showed the user.
+type Receipt struct {
+	At          int64  `json:"at"` // unix time the gate asked
+	Profile     string `json:"profile"`
+	TaskID      string `json:"task_id"`
+	TaskName    string `json:"task_name"`
+	Schedule    string `json:"schedule"`
+	Fingerprint string `json:"fingerprint"`
+	Chats       []Chat `json:"chats"`
+}
+
+// Args are the arguments of ToolAllow as the gate and the daemon read them.
+type Args struct {
+	Task  string   `json:"task"`
+	Chats []string `json:"chats"`
+}
+
+// Normalize trims the chats, drops empty ones and duplicates, and sorts them.
+func Normalize(chats []string) []string {
+	var out []string
+	for _, c := range chats {
+		if c = strings.TrimSpace(c); c != "" {
+			out = append(out, c)
+		}
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+// ArgsKey ties a receipt to one profile and one set of arguments: the hex
+// SHA-256 of the profile, the trimmed task and the normalized chats.
+func ArgsKey(profile, task string, chats []string) string {
+	b, _ := json.Marshal([]any{profile, strings.TrimSpace(task), Normalize(chats)})
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// ReceiptDir is <hooks dir>/autosend.
+func ReceiptDir(hooksDir string) string { return filepath.Join(hooksDir, "autosend") }
+
+var keyRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+func receiptPath(hooksDir, key string) (string, error) {
+	if !keyRe.MatchString(key) {
+		return "", fmt.Errorf("bad receipt key %q", key)
+	}
+	return filepath.Join(ReceiptDir(hooksDir), key+".json"), nil
+}
+
+// WriteReceipt stores r under key, readable by the user only, replacing any
+// earlier receipt for the same arguments.
+func WriteReceipt(hooksDir, key string, r Receipt) error {
+	path, err := receiptPath(hooksDir, key)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if err := useracl.Restrict(dir, true); err != nil {
+		return fmt.Errorf("restrict %s to the user: %w", dir, err)
+	}
+	PruneReceipts(hooksDir, time.Unix(r.At, 0))
+	b, err := json.Marshal(r)
+	if err != nil {
+		return err
+	}
+	tmp := path + "." + nonce() + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := useracl.Restrict(tmp, false); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("restrict %s to the user: %w", tmp, err)
+	}
+	_, err = f.Write(b)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp, path)
+	}
+	if err != nil {
+		os.Remove(tmp)
+	}
+	return err
+}
+
+func nonce() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// fresh reports whether a receipt written at at is still valid at now:
+// within ReceiptTTL, and not from the future (a minute of slack).
+func fresh(at int64, now time.Time) bool {
+	age := now.Sub(time.Unix(at, 0))
+	return at != 0 && age >= -time.Minute && age <= ReceiptTTL
+}
+
+// takeMu makes TakeReceipt consume each receipt once. Only the daemon takes
+// receipts, and each profile's daemon its own keys (ArgsKey holds the
+// profile): a lock in the process is enough, where Windows file renames and
+// deletes racing on one file can all report success.
+var takeMu sync.Mutex
+
+// TakeReceipt consumes the receipt stored under key: only one caller ever
+// gets it, and it is gone afterwards. A missing, expired, future or
+// unreadable receipt is ErrNoReceipt; a receipt it cannot delete is an error.
+func TakeReceipt(hooksDir, key string, now time.Time) (Receipt, error) {
+	path, err := receiptPath(hooksDir, key)
+	if err != nil {
+		return Receipt{}, err
+	}
+	takeMu.Lock()
+	defer takeMu.Unlock()
+	PruneReceipts(hooksDir, now)
+	b, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return Receipt{}, ErrNoReceipt
+	}
+	if err != nil {
+		return Receipt{}, err
+	}
+	if err := os.Remove(path); err != nil {
+		return Receipt{}, err
+	}
+	var r Receipt
+	if len(b) > 1<<20 || json.Unmarshal(b, &r) != nil || !fresh(r.At, now) {
+		return Receipt{}, ErrNoReceipt
+	}
+	return r, nil
+}
+
+// PruneReceipts deletes receipts that expired or cannot be read, and files
+// left behind by an interrupted write.
+func PruneReceipts(hooksDir string, now time.Time) {
+	dir := ReceiptDir(hooksDir)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		p := filepath.Join(dir, e.Name())
+		if e.IsDir() {
+			continue
+		}
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			if info, err := e.Info(); err == nil && now.Sub(info.ModTime()) > ReceiptTTL {
+				_ = os.Remove(p)
+			}
+			continue
+		}
+		var r Receipt
+		b, err := os.ReadFile(p)
+		if err != nil || len(b) > 1<<20 || json.Unmarshal(b, &r) != nil || !fresh(r.At, now) {
+			_ = os.Remove(p)
+		}
+	}
+}
