@@ -111,18 +111,25 @@ func (s *Server) getMedia(ctx context.Context, _ *mcp.CallToolRequest, in getMed
 	if err != nil {
 		return nil, err
 	}
+	chat, chatFound, err := store.ChatByID(ctx, s.DB, msg.ChatID)
+	if err != nil {
+		return nil, err
+	}
 	j := res.Job
 	w := newWrapper(s.now())
+	bw := w.inner()
 	full := detailed(in.ResponseFormat)
 
-	var b strings.Builder
-	b.WriteString(fresh + "\n")
+	// rows go into one block: the header, caption, ids, path and transcript.
+	// notes follow it: server text saying what to do next, with any sender
+	// text in it wrapped on its own.
+	var rows, notes []string
 	parts := []string{messageID(id) + " " + msg.Kind}
 	if j.Duration > 0 {
 		parts = append(parts, fmt.Sprintf("%d:%02d", j.Duration/60, j.Duration%60))
 	}
 	if j.Filename != "" {
-		parts = append(parts, w.wrap(j.Filename))
+		parts = append(parts, bw.wrap(j.Filename))
 	}
 	if mt := safeMime(j.Mimetype); mt != "" {
 		parts = append(parts, mt)
@@ -130,39 +137,41 @@ func (s *Server) getMedia(ctx context.Context, _ *mcp.CallToolRequest, in getMed
 	if sz := humanSize(j.Size); sz != "" {
 		parts = append(parts, sz)
 	}
-	parts = append(parts, "from "+w.sender(&msg))
-	if chat, ok, err := store.ChatByID(ctx, s.DB, msg.ChatID); err == nil && ok {
-		parts = append(parts, fmt.Sprintf("in %s %s", chatID(chat.ID), w.chatName(&chat)))
+	// In a DM the counterpart's name is the chat's: "from" names only me.
+	if !chatFound || chat.Kind != "dm" || msg.FromMe || msg.Sender == nil || chat.Person == nil || msg.Sender.ID != chat.Person.ID {
+		parts = append(parts, "from "+bw.sender(&msg))
+	}
+	if chatFound {
+		parts = append(parts, fmt.Sprintf("in %s %s", chatID(chat.ID), bw.chatName(&chat)))
 	}
 	parts = append(parts, w.ts(msg.TS))
-	b.WriteString(strings.Join(parts, " · ") + "\n")
+	rows = append(rows, strings.Join(parts, " · "))
 	if msg.Text != "" {
-		b.WriteString("Caption: " + w.wrap(clip(msg.Text, 800)) + "\n")
+		rows = append(rows, "Caption: "+bw.wrap(clip(msg.Text, 800)))
 	}
 	if full {
-		fmt.Fprintf(&b, "WhatsApp id %s, media row %d, state %s, %d download attempts", w.waID(j.WAID), j.MediaID, j.State, j.Attempts)
+		ids := fmt.Sprintf("WhatsApp id %s, media row %d, state %s, %d download attempts", bw.waID(j.WAID), j.MediaID, j.State, j.Attempts)
 		if len(j.SHA256) > 0 {
-			fmt.Fprintf(&b, ", sha256 %s", hex.EncodeToString(j.SHA256))
+			ids += ", sha256 " + hex.EncodeToString(j.SHA256)
 		}
-		b.WriteString("\n")
+		rows = append(rows, ids)
 	}
 
-	// The file.
+	// The file. Its path holds the file name the sender chose.
 	switch {
 	case res.Path != "":
-		// The file name part comes from the sender.
-		fmt.Fprintf(&b, "File: %s\n", w.wrap(res.Path))
+		rows = append(rows, "File: "+bw.wrap(res.Path))
 	case res.Downloading:
-		fmt.Fprintf(&b, "File: downloading; call again in about %d s.\n", max(5, int(res.RetryIn.Seconds())))
+		notes = append(notes, fmt.Sprintf("File: downloading; call again in about %d s.", max(5, int(res.RetryIn.Seconds()))))
 	default:
-		b.WriteString("File: " + fileProblem(w, j, res.DownloadErr) + "\n")
+		notes = append(notes, "File: "+fileProblem(w, j, res.DownloadErr))
 	}
 
 	// The transcript.
 	if audio && mode != "path" {
 		switch {
 		case j.HasTranscript && j.Transcript == "":
-			b.WriteString("Transcript: no speech detected.\n")
+			notes = append(notes, "Transcript: no speech detected.")
 		case j.HasTranscript:
 			label := "Transcript"
 			if full {
@@ -172,19 +181,23 @@ func (s *Server) getMedia(ctx context.Context, _ *mcp.CallToolRequest, in getMed
 				}
 				label += ")"
 			}
-			b.WriteString(label + ": " + w.wrap(j.Transcript) + "\n")
+			rows = append(rows, label+": "+bw.wrap(j.Transcript))
 		case res.Transcribing:
-			fmt.Fprintf(&b, "Transcript: transcribing; call again in about %d s with mode=transcript.\n", max(5, int(res.RetryIn.Seconds())))
+			notes = append(notes, fmt.Sprintf("Transcript: transcribing; call again in about %d s with mode=transcript.", max(5, int(res.RetryIn.Seconds()))))
 		case res.Path == "":
 		case res.TranscriptErr != nil:
 			// Tool errors can quote the file name, which the sender chose.
-			b.WriteString("Transcript: not available - " + w.wrap(res.TranscriptErr.Error()) + "\n")
+			notes = append(notes, "Transcript: not available - "+w.wrap(res.TranscriptErr.Error()))
 		case j.TranscriptError != "":
-			b.WriteString("Transcript: failed - " + w.wrap(j.TranscriptError) + "\n")
+			notes = append(notes, "Transcript: failed - "+w.wrap(j.TranscriptError))
 		}
 	}
 
-	result := textResult(strings.TrimRight(b.String(), "\n"))
+	text := fresh + "\n" + w.block(rows)
+	for _, n := range notes {
+		text += "\n" + n
+	}
+	result := textResult(text)
 	// Small pictures inline, so Claude sees them without opening the file.
 	if mode == "auto" && res.Path != "" && (msg.Kind == "image" || msg.Kind == "sticker") {
 		if pic, ok := inlineImage(res.Path); ok {

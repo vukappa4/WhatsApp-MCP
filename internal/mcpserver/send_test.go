@@ -604,8 +604,8 @@ func TestSentFileServedFromMediaFolder(t *testing.T) {
 	served := func(id string) []byte {
 		t.Helper()
 		text, isErr := call(t, e.cs, toolGetMedia, map[string]any{"message": id, "mode": "path"})
-		file := regexp.MustCompile(`File: <untrusted_wa n=\w+>(.+?)</untrusted_wa`).FindStringSubmatch(text)
-		if isErr || file == nil {
+		file := regexp.MustCompile(`(?m)^File: ("(?:[^"\\]|\\.)*")$`).FindStringSubmatch(text)
+		if isErr || file == nil || json.Unmarshal([]byte(file[1]), &file[1]) != nil {
 			t.Fatalf("get_media %s:\n%s", id, text)
 		}
 		if rel, err := filepath.Rel(root, file[1]); err != nil || !filepath.IsLocal(rel) {
