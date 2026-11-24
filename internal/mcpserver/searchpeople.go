@@ -230,17 +230,19 @@ func (s *Server) resolvePerson(ctx context.Context, arg, param string) (*store.P
 	return nil, b.String(), nil
 }
 
-// nameSource says where the display name comes from.
+// nameSource says whether the person is a saved contact and where the
+// display name comes from where the name's form does not say it: a plain name
+// is from the address book, a ~Name from their WhatsApp profile.
 func nameSource(c *store.PersonCandidate) string {
 	switch {
 	case c.IsMe:
 		return "the account owner"
 	case c.Source == people.SourceFullName || c.Source == people.SourceFirstName:
-		return "saved contact, name from the address book"
+		return "saved"
 	case c.Source == people.SourceBusinessName:
 		return "not saved, name from their WhatsApp business profile"
 	case c.Source == people.SourcePushName:
-		return "not saved, name from their WhatsApp profile"
+		return "not saved"
 	case c.Source == people.SourcePhone:
 		return "not saved, no name known"
 	}

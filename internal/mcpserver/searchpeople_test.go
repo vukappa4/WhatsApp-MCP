@@ -88,7 +88,7 @@ func TestSearchPeople(t *testing.T) {
 	if got := ids(blockIDs, text); len(got) != 2 || !strings.HasPrefix(got[0], "p_") || !strings.HasPrefix(got[1], "p_") {
 		t.Fatalf("person ids = %v:\n%s", got, text)
 	}
-	for _, want := range []string{"~Marco (+39 333 111 1111)", "~Marco (+39 333 222 2222)", "not saved, name from their WhatsApp profile",
+	for _, want := range []string{"~Marco (+39 333 111 1111) · not saved\n", "~Marco (+39 333 222 2222) · not saved\n",
 		"DM (", `"Calcetto" group`, "last interaction: 12 Oct 12:00 in c_"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("people result lacks %q:\n%s", want, text)
@@ -108,7 +108,7 @@ func TestSearchPeople(t *testing.T) {
 			}
 			continue
 		}
-		if isErr || !strings.Contains(text, "Niccolò D'Amico (+39 333 555 5555) · saved contact, name from the address book") {
+		if isErr || !strings.Contains(text, "Niccolò D'Amico (+39 333 555 5555) · saved\n") {
 			t.Fatalf("query %q:\n%s", q, text)
 		}
 	}
