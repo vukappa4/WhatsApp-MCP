@@ -83,7 +83,7 @@ func TestFindRun(t *testing.T) {
 	f.write(filepath.Join(f.org, "local_other.json"), `not json at all`, time.Time{})
 
 	r, err := FindRun(ctx, []string{f.root}, "cli-1")
-	if err != nil || r.TaskID != "follow-up" || r.SessionID != "local_a" || r.Dir != f.org || r.PermissionMode != "default" {
+	if err != nil || r.TaskID != "follow-up" || r.SessionID != "local_a" || r.Dir != f.org {
 		t.Fatalf("match: %+v %v", r, err)
 	}
 	if r, err := FindRun(ctx, []string{f.root}, "cli-2"); err != nil || r.TaskID != "" {

@@ -75,9 +75,10 @@ func autosendProfile(server string) (string, bool) {
 //     UserPromptSubmit hook has seen a prompt after the first, which is the
 //     task's SKILL.md (scheduledPrompt). With nobody present, whatever
 //     Desktop's file says about the run:
-//  4. a whatsapp_send_message of a task that is approved, unchanged since,
-//     in a mode that shows prompts, to an approved chat, less than
-//     autosend.MaxPerDay times a day: allow, once the autosend log holds it;
+//  4. a whatsapp_send_message, in a call whose own permission mode shows
+//     prompts, of a task that is approved, unchanged since, in a mode that
+//     shows prompts, to an approved chat, less than autosend.MaxPerDay times
+//     a day: allow, once the autosend log holds it;
 //  5. anything else: deny, with a reason Claude can act on. Nobody is there
 //     to answer an ask, and Desktop can store a task's answer to an ask and
 //     replay it, past the chat check and the brake; a deny is never stored.
@@ -291,6 +292,11 @@ func lookupRun(in toolInput, server, tool string, env PreToolEnv) lookup {
 	if tool != sendTool {
 		return lookup{unattended: true}
 	}
+	// The mode Claude Code reports for this very call: settings the gate does
+	// not read, such as managed ones, can override the task's.
+	if why := autosend.ModeProblem("this run", in.PermissionMode); why != "" {
+		return lookup{unattended: true, why: why}
+	}
 	run, runErr := waitForRun(env.DesktopRoots, in.SessionID, env.RunWait)
 	ctx, cancel := context.WithTimeout(context.Background(), PreToolBudget)
 	defer cancel()
@@ -370,9 +376,6 @@ func autosendCheck(ctx context.Context, in toolInput, server string, env PreTool
 		return "cannot find this run in Claude Desktop's files (" + errText(runErr) + ")"
 	case run.TaskID == "":
 		return "this run names no scheduled task"
-	case run.PermissionMode != "" && !autosend.PromptMode(run.PermissionMode):
-		// An empty one: Desktop's file did not record it, and the task's mode, checked below, applies.
-		return autosend.ModeProblem("the run", run.PermissionMode)
 	}
 	args, err := strictSendArgs(in.ToolInput)
 	if err != nil {

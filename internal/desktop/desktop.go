@@ -198,11 +198,10 @@ func (t Task) Schedule() string {
 // lags a person's typing by seconds, and "Run now" sets it with nobody
 // typing. Whether a person is present is the UserPromptSubmit hook's call.
 type Run struct {
-	SessionID      string `json:"sessionId"`
-	CLISessionID   string `json:"cliSessionId"`
-	TaskID         string `json:"scheduledTaskId"`
-	PermissionMode string `json:"permissionMode"`
-	Dir            string `json:"-"` // the account/org folder it was read from
+	SessionID    string `json:"sessionId"`
+	CLISessionID string `json:"cliSessionId"`
+	TaskID       string `json:"scheduledTaskId"`
+	Dir          string `json:"-"` // the account/org folder it was read from
 }
 
 // readCapped reads at most limit bytes of path; tooBig is set when the
@@ -382,7 +381,7 @@ func unreadable(dir string, raw json.RawMessage, err error) Unreadable {
 // would match it where Desktop's JavaScript reads another value.
 var (
 	taskKeys = []string{"id", "displayName", "filePath", "cronExpression", "cronHumanReadable", "fireAt", "enabled", "cwd", "permissionMode"}
-	runKeys  = []string{"sessionId", "cliSessionId", "scheduledTaskId", "permissionMode"}
+	runKeys  = []string{"sessionId", "cliSessionId", "scheduledTaskId"}
 )
 
 // exactKeys checks the keys of the JSON object raw: each of fields at most

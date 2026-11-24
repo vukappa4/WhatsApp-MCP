@@ -226,7 +226,7 @@ func TestAutosendHookEndToEnd(t *testing.T) {
 			`"permissionMode":"auto","permissionModeCarried":true,"madeByClaude":true,"promptWrittenBy":["unknown"],` +
 			`"promptFileHash":"x.y","changedByClaudeAt":1795551143679}],"recordedSkips":{},"sundayAliasBoundaryStamped":true}`,
 		filepath.Join(org, "local_run.json"): `{"sessionId":"local_run","cliSessionId":"sched-1","scheduledTaskId":"invoice-follow-up",` +
-			`"scheduledRunContinued":false,"permissionMode":"default"}`,
+			`"scheduledRunContinued":false,"permissionMode":"auto"}`,
 	}
 	for p, s := range files {
 		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
@@ -263,7 +263,7 @@ func TestAutosendHookEndToEnd(t *testing.T) {
 		t.Fatalf("the scheduled prompt left a flag: %v", err)
 	}
 	out := hook("pre-tool", map[string]any{"session_id": "sched-1", "hook_event_name": "PreToolUse", "tool_name": "mcp__whatsapp__whatsapp_send_message",
-		"tool_input": map[string]any{"to": "c_5", "text": "Ciao Marco, è arrivata la fattura?"}, "tool_use_id": "toolu_1", "permission_mode": "default"})
+		"tool_input": map[string]any{"to": "c_5", "text": "Ciao Marco, è arrivata la fattura?"}, "tool_use_id": "toolu_1", "permission_mode": "auto"})
 	var dec struct {
 		HookSpecificOutput map[string]string `json:"hookSpecificOutput"`
 	}
@@ -280,10 +280,16 @@ func TestAutosendHookEndToEnd(t *testing.T) {
 		t.Fatalf("autosend log: %q", b)
 	}
 	out = hook("pre-tool", map[string]any{"session_id": "sched-1", "hook_event_name": "PreToolUse", "tool_name": "mcp__whatsapp__whatsapp_send_message",
-		"tool_input": map[string]any{"to": "+39 333 999 9999", "text": "x"}, "tool_use_id": "toolu_2"})
+		"tool_input": map[string]any{"to": "+39 333 999 9999", "text": "x"}, "tool_use_id": "toolu_2", "permission_mode": "auto"})
 	// Another recipient in the same run is denied: nobody is there to confirm it.
 	if !strings.Contains(out, `"deny"`) || !strings.Contains(out, "(to must be an approved c_N or p_N id, not +39 333 999 9999). Do not retry") {
 		t.Fatalf("unapproved recipient: %q", out)
+	}
+	// So is the approved chat once the call's own mode skips prompts.
+	out = hook("pre-tool", map[string]any{"session_id": "sched-1", "hook_event_name": "PreToolUse", "tool_name": "mcp__whatsapp__whatsapp_send_message",
+		"tool_input": map[string]any{"to": "c_5", "text": "x"}, "tool_use_id": "toolu_3", "permission_mode": "bypassPermissions"})
+	if !strings.Contains(out, `"deny"`) || !strings.Contains(out, "this run's permission mode is bypassPermissions") {
+		t.Fatalf("bypass call: %q", out)
 	}
 }
 

@@ -262,6 +262,12 @@ func TestAutosendAllowsApprovedChats(t *testing.T) {
 	if kind, r := a.call(a.env(true), "sched-1", send, map[string]any{"to": "c_1", "text": "x", "reply_to": "m_1", "idempotency_key": "k"}); kind != allow {
 		t.Errorf("all arguments: %s %q", kind, r)
 	}
+	// Every mode that shows prompts autosends.
+	for _, mode := range []string{"acceptEdits", "plan", "auto"} {
+		if kind, r := a.callMode(a.env(true), mode, "sched-1", send, map[string]any{"to": "c_1", "text": "x"}); kind != allow {
+			t.Errorf("mode %s: %s %q", mode, kind, r)
+		}
+	}
 }
 
 // In an unattended run, anything short of an approved, unchanged task sending to an approved chat
@@ -269,7 +275,7 @@ func TestAutosendAllowsApprovedChats(t *testing.T) {
 func TestAutosendFallbacksDeny(t *testing.T) {
 	type tc struct {
 		name, session, to string
-		tool              string
+		tool, mode        string // mode "" is default, "none" sends none
 		args              any
 		setup             func(a *auto)
 		why               string
@@ -327,14 +333,12 @@ func TestAutosendFallbacksDeny(t *testing.T) {
 				a.userSettings(`{"permissions": {"defaultMode": "default"}}`)
 				a.projectSettings("settings.json", `{"permissions": `)
 			}},
-		{name: "run in an unknown mode", session: "sched-new", to: "c_1", why: "the run's permission mode is yolo",
-			setup: func(a *auto) {
-				a.writeRun("sched-new", map[string]any{"scheduledTaskId": "follow-up", "permissionMode": "yolo"})
-			}},
-		{name: "run in dontAsk", session: "sched-dontask", to: "c_1", why: "the run's permission mode is dontAsk",
-			setup: func(a *auto) {
-				a.writeRun("sched-dontask", map[string]any{"scheduledTaskId": "follow-up", "permissionMode": "dontAsk"})
-			}},
+		// The call's own mode decides, whatever the task and Desktop's run file say.
+		{name: "call in bypassPermissions", session: "sched-1", to: "c_1", mode: "bypassPermissions",
+			why: "this run's permission mode is bypassPermissions"},
+		{name: "call in dontAsk", session: "sched-1", to: "c_1", mode: "dontAsk", why: "this run's permission mode is dontAsk"},
+		{name: "call in an unknown mode", session: "sched-1", to: "c_1", mode: "yolo", why: "this run's permission mode is yolo"},
+		{name: "call without a mode", session: "sched-1", to: "c_1", mode: "none", why: "this run has no permission mode"},
 		{name: "folder edited", session: "sched-1", to: "c_1", why: "changed since it was approved",
 			setup: func(a *auto) { a.task["cwd"] = filepath.Join(a.root, "elsewhere"); a.writeTasks() }},
 		{name: "SKILL.md moved", session: "sched-1", to: "c_1", why: "changed since it was approved",
@@ -363,10 +367,6 @@ func TestAutosendFallbacksDeny(t *testing.T) {
 			}},
 		{name: "two LIDs", session: "sched-1", to: "p_1", why: "p_1 holds 2 WhatsApp accounts (LIDs)",
 			setup: func(a *auto) { a.exec(`INSERT INTO jids(jid, person_id, kind) VALUES ('987@lid', 1, 'lid')`) }},
-		{name: "run bypasses permissions", session: "sched-bypass", to: "c_1", why: "the run's permission mode is bypassPermissions",
-			setup: func(a *auto) {
-				a.writeRun("sched-bypass", map[string]any{"scheduledTaskId": "follow-up", "permissionMode": "bypassPermissions"})
-			}},
 		{name: "audit log fails", session: "sched-1", to: "c_1", why: "cannot write the autosend log",
 			setup: func(a *auto) {
 				a.write(filepath.Join(a.root, "prod", "logs", autosend.LogName), nil)
@@ -385,8 +385,15 @@ func TestAutosendFallbacksDeny(t *testing.T) {
 			if args == nil {
 				args = map[string]any{"to": c.to, "text": "Ciao"}
 			}
+			mode := c.mode
+			switch mode {
+			case "":
+				mode = "default"
+			case "none":
+				mode = ""
+			}
 			before := len(a.auditLines())
-			kind, r := a.callMode(a.env(true), "default", c.session, tool, args)
+			kind, r := a.callMode(a.env(true), mode, c.session, tool, args)
 			if kind != deny || !strings.HasPrefix(r, "WhatsApp: this scheduled run has nobody present and is not approved for this send to ") ||
 				!strings.Contains(r, c.why) || !strings.HasSuffix(r, "). Do not retry; tell the user in your final message.") {
 				t.Fatalf("%s %q, want deny with %q", kind, r, c.why)
