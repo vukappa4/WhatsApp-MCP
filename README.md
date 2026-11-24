@@ -8,8 +8,20 @@ Ask Claude things like "what did Marco say about Friday?", "summarize the family
 
 - **Reads everything you see in the app**: chats, groups, people, replies, edits, reactions, photos, documents, and voice notes as text (transcribed on your computer).
 - **Searches** messages, people and chats across your whole history, including the history the phone sends when you link it.
-- **Sends messages and files only when you ask.** A Claude Code hook checks every send against your own last message: it passes silently only when you asked to send to that person, otherwise Claude Code asks you to confirm. Text Claude reads in a message cannot authorize a send by itself.
+- **Sends messages and files only when you ask.** A Claude Code hook checks every send against your own last message: it passes silently only when you asked to send to that person, otherwise Claude Code asks you to confirm. Text Claude reads in a message cannot authorize a send by itself. The one exception: a Claude Desktop scheduled task you approve sends text messages to the chats you approved for it ([Scheduled follow-ups](#scheduled-follow-ups)).
 - **Always says how fresh the data is**: every answer starts with the connection state, so stale data is never shown as current.
+
+## Scheduled follow-ups
+
+Claude Desktop runs Claude Code tasks on a schedule. One such task can send WhatsApp text messages with nobody at the computer, to chats you approve:
+
+1. In a Claude Code session in Claude Desktop, ask for it, like "every weekday at 9 ask Marco whether the invoice arrived". Claude creates the scheduled task, then calls `whatsapp_send_autosend_allow` with the task and the chats.
+2. Claude Code asks you to confirm, showing the task, its schedule and permission mode, the start of its prompt and the chats with their numbers. Approve only if you asked for it.
+3. From then on, runs of that task send text messages to those chats without asking. Anything else the task does on WhatsApp (another chat, a file, a history request) asks. A run you start by hand asks as usual.
+
+The approval lasts until you revoke it (ask Claude: it calls `whatsapp_send_autosend_revoke`) or until the task's prompt, schedule or permission mode changes; then approve it again. Approving again replaces the chats. A scheduled run can never approve itself, and a task in "bypass permissions" mode cannot be approved. `whatsapp_status` lists the approvals and whether each is active. Every such send is logged, without its text, in `autosend.log` in the profile's logs folder (`%LOCALAPPDATA%\WhatsAppMCP\prod\logs\` on Windows, `~/Library/Application Support/WhatsAppMCP/prod/logs/` on macOS).
+
+Limits: only Claude Desktop's local scheduled tasks, on Windows and macOS, while the app is open and the computer awake. Autosend needs the program the hooks run at this version or later: prod's when it is installed, so update prod. Never use it for bulk or unsolicited messages.
 
 ## Install
 

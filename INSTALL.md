@@ -200,6 +200,7 @@ It compares the installed program's version with the latest release, downloads t
 - `update` makes one call to GitHub's API. GitHub allows 60 calls an hour per network without login: past that, `update` says when to try again, or download the release by hand as in step 2 and run its `install`. Behind a proxy, set `HTTPS_PROXY`.
 - `update` works on the installed profile, whose daemon always uses the profile's own data folder: it refuses `--data-dir`.
 - On macOS, `update` ends with a reminder: a Full Disk Access entry for the program stops applying after an update. If the user had added one (step 7), they remove it, add it again, then run `install` with the installed program, as [Long commands](#long-commands) says.
+- Scheduled follow-ups (README) need the program the hooks run at this version or later. The hooks run prod's installed program: update prod. No other step.
 - `update` never changes the Claude Code settings. When they are older than the program, `install` prints `Claude Code settings in <folder> are older than this version: run ...`. Only then, run `setup-claude` again as in step 5, once for every Claude config folder the user uses, and tell the user to restart Claude Code.
 
 ### Move from a source install
