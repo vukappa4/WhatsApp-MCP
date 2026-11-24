@@ -363,13 +363,14 @@ func parseID(s, prefix string) (int64, bool) {
 	return n, err == nil && n > 0
 }
 
-// cursor is the opaque paging state. Tool binds it to the tool that issued it.
+// cursor is the opaque paging state. Tool binds it to the tool that issued
+// it; the JSON carries the tool as its code in cursorCodes.
 type cursor struct {
-	Tool   string `json:"t"`
+	Tool   string `json:"-"`
 	Chat   int64  `json:"c,omitempty"`
 	Newer  bool   `json:"n,omitempty"`
-	TS     int64  `json:"ts"`
-	ID     int64  `json:"id"`
+	TS     int64  `json:"ts,omitempty"`
+	ID     int64  `json:"id,omitempty"`
 	After  int64  `json:"a,omitempty"`
 	Before int64  `json:"b,omitempty"`
 	Kind   string `json:"k,omitempty"`
@@ -383,22 +384,49 @@ type cursor struct {
 	Off    int    `json:"o,omitempty"`
 }
 
+// cursorCodes is the one-letter code of each tool that pages with a cursor.
+var cursorCodes = map[string]string{
+	toolListChats:      "l",
+	toolReadChat:       "r",
+	toolSearchPeople:   "p",
+	toolSearchMessages: "s",
+}
+
+// wireCursor is a cursor as JSON: the tool code, then the paging state.
+type wireCursor struct {
+	Code string `json:"t"`
+	cursor
+}
+
 func (c cursor) encode() string {
-	b, _ := json.Marshal(c)
+	code, ok := cursorCodes[c.Tool]
+	if !ok {
+		panic("cursor for a tool without a code: " + c.Tool)
+	}
+	b, _ := json.Marshal(wireCursor{code, c})
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
 func decodeCursor(s, tool string) (cursor, error) {
-	var c cursor
+	var w wireCursor
 	b, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(s))
 	if err == nil {
-		err = json.Unmarshal(b, &c)
+		err = json.Unmarshal(b, &w)
 	}
-	if err == nil && c.Off < 0 {
+	if err == nil && w.Off < 0 {
 		err = errors.New("negative offset") // a forged cursor; a negative slice bound panics the daemon
 	}
 	if err != nil {
-		return c, errors.New("invalid cursor: pass back the cursor string exactly as returned")
+		return w.cursor, errors.New("invalid cursor: pass back the cursor string exactly as returned")
+	}
+	c := w.cursor
+	for t, code := range cursorCodes {
+		if code == w.Code {
+			c.Tool = t
+		}
+	}
+	if c.Tool == "" {
+		return c, fmt.Errorf("invalid cursor: unknown tool code %q; pass back the cursor string exactly as returned", w.Code)
 	}
 	if c.Tool != tool {
 		return c, fmt.Errorf("this cursor belongs to %s, not %s", c.Tool, tool)

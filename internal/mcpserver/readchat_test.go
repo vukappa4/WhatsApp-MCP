@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -245,4 +246,30 @@ func TestReadChatCursorsAfterBudget(t *testing.T) {
 		t.Fatal("no page was cut to the budget")
 	}
 	c.covered(1, 2, 3)
+}
+
+// A cursor's JSON names its tool by a one-letter code and leaves zero fields
+// out; a code no tool owns is refused.
+func TestCursorEncoding(t *testing.T) {
+	for tool := range cursorCodes {
+		c := cursor{Tool: tool, Query: "marco", Off: 10}
+		got, err := decodeCursor(c.encode(), tool)
+		if err != nil || got != c {
+			t.Fatalf("%s: round trip %+v, %v; want %+v", tool, got, err, c)
+		}
+	}
+	b, _ := base64.RawURLEncoding.DecodeString(cursor{Tool: toolSearchPeople, Query: "marco", Off: 10}.encode())
+	if string(b) != `{"t":"p","q":"marco","o":10}` {
+		t.Fatalf("cursor JSON %s", b)
+	}
+	if _, err := decodeCursor(cursor{Tool: toolReadChat, Chat: 1, TS: 5, ID: 7}.encode(), toolListChats); err == nil ||
+		!strings.Contains(err.Error(), "belongs to "+toolReadChat) {
+		t.Fatalf("cursor of another tool: %v", err)
+	}
+	for _, raw := range []string{`{"t":"x","ts":5,"id":7}`, `{"ts":5,"id":7}`, `{"t":"whatsapp_read_chat","ts":5,"id":7}`} {
+		if _, err := decodeCursor(base64.RawURLEncoding.EncodeToString([]byte(raw)), toolReadChat); err == nil ||
+			!strings.Contains(err.Error(), "invalid cursor: unknown tool code") {
+			t.Fatalf("%s: %v", raw, err)
+		}
+	}
 }
