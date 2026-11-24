@@ -37,8 +37,9 @@ func decodeInput(r io.Reader, v any) (raw []byte, err error) {
 const FlagTTL = 2 * time.Hour
 
 // PreToolBudget bounds each lookup of the PreToolUse hook: past it the hook
-// asks. The registered timeout (30 s) is well above the hook's worst case:
-// up to 12 s waiting for a scheduled run's file, then two budgets.
+// asks, or in a scheduled run with nobody present denies. The wait for a
+// scheduled run's file (RunWaitFor) leaves the hook's worst case at least
+// 3 s under its registered timeout.
 const PreToolBudget = 4 * time.Second
 
 // PreToolMatcher is the PreToolUse matcher registered for the gate: the send
@@ -140,7 +141,7 @@ func UserPrompt(stdin io.Reader, dir string, now time.Time, opts PromptOptions) 
 		return errors.New("hook input has no session_id")
 	}
 	path := flagPath(dir, in.SessionID)
-	if opts.Scheduled && firstScheduledPrompt(dir, in.SessionID, now) {
+	if opts.Scheduled && scheduledPrompt(dir, in.SessionID, now) {
 		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
@@ -241,24 +242,26 @@ type preToolOutput struct {
 
 // PreToolEnv is what the PreToolUse hook reads besides its input.
 type PreToolEnv struct {
-	Dir          string    // flag directory, holding the autosend receipts too
-	Now          time.Time // the current time
-	Resolver     Resolver  // maps a tool's recipient to the names it is known by
-	Scheduled    bool      // CLAUDE_CODE_HOST_SCHEDULED_RUN=1: Claude Desktop started this session for a scheduled task
-	DesktopRoots []string  // desktop.Roots
-	AppDir       string    // config.AppDir: <AppDir>/<profile> holds data.db and logs/autosend.log
+	Dir          string        // flag directory, holding the autosend receipts too
+	Now          time.Time     // the current time
+	Resolver     Resolver      // maps a tool's recipient to the names it is known by
+	Scheduled    bool          // CLAUDE_CODE_HOST_SCHEDULED_RUN=1: Claude Desktop started this session for a scheduled task
+	DesktopRoots []string      // desktop.Roots
+	AppDir       string        // config.AppDir: <AppDir>/<profile> holds data.db and logs/autosend.log
+	RunWait      time.Duration // how long to wait for Desktop to save a scheduled run's file (RunWaitFor)
 }
 
-// PreTool handles PreToolUse for the gated tools. It stays silent (Claude
-// Code's normal permission flow decides) only when the user's last prompt
-// asked to send, named the recipient and, for a file, mentioned it;
-// otherwise it prints an "ask" decision naming what to confirm. Input it
-// cannot read, a missing or stale flag, a recipient it cannot resolve and a
-// check that overruns PreToolBudget all ask: the gate fails closed. It
-// answers "allow" only for revoking an autosend approval and for a text
-// message an approved Desktop scheduled task sends to an approved chat
-// (see decide), and "deny" for an autosend approval it cannot show the user
-// and for any other call in a scheduled run with nobody present.
+// PreTool handles PreToolUse for the gated tools. In a session with a
+// person, it stays silent (Claude Code's normal permission flow decides)
+// only when the user's last prompt asked to send, named the recipient and,
+// for a file, mentioned it; otherwise it prints an "ask" decision naming
+// what to confirm. Input it cannot read, a missing or stale flag, a
+// recipient it cannot resolve and a check that overruns PreToolBudget all
+// ask: the gate fails closed. In a Desktop scheduled run with nobody
+// present it answers "allow" for a text message an approved task sends to
+// an approved chat and "deny" for everything else (see decide). It also
+// answers "allow" for revoking an autosend approval, and "deny" for an
+// autosend approval it cannot show the user.
 func PreTool(stdin io.Reader, stdout io.Writer, env PreToolEnv) error {
 	var in toolInput
 	_, err := decodeInput(stdin, &in)

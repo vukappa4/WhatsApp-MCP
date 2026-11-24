@@ -83,13 +83,13 @@ func TestFindRun(t *testing.T) {
 	f.write(filepath.Join(f.org, "local_other.json"), `not json at all`, time.Time{})
 
 	r, err := FindRun(ctx, []string{f.root}, "cli-1")
-	if err != nil || r.TaskID != "follow-up" || r.Continued || r.SessionID != "local_a" || r.Dir != f.org || r.PermissionMode != "default" {
+	if err != nil || r.TaskID != "follow-up" || r.SessionID != "local_a" || r.Dir != f.org || r.PermissionMode != "default" {
 		t.Fatalf("match: %+v %v", r, err)
 	}
 	if r, err := FindRun(ctx, []string{f.root}, "cli-2"); err != nil || r.TaskID != "" {
 		t.Fatalf("no task id: %+v %v", r, err)
 	}
-	if r, err := FindRun(ctx, []string{f.root}, "cli-3"); err != nil || !r.Continued {
+	if r, err := FindRun(ctx, []string{f.root}, "cli-3"); err != nil || r.SessionID != "local_c" {
 		t.Fatalf("continued: %+v %v", r, err)
 	}
 	if _, err := FindRun(ctx, []string{f.root}, "cli-404"); !errors.Is(err, ErrNotFound) {
@@ -514,7 +514,7 @@ func TestRealDesktop(t *testing.T) {
 		if n++; n <= 5 {
 			start := time.Now()
 			got, err := FindRun(ctx, roots, r.CLISessionID)
-			t.Logf("scheduled run task=%s continued=%v: FindRun %s (%v, task %s)", r.TaskID, r.Continued, time.Since(start), err, got.TaskID)
+			t.Logf("scheduled run task=%s: FindRun %s (%v, task %s)", r.TaskID, time.Since(start), err, got.TaskID)
 		}
 	}
 }
@@ -552,7 +552,7 @@ func TestExactKeys(t *testing.T) {
 	if _, err := FindRun(ctx, roots, "cli-1"); err == nil || errors.Is(err, ErrNotFound) {
 		t.Errorf("cased run field: %v", err)
 	}
-	f.write(filepath.Join(f.org, "local_twice.json"), `{"cliSessionId": "cli-2", "scheduledRunContinued": false, "scheduledRunContinued": true}`, time.Time{})
+	f.write(filepath.Join(f.org, "local_twice.json"), `{"cliSessionId": "cli-2", "scheduledTaskId": "a", "scheduledTaskId": "follow-up"}`, time.Time{})
 	if _, err := FindRun(ctx, roots, "cli-2"); err == nil || !strings.Contains(err.Error(), "appears twice") {
 		t.Errorf("doubled run field: %v", err)
 	}

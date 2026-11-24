@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/vukappa4/whatsapp-mcp/internal/hooks"
 )
@@ -380,4 +381,53 @@ func setOrDrop(o *object, k string, l []any) {
 		return
 	}
 	o.set(k, l)
+}
+
+// GateTimeout reads the timeout of the PreToolUse gate registered in the
+// settings file at file: the hook entry whose args are "hook pre-tool", the
+// shortest when there are several. A file without one is an error.
+func GateTimeout(file string) (time.Duration, error) {
+	b, err := os.ReadFile(file)
+	if err != nil {
+		return 0, err
+	}
+	root, err := parseObject(b)
+	if err != nil {
+		return 0, err
+	}
+	hs, _ := root.vals["hooks"].(*object)
+	if hs == nil {
+		return 0, errors.New("no hooks")
+	}
+	groups, _ := hs.vals["PreToolUse"].([]any)
+	best := time.Duration(-1)
+	for _, g := range groups {
+		group, _ := g.(*object)
+		if group == nil {
+			continue
+		}
+		inner, _ := group.vals["hooks"].([]any)
+		for _, h := range inner {
+			o, _ := h.(*object)
+			if o == nil {
+				continue
+			}
+			args, _ := o.vals["args"].([]any)
+			if len(args) != 2 || args[0] != "hook" || args[1] != "pre-tool" {
+				continue
+			}
+			n, _ := o.vals["timeout"].(json.Number)
+			secs, err := n.Float64()
+			if err != nil || secs <= 0 {
+				continue
+			}
+			if d := time.Duration(secs * float64(time.Second)); best < 0 || d < best {
+				best = d
+			}
+		}
+	}
+	if best < 0 {
+		return 0, errors.New("no PreToolUse gate with a timeout")
+	}
+	return best, nil
 }

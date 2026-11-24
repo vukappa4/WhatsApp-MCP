@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vukappa4/whatsapp-mcp/internal/hooks"
 )
@@ -57,9 +58,13 @@ func TestRegisterFresh(t *testing.T) {
 			t.Errorf("hook %+v", h)
 		}
 	}
-	// The gate's worst case: the wait for a scheduled run's file, then two budgets.
-	if worst := 12 + 2*int(hooks.PreToolBudget.Seconds()); pre.Timeout < worst+5 {
-		t.Errorf("pre-tool timeout %d s, worst case %d s", pre.Timeout, worst)
+	// The gate reads its own timeout back and keeps the full wait for a
+	// scheduled run's file under it.
+	if got, err := GateTimeout(file); err != nil || got != time.Duration(pre.Timeout)*time.Second {
+		t.Errorf("GateTimeout %s %v, registered %d s", got, err, pre.Timeout)
+	}
+	if wait := hooks.RunWaitFor(time.Duration(pre.Timeout) * time.Second); wait != 12*time.Second {
+		t.Errorf("pre-tool timeout %d s leaves a %s wait", pre.Timeout, wait)
 	}
 	if strings.Join(up.Args, " ") != "hook user-prompt" || up.OnFailure == "block" {
 		t.Errorf("user-prompt hook %+v: a failure must not block the user's prompts", up)
@@ -395,5 +400,38 @@ func TestCheck(t *testing.T) {
 	}
 	if _, err := Check(file, exe, "whatsapp"); err == nil {
 		t.Fatal("invalid JSON accepted")
+	}
+}
+
+// GateTimeout reads the shortest timeout of the hook entries that run
+// "hook pre-tool", and fails when there is none to read.
+func TestGateTimeout(t *testing.T) {
+	dir := t.TempDir()
+	for name, tc := range map[string]struct {
+		body string
+		want time.Duration
+	}{
+		"older registration": {`{"hooks": {"PreToolUse": [{"matcher": "x", "hooks": [
+			{"type": "command", "command": "w", "args": ["hook", "pre-tool"], "timeout": 10}]}]}}`, 10 * time.Second},
+		"two profiles": {`{"hooks": {"PreToolUse": [
+			{"hooks": [{"type": "command", "command": "a", "args": ["hook", "pre-tool"], "timeout": 30}]},
+			{"hooks": [{"type": "command", "command": "b", "args": ["hook", "pre-tool"], "timeout": 20},
+				{"type": "command", "command": "c", "args": ["other"], "timeout": 1}]}]}}`, 20 * time.Second},
+		"no timeout":  {`{"hooks": {"PreToolUse": [{"hooks": [{"type": "command", "command": "w", "args": ["hook", "pre-tool"]}]}]}}`, -1},
+		"other hooks": {`{"hooks": {"PreToolUse": [{"hooks": [{"type": "command", "command": "w", "args": ["hook", "user-prompt"], "timeout": 5}]}]}}`, -1},
+		"no hooks":    {`{}`, -1},
+		"broken":      {`{"hooks": `, -1},
+	} {
+		file := filepath.Join(dir, strings.ReplaceAll(name, " ", "_")+".json")
+		if err := os.WriteFile(file, []byte(tc.body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := GateTimeout(file)
+		if tc.want < 0 && err == nil || tc.want >= 0 && (err != nil || got != tc.want) {
+			t.Errorf("%s: %s %v", name, got, err)
+		}
+	}
+	if _, err := GateTimeout(filepath.Join(dir, "missing.json")); err == nil {
+		t.Error("missing file read")
 	}
 }

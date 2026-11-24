@@ -65,30 +65,24 @@ func autosendProfile(server string) (string, bool) {
 	return "", false
 }
 
-// promptlessModes settle a confirmation without showing it to the user:
-// dontAsk denies it, unless a mod approves it, and bypassPermissions skips
-// prompts. An approval card needs a person to read it. Auto mode shows a
-// hook's "ask" to the user (the classifier does not decide it).
-var promptlessModes = map[string]bool{"bypassPermissions": true, "dontAsk": true}
-
 // decide answers one gated call:
 //
 //  1. Revoking an autosend approval only narrows what may be sent: allow.
 //  2. An autosend approval always shows the user a card (ask), or is denied
 //     when it cannot be shown truthfully (approvalCard). Never silent.
-//  3. Only in a session Claude Desktop started for a scheduled task
-//     (CLAUDE_CODE_HOST_SCHEDULED_RUN=1), it reads the Desktop session file,
-//     waiting up to runWait for Desktop to save it: the run is unattended
-//     unless the file shows a person opened it and wrote in it.
-//  4. A whatsapp_send_message in an unattended run whose task is approved,
-//     unchanged since, not in a promptless permission mode, and sends to an
-//     approved chat less than autosend.MaxPerDay times a day: allow, once
-//     the autosend log holds it.
-//  5. Any other call in an unattended run: deny, with a reason Claude can
-//     act on. Nobody is there to answer an ask, and Desktop can store a
-//     task's answer to an ask and replay it, past the chat check and the
-//     brake; a deny is never stored.
-//  6. Otherwise the user-prompt gate decides (askReason).
+//  3. In a session Claude Desktop started for a scheduled task
+//     (CLAUDE_CODE_HOST_SCHEDULED_RUN=1), a person is present once the
+//     UserPromptSubmit hook has seen a prompt after the first, which is the
+//     task's SKILL.md (scheduledPrompt). With nobody present, whatever
+//     Desktop's file says about the run:
+//  4. a whatsapp_send_message of a task that is approved, unchanged since,
+//     in a mode that shows prompts, to an approved chat, less than
+//     autosend.MaxPerDay times a day: allow, once the autosend log holds it;
+//  5. anything else: deny, with a reason Claude can act on. Nobody is there
+//     to answer an ask, and Desktop can store a task's answer to an ask and
+//     replay it, past the chat check and the brake; a deny is never stored.
+//  6. Otherwise, a person typed or the session is not a scheduled run: the
+//     user-prompt gate decides (askReason).
 //
 // Steps 1, 2 and 4 hold only for the exact server names setup-claude
 // registers. Nothing here turns an ask of the user-prompt gate into silence.
@@ -111,60 +105,131 @@ func decide(in toolInput, inputErr error, env PreToolEnv) decision {
 	switch {
 	case env.Scheduled && inputErr != nil:
 		l = lookup{unattended: true, why: "the hook could not read this call"}
-	case env.Scheduled:
+	case env.Scheduled && !personTyped(env.Dir, in.SessionID):
 		l = lookupRun(in, server, tool, env)
 	}
 	if a := l.allow; a != nil {
-		n, err := countAutosends(env, profile, a.taskID, a.jid)
-		switch {
-		case err != nil:
-			l.why = "cannot read the autosend log (" + errText(err) + ")"
-		case n >= autosend.MaxPerDay:
-			l.why = fmt.Sprintf("the task reached %d autosends to %s in 24 hours", autosend.MaxPerDay, display(a.label))
-		default:
-			if err := writeAudit(env, profile, in.SessionID, a); err != nil {
-				l.why = "cannot write the autosend log (" + errText(err) + ")"
-				break
-			}
+		l.label = a.label
+		if why := logAutosend(env, profile, in.SessionID, a); why != "" {
+			l.why = why
+		} else {
 			return decision{allow, fmt.Sprintf("WhatsApp autosend: task %s approved %s sends to %s.", display(a.taskName),
 				time.Unix(a.approvedAt, 0).Format("2006-01-02"), display(a.label))}
 		}
 	}
-	r, what := askReason(in, inputErr, env)
 	if l.unattended {
 		why := l.why
 		if why == "" {
 			why = "only " + sendTool + " to a chat approved for the task goes out with nobody present"
 		}
-		return decision{deny, "WhatsApp: this scheduled run has nobody present and is not approved for " + what + " (" +
-			displayN(why, 400) + "). Do not retry; tell the user in your final message."}
+		// No recipient lookup here: the deny must come within the hook's timeout.
+		return decision{deny, "WhatsApp: this scheduled run has nobody present and is not approved for " + callWhat(in, tool, l.label) +
+			" (" + displayN(why, 400) + "). Do not retry; tell the user in your final message."}
 	}
-	if r == "" {
-		return decision{}
+	if r, _ := askReason(in, inputErr, env); r != "" {
+		return decision{ask, r}
 	}
-	return decision{ask, r}
+	return decision{}
 }
 
-// runWait is how long the gate waits for Claude Desktop to save a
-// scheduled run's session file: Desktop writes it 3 s after its last
-// change, 9 s at most. runPoll is how often it looks. With PreToolBudget
-// for the autosend check and for the recipient lookup, the gate answers
-// well within the registered timeout (claudecode.PreToolTimeout).
-var (
-	runWait = 12 * time.Second
-	runPoll = 250 * time.Millisecond
+// callWhat names a call for a reason without looking anything up: the
+// label an approval stored for its recipient, else the recipient as given.
+func callWhat(in toolInput, tool, label string) string {
+	var args toolArgs
+	_ = json.Unmarshal(in.ToolInput, &args)
+	target := firstNonEmpty(label, args.To, args.Recipient)
+	if tool == "whatsapp_request_history" {
+		return "this history request for " + display(firstNonEmpty(label, args.Chat))
+	}
+	return "this send to " + display(target)
+}
+
+// logAutosend holds the autosend log's lock while it counts the task's
+// sends to the chat and appends this one, so two hooks at once cannot both
+// pass the brake. It returns why the send cannot go, "" once it is logged.
+func logAutosend(env PreToolEnv, profile, session string, a *autoSend) string {
+	path, err := auditPath(env, profile)
+	if err != nil {
+		return errText(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "cannot write the autosend log (" + errText(err) + ")"
+	}
+	unlock, err := lockFile(path+".lock", auditLockWait)
+	if err != nil {
+		return "cannot lock the autosend log (" + errText(err) + ")"
+	}
+	defer unlock()
+	n, err := countAutosends(env, profile, a.taskID, a.jid)
+	switch {
+	case err != nil:
+		return "cannot read the autosend log (" + errText(err) + ")"
+	case n >= autosend.MaxPerDay:
+		return fmt.Sprintf("the task reached %d autosends to %s in 24 hours", autosend.MaxPerDay, display(a.label))
+	}
+	if err := writeAudit(env, profile, session, a); err != nil {
+		return "cannot write the autosend log (" + errText(err) + ")"
+	}
+	return ""
+}
+
+// auditLockWait is the longest the gate waits for the autosend log's lock;
+// staleLock is the age past which a lock left by a killed hook is broken.
+const (
+	auditLockWait = 2 * time.Second
+	staleLock     = 30 * time.Second
 )
 
-// waitForRun finds the session's run file, looking again every runPoll for
-// up to runWait while Desktop has not saved it yet. A file that never
-// appears, or a lookup past runWait, is an error.
-func waitForRun(roots []string, session string) (desktop.Run, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), runWait)
+// lockFile takes an exclusive lock: a file created only if absent. It
+// retries until wait ends, breaking a lock older than staleLock.
+func lockFile(path string, wait time.Duration) (unlock func(), err error) {
+	deadline := time.Now().Add(wait)
+	for {
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			f.Close()
+			return func() { _ = os.Remove(path) }, nil
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			return nil, err
+		}
+		if st, serr := os.Stat(path); serr == nil && time.Since(st.ModTime()) > staleLock {
+			_ = os.Remove(path)
+			continue
+		}
+		if time.Now().After(deadline) {
+			return nil, errors.New("another hook holds it")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+// RunWaitFor is how long the gate may wait for Desktop to save a scheduled
+// run's session file under a PreToolUse registration timeout: whatever
+// leaves 3 s to spare after the autosend check and the log's lock, at most
+// maxRunWait. Desktop writes the file 3 s after its last change, 9 s at most.
+func RunWaitFor(timeout time.Duration) time.Duration {
+	return min(max(timeout-3*time.Second-PreToolBudget-auditLockWait, 0), maxRunWait)
+}
+
+// maxRunWait is the wait under the registered 30 s timeout.
+const maxRunWait = 12 * time.Second
+
+// runPoll is how often the gate looks for a run's session file.
+var runPoll = 250 * time.Millisecond
+
+// waitForRun finds the session's run file, looking again every runPoll
+// for up to wait: Desktop saves the file some seconds after the run starts,
+// and a file caught mid-write reads as broken or twice. The last error
+// stands when the wait ends.
+func waitForRun(roots []string, session string, wait time.Duration) (desktop.Run, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), wait)
 	defer cancel()
 	type result struct {
 		run desktop.Run
 		err error
 	}
+	last := fmt.Errorf("Claude Desktop's session files did not show this run within %s", wait)
 	for {
 		res, ok := withBudget(ctx, func(ctx context.Context) result {
 			run, err := findRun(ctx, roots, session)
@@ -172,13 +237,17 @@ func waitForRun(roots []string, session string) (desktop.Run, error) {
 		})
 		switch {
 		case !ok:
-			return desktop.Run{}, fmt.Errorf("Claude Desktop's session files did not show this run within %s", runWait)
-		case !errors.Is(res.err, desktop.ErrNotFound):
-			return res.run, res.err
+			return desktop.Run{}, last
+		case res.err == nil:
+			return res.run, nil
+		case errors.Is(res.err, desktop.ErrNotFound):
+			last = fmt.Errorf("Claude Desktop had not saved this run's session file after %s", wait)
+		default:
+			last = res.err
 		}
 		select {
 		case <-ctx.Done():
-			return desktop.Run{}, fmt.Errorf("Claude Desktop had not saved this run's session file after %s", runWait)
+			return desktop.Run{}, last
 		case <-time.After(runPoll):
 		}
 	}
@@ -204,6 +273,7 @@ func withBudget[T any](ctx context.Context, fn func(context.Context) T) (v T, ok
 type lookup struct {
 	unattended bool
 	why        string    // why an unattended send is not autosent
+	label      string    // the label an approval stored for the recipient, when known
 	allow      *autoSend // an approved autosend, to check and log before allowing
 }
 
@@ -215,16 +285,13 @@ type autoSend struct {
 	textChars        int
 }
 
-// lookupRun runs steps 3 and 4 of decide in a scheduled session: the
-// run's file, then within PreToolBudget the autosend check.
+// lookupRun runs step 4 of decide with nobody present: the run's file,
+// then within PreToolBudget the autosend check. Other tools need neither.
 func lookupRun(in toolInput, server, tool string, env PreToolEnv) lookup {
-	run, runErr := waitForRun(env.DesktopRoots, in.SessionID)
-	if runErr == nil && run.Continued {
-		return lookup{} // a person opened the run and wrote in it: the user-prompt gate decides
-	}
 	if tool != sendTool {
 		return lookup{unattended: true}
 	}
+	run, runErr := waitForRun(env.DesktopRoots, in.SessionID, env.RunWait)
 	ctx, cancel := context.WithTimeout(context.Background(), PreToolBudget)
 	defer cancel()
 	l, ok := withBudget(ctx, func(ctx context.Context) lookup {
@@ -303,8 +370,9 @@ func autosendCheck(ctx context.Context, in toolInput, server string, env PreTool
 		return "cannot find this run in Claude Desktop's files (" + errText(runErr) + ")"
 	case run.TaskID == "":
 		return "this run names no scheduled task"
-	case promptlessModes[run.PermissionMode]:
-		return "the run's permission mode is " + run.PermissionMode
+	case run.PermissionMode != "" && !autosend.PromptMode(run.PermissionMode):
+		// An empty one: Desktop's file did not record it, and the task's mode, checked below, applies.
+		return autosend.ModeProblem("the run", run.PermissionMode)
 	}
 	args, err := strictSendArgs(in.ToolInput)
 	if err != nil {
@@ -318,8 +386,8 @@ func autosendCheck(ctx context.Context, in toolInput, server string, env PreTool
 	if err != nil {
 		return "task " + display(run.TaskID) + ": " + errText(err)
 	}
-	if promptlessModes[task.PermissionMode] {
-		return "the task's permission mode is " + task.PermissionMode
+	if why := autosend.ModeProblem("the task", task.PermissionMode); why != "" {
+		return why
 	}
 	db, err := openProfileDB(env.AppDir, profile)
 	if err != nil {
@@ -332,6 +400,11 @@ func autosendCheck(ctx context.Context, in toolInput, server string, env PreTool
 	}
 	if err != nil {
 		return "cannot read the approvals (" + errText(err) + ")"
+	}
+	for _, c := range rule.Chats {
+		if c.Ref == to {
+			l.label = c.Label
+		}
 	}
 	if !samePath(rule.TaskDir, run.Dir) {
 		return "this run's task is in another Claude Desktop account or organization than the approved one"
@@ -378,9 +451,9 @@ func approvalCard(ctx context.Context, in toolInput, inputErr error, profile str
 	if env.Scheduled {
 		return no("an approval can only be given in a session with you, never by a scheduled run.")
 	}
-	if promptlessModes[in.PermissionMode] {
-		return no("this session's permission mode " + in.PermissionMode + " would settle the approval without showing it to you: " +
-			"switch to another mode, then call again.")
+	if !autosend.PromptMode(in.PermissionMode) {
+		return no(autosend.ModeProblem("this session", in.PermissionMode) + ", which may settle the approval without showing it to you: " +
+			"switch to default, acceptEdits, plan or auto mode, then call again.")
 	}
 	task, err := findTask(ctx, env.DesktopRoots, args.Task)
 	switch {
@@ -398,9 +471,10 @@ func approvalCard(ctx context.Context, in toolInput, inputErr error, profile str
 	if err != nil {
 		return no("cannot read what the task runs (" + errText(err) + ").")
 	}
-	if promptlessModes[task.PermissionMode] {
-		return no("the task runs with permission mode " + task.PermissionMode + ", where a run settles confirmations without " +
-			"you or rewrites any file, the send gate's included: give it another mode first.")
+	if why := autosend.ModeProblem("the task", task.PermissionMode); why != "" {
+		// A task without a mode runs in the user's default mode, which the gate does not read: it may skip prompts.
+		return no(why + ": a run must use default, acceptEdits, plan or auto mode, where it cannot settle confirmations " +
+			"without you or rewrite the send gate. Give the task one of them first.")
 	}
 	if n := len([]rune(skill.Prompt)); n > maxCardPrompt {
 		return no(fmt.Sprintf("the task's prompt is too long to show on a card (%d chars): shorten it to %d.", n, maxCardPrompt))
@@ -651,19 +725,25 @@ func writeAudit(env PreToolEnv, profile, session string, a *autoSend) error {
 	return err
 }
 
-// scheduledDir holds a marker per scheduled session whose first prompt the
-// UserPromptSubmit hook saw. It is a folder, which pruneFlags leaves alone.
+// scheduledDir holds, per scheduled session, a marker that its first
+// prompt was seen and another once a later prompt was. It is a folder,
+// which pruneFlags leaves alone.
 func scheduledDir(dir string) string { return filepath.Join(dir, "scheduled") }
 
-// markerTTL is how long a scheduled session's marker is kept.
+// markerTTL is how long a scheduled session's markers are kept.
 const markerTTL = 30 * 24 * time.Hour
 
-// firstScheduledPrompt reports whether this is the first prompt of a
-// session Claude Desktop started for a scheduled task, and records that it
-// saw one. That prompt is the task's SKILL.md, also when the user starts the
-// run by hand. When it cannot tell, it says first: the caller then writes no
-// send-intent flag, and a send asks.
-func firstScheduledPrompt(dir, session string, now time.Time) bool {
+// typedPath is the marker of a person's prompt in a scheduled session.
+func typedPath(dir, session string) string { return flagPath(scheduledDir(dir), session) + ".typed" }
+
+// scheduledPrompt records a prompt of a session Claude Desktop started for
+// a scheduled task and reports whether it is the first. The first is the
+// task's SKILL.md, also when the user starts the run by hand ("Run now"):
+// it is never the user's request. A later prompt is a person typing in the
+// opened run: it is marked, and from then on the user-prompt gate decides.
+// When it cannot tell, it says first and marks nothing: no flag is written,
+// and nobody counts as present.
+func scheduledPrompt(dir, session string, now time.Time) (first bool) {
 	md := scheduledDir(dir)
 	if err := os.MkdirAll(md, 0o700); err != nil {
 		return true
@@ -679,9 +759,28 @@ func firstScheduledPrompt(dir, session string, now time.Time) bool {
 		}
 	}
 	f, err := os.OpenFile(flagPath(md, session), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return !errors.Is(err, fs.ErrExist)
+	if err == nil {
+		f.Close()
+		return true
 	}
-	f.Close()
+	if !errors.Is(err, fs.ErrExist) {
+		return true
+	}
+	if t, err := os.OpenFile(typedPath(dir, session), os.O_WRONLY|os.O_CREATE, 0o600); err == nil {
+		if t.Close() == nil {
+			return false
+		}
+	}
 	return true
+}
+
+// personTyped reports whether a person typed in this scheduled session: the
+// UserPromptSubmit hook marked a prompt after the first. A marker it cannot
+// read means nobody.
+func personTyped(dir, session string) bool {
+	if dir == "" || session == "" {
+		return false
+	}
+	st, err := os.Stat(typedPath(dir, session))
+	return err == nil && st.Mode().IsRegular()
 }
