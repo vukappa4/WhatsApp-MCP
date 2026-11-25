@@ -31,28 +31,29 @@ type autosendAllowIn struct {
 }
 
 type autosendRevokeIn struct {
-	Task string `json:"task" jsonschema:"the task's id or name"`
+	Task string `json:"task" jsonschema:"task id or title"`
 }
 
 func (s *Server) addAutosendTools(srv *mcp.Server) {
 	f, t := false, true
+	allowSchema := schemaFor[autosendAllowIn](nil)
+	// A Go slice is nullable to the schema generator: chats must be an array.
+	allowSchema.Properties["chats"].Type, allowSchema.Properties["chats"].Types = "array", nil
 	addTool(srv, &mcp.Tool{
 		Name: toolAutosendAllow,
-		Description: "Let one Claude Desktop scheduled task send WhatsApp text messages to a fixed set of chats with nobody present. " +
-			"Call it only in a session with the user, right after creating the task, when the user asked for it. task: the taskId " +
-			"given to create_scheduled_task. chats: c_N or p_N ids; write the same ids in the task's prompt, since its runs must " +
-			"call whatsapp_send_message with to set to one of them. The user confirms a card showing the task, schedule, folder, " +
-			"prompt and chats; a scheduled run can never approve itself. Other sends, files and chats, and a send past " +
-			strconv.Itoa(autosend.MaxPerDay) + " a day to one chat, ask in a session with the user and are refused in an unattended run. " +
-			"The task needs the default, acceptEdits, plan or auto permission mode. Changing the task's prompt, schedule or folder " +
-			"ends the approval; approving again replaces the chats. Never bulk or unsolicited: WhatsApp bans for it.",
-		InputSchema: schemaFor[autosendAllowIn](nil),
+		Description: "Let one Claude Desktop scheduled task send text messages, with nobody present, to fixed chats. Call only when " +
+			"the user asks, in a session with them, after creating the task. Put the same chat ids in the task's prompt: its runs " +
+			"may only call whatsapp_send_message with to set to one of them, at most " + strconv.Itoa(autosend.MaxPerDay) +
+			" a day per chat; anything else is refused. The user confirms a card; a scheduled run cannot approve. Task mode must " +
+			"be default, acceptEdits, plan or auto. Changing the task's prompt, schedule or folder ends the approval; calling " +
+			"again replaces the chats. Never bulk or unsolicited: WhatsApp bans for it.",
+		InputSchema: allowSchema,
 		Annotations: &mcp.ToolAnnotations{Title: "Approve WhatsApp autosend", DestructiveHint: &f, OpenWorldHint: &f},
 	}, s.autosendAllow)
 
 	addTool(srv, &mcp.Tool{
 		Name:        toolAutosendRevoke,
-		Description: "End a scheduled task's autosend approval (task id or name); no confirmation needed. whatsapp_status lists approvals.",
+		Description: "End a scheduled task's autosend approval. whatsapp_status lists approvals.",
 		InputSchema: schemaFor[autosendRevokeIn](nil),
 		Annotations: &mcp.ToolAnnotations{Title: "Revoke WhatsApp autosend", DestructiveHint: &t, IdempotentHint: true, OpenWorldHint: &f},
 	}, s.autosendRevoke)
@@ -106,8 +107,7 @@ func (s *Server) autosendAllow(ctx context.Context, _ *mcp.CallToolRequest, in a
 		lines = append(lines, "to "+bw.wrap(c.Label))
 	}
 	return textResult(fmt.Sprintf("Approved: this Desktop scheduled task may send text messages with nobody present:\n%s\n"+
-		"Its runs must call %s with to set to one of: %s. Changing the task's prompt, schedule or folder ends the "+
-		"approval. %s ends it now.", w.block(lines), toolSendMessage, strings.Join(ids, ", "), toolAutosendRevoke)), nil
+		"Its runs must call %s with to set to one of: %s.", w.block(lines), toolSendMessage, strings.Join(ids, ", "))), nil
 }
 
 func (s *Server) autosendRevoke(ctx context.Context, _ *mcp.CallToolRequest, in autosendRevokeIn) (*mcp.CallToolResult, error) {
@@ -196,7 +196,7 @@ func (s *Server) autosendStatus(ctx context.Context, now time.Time) (string, err
 	}
 	logLines := tailLines(filepath.Join(s.DataDir, "logs", autosend.LogName), autosendLogLines)
 	if len(rules) == 0 && len(logLines) == 0 {
-		return "Autosend: no Desktop scheduled task may send without asking", nil
+		return "Autosend: none approved", nil
 	}
 	w := newWrapper(now)
 	bw := w.inner()
@@ -233,8 +233,8 @@ func (s *Server) autosendStatus(ctx context.Context, now time.Time) (string, err
 		}
 		lines = append(lines, fmt.Sprintf("sent %s by task %s to %s, %d characters", at, bw.wrap(e.TaskName), bw.wrap(e.Label), e.TextChars))
 	}
-	return fmt.Sprintf("Autosend (%d approved Desktop scheduled tasks; then the newest sends of the log %s):\n%s",
-		len(rules), filepath.Join(s.DataDir, "logs", autosend.LogName), w.block(lines)), nil
+	return fmt.Sprintf("Autosend (%d approved Desktop scheduled tasks, then the newest sends of %s):\n%s",
+		len(rules), autosend.LogName, w.block(lines)), nil
 }
 
 // autosendState tells whether a rule still lets its task send: the task

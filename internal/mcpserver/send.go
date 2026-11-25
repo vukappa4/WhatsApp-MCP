@@ -19,7 +19,6 @@ import (
 	"go.mau.fi/whatsmeow/types"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/vukappa4/whatsapp-mcp/internal/autosend"
 	"github.com/vukappa4/whatsapp-mcp/internal/people"
 	"github.com/vukappa4/whatsapp-mcp/internal/store"
 	"github.com/vukappa4/whatsapp-mcp/internal/wa"
@@ -66,8 +65,7 @@ func (s *Server) addSendTools(srv *mcp.Server) {
 		Name: toolSendMessage,
 		Description: "Send a WhatsApp text message to a person or group. Returns the stored message id, the resolved " +
 			"recipient (name and phone, or group name) and the server time. An ambiguous name returns the candidates " +
-			"instead of sending." + sendWarning + " In a Desktop scheduled task approved with " + autosend.ToolAllow +
-			", set to to an approved c_N or p_N id.",
+			"instead of sending." + sendWarning,
 		InputSchema: schemaFor[sendMessageIn](nil),
 		Annotations: sendAnnotations("Send a WhatsApp message"),
 	}, s.sendMessage)

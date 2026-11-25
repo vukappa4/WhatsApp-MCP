@@ -136,6 +136,14 @@ func TestAutosendToolAnnotations(t *testing.T) {
 		if len(schema.Properties) == 0 {
 			t.Errorf("%s: no properties in %s", tl.Name, b)
 		}
+		if !strings.HasPrefix(tl.Name, "whatsapp_send_") {
+			t.Errorf("%s is outside the range every installed gate covers", tl.Name)
+		}
+		if tl.Name == toolAutosendAllow {
+			if c, _ := schema.Properties["chats"].(map[string]any); c["type"] != "array" {
+				t.Errorf("chats schema: %s", b)
+			}
+		}
 	}
 	if seen != 2 {
 		t.Fatalf("autosend tools listed: %d", seen)
@@ -200,7 +208,7 @@ func TestAutosendRevokeAndStatus(t *testing.T) {
 	ctx := context.Background()
 	now := a.srv.now()
 	text, _ := call(t, a.cs, toolStatus, nil)
-	if !strings.Contains(text, "Autosend: no Desktop scheduled task may send without asking") {
+	if !strings.Contains(text, "Autosend: none approved") {
 		t.Fatalf("status without rules:\n%s", text)
 	}
 	put := func(id, name, fp string) {
