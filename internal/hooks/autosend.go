@@ -577,77 +577,19 @@ func openProfileDB(appDir, profile string) (*sql.DB, error) {
 	return db, nil
 }
 
-// destination is where a send to ref goes, as the server resolves it: a
-// group chat's JID, or the JID store.SendJID picks for a person (a DM chat
-// goes to its person). Only c_N and p_N ids: names and numbers are refused,
-// since another person can take a name or a number.
+// destination is where a send to ref goes, exactly as the server resolves
+// it (store.ResolveDestination). Only c_N and p_N ids: names and numbers
+// are refused, since another person can take a name or a number.
 func destination(ctx context.Context, db *sql.DB, ref string) (autosend.Chat, error) {
 	ref = strings.TrimSpace(ref)
-	id, kind := parseRef(ref)
-	var c autosend.Chat
-	var err error
-	switch kind {
-	case "p":
-		c, err = personDestination(ctx, db, id)
-	case "c":
-		var chatKind, name, jid string
-		var person sql.NullInt64
-		if err := db.QueryRowContext(ctx, `SELECT kind, person_id, name, jid FROM chats WHERE id = ?`, id).Scan(&chatKind, &person, &name, &jid); err != nil {
-			return autosend.Chat{}, fmt.Errorf("chat %s: %w", ref, err)
-		}
-		switch {
-		case chatKind == "dm" && person.Valid:
-			c, err = personDestination(ctx, db, person.Int64)
-		case chatKind == "group":
-			if name == "" {
-				name = "unnamed"
-			}
-			c = autosend.Chat{JID: jid, Label: "group " + name + " (" + ref + ")"}
-		default:
-			return autosend.Chat{}, fmt.Errorf("chat %s is a %s: only people and groups receive messages", ref, chatKind)
-		}
-	default:
+	if kind, _ := store.ParseRef(ref); kind == "" {
 		return autosend.Chat{}, fmt.Errorf("%s is not a c_N or p_N id", display(ref))
 	}
-	c.Ref = ref
-	return c, err
-}
-
-func personDestination(ctx context.Context, db *sql.DB, id int64) (autosend.Chat, error) {
-	var r Recipient
-	if err := (DBResolver{}).person(ctx, db, id, &r); err != nil {
-		return autosend.Chat{}, err
-	}
-	var phone sql.NullString
-	if err := db.QueryRowContext(ctx, `SELECT phone_e164 FROM persons WHERE id = ?`, id).Scan(&phone); err != nil {
-		return autosend.Chat{}, err
-	}
-	rows, err := db.QueryContext(ctx, `SELECT jid, kind FROM jids WHERE person_id = ?`, id)
+	d, err := store.ResolveDestination(ctx, db, ref)
 	if err != nil {
 		return autosend.Chat{}, err
 	}
-	var jids []store.JIDRow
-	for rows.Next() {
-		var j store.JIDRow
-		if err := rows.Scan(&j.JID, &j.Kind); err != nil {
-			rows.Close()
-			return autosend.Chat{}, err
-		}
-		jids = append(jids, j)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return autosend.Chat{}, err
-	}
-	jid, _, err := store.SendJID(jids, phone.String)
-	if err != nil {
-		return autosend.Chat{}, fmt.Errorf("p_%d %w", id, err)
-	}
-	label := r.Label
-	if label == "" {
-		label = "p_" + strconv.FormatInt(id, 10)
-	}
-	return autosend.Chat{JID: jid, Label: label}, nil
+	return autosend.Chat{Ref: ref, JID: d.JID, Label: d.Label}, nil
 }
 
 // maxAuditLog is the size past which the autosend log moves to autosend.log.1.

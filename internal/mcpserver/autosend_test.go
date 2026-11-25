@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -332,5 +333,49 @@ func TestAutosendAllowRechecksTheReceipt(t *testing.T) {
 				t.Fatalf("rules stored: %+v", rs)
 			}
 		})
+	}
+}
+
+// The send gate approves by store.ResolveDestination and whatsapp_send_message
+// sends by resolveRecipient: both pick the same JID, or both refuse.
+func TestDestinationParity(t *testing.T) {
+	e := newSendEnv(t)
+	ctx := context.Background()
+	exec := func(q string) {
+		t.Helper()
+		if _, err := e.db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// p_2 has only phone JIDs; p_1 gets one LID; a third person two LIDs.
+	exec(`DELETE FROM jids WHERE person_id IN (1, 2) AND kind = 'lid'`)
+	exec(`INSERT INTO jids(jid, person_id, kind) VALUES ('111@lid', 1, 'lid')`)
+	exec(`INSERT INTO persons(id, display_name, name_source, full_name, first_name, saved_contact, updated_at)
+		VALUES (90, 'Doppio', 'full_name', 'Doppio', 'Doppio', 1, 0)`)
+	exec(`INSERT INTO jids(jid, person_id, kind) VALUES ('901@lid', 90, 'lid'), ('902@lid', 90, 'lid')`)
+	dm := e.id(t, "c_", `SELECT id FROM chats WHERE kind = 'dm' AND person_id = 1`)
+	group := e.id(t, "c_", `SELECT id FROM chats WHERE kind = 'group'`)
+	for _, tc := range []struct{ ref, jid string }{
+		{dm, "111@lid"},
+		{group, "120363000000000009@g.us"},
+		{"p_1", "111@lid"},
+		{"p_2", "393332222222@s.whatsapp.net"},
+		{"p_90", ""},
+	} {
+		d, derr := store.ResolveDestination(ctx, e.db, tc.ref)
+		r, msg, err := e.srv.resolveRecipient(ctx, tc.ref)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.ref, err)
+		}
+		if tc.jid == "" {
+			var many store.ErrManyLIDs
+			if !errors.As(derr, &many) || !strings.Contains(msg, "p_90 holds 2 WhatsApp accounts") {
+				t.Fatalf("%s: gate %v, daemon %q", tc.ref, derr, msg)
+			}
+			continue
+		}
+		if derr != nil || msg != "" || d.JID != tc.jid || r.jid.String() != tc.jid {
+			t.Fatalf("%s: gate %q %v, daemon %v %q, want %s", tc.ref, d.JID, derr, r, msg, tc.jid)
+		}
 	}
 }

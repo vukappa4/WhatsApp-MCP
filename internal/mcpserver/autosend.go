@@ -129,18 +129,16 @@ func (s *Server) autosendRevoke(ctx context.Context, _ *mcp.CallToolRequest, in 
 }
 
 // refJID resolves a c_N or p_N id to the JID a send to it goes to, as
-// whatsapp_send_message does; why says why it cannot.
+// whatsapp_send_message and the send gate do; why says why it cannot.
 func (s *Server) refJID(ctx context.Context, ref string) (jid, why string, err error) {
-	_, isChat := parseID(ref, "c_")
-	_, isPerson := parseID(ref, "p_")
-	if !isChat && !isPerson {
+	if kind, _ := store.ParseRef(ref); kind == "" {
 		return "", ref + " is not a c_N or p_N id", nil
 	}
-	r, msg, err := s.resolveRecipient(ctx, ref)
-	if err != nil || msg != "" {
-		return "", msg, err
+	d, err := store.ResolveDestination(ctx, s.DB, ref)
+	if why, err := destinationProblem(ref, d, err); why != "" || err != nil {
+		return "", why, err
 	}
-	return r.jid.String(), "", nil
+	return d.JID, "", nil
 }
 
 // checkReceipt compares a receipt with the daemon's own view: every chat id

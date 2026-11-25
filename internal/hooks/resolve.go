@@ -245,32 +245,16 @@ func (d DBResolver) person(ctx context.Context, db *sql.DB, id int64, r *Recipie
 			}
 		}
 	}
-	label := display
-	if label == "" {
-		label = firstNonEmpty(full, first, push, business)
-	}
-	if source == "push_name" || source == "business_name" {
-		label = "~" + label // a name the person chose, as WhatsApp shows strangers
-	}
-	if phone.Valid && phone.String != "" {
-		label = strings.TrimSpace(label + " (" + phone.String + ")")
-	}
-	if label != "" {
+	if label := store.PersonLabel(display, full, first, push, business, source, phone.String); label != "" {
 		r.Label = label
 	}
 	return rows.Err()
 }
 
-// parseRef reads "p_17" and "c_42".
+// parseRef reads "p_17" and "c_42" as the server does (store.ParseRef).
 func parseRef(s string) (int64, string) {
-	for _, k := range []string{"p", "c"} {
-		if rest, ok := strings.CutPrefix(s, k+"_"); ok {
-			if n, err := strconv.ParseInt(rest, 10, 64); err == nil && n > 0 {
-				return n, k
-			}
-		}
-	}
-	return 0, ""
+	kind, id := store.ParseRef(s)
+	return id, kind
 }
 
 func onlyDigits(s string) string {
