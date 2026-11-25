@@ -181,31 +181,30 @@ func logAutosend(env PreToolEnv, profile, session string, a *autoSend) string {
 	return ""
 }
 
-// auditLockWait is the longest the gate waits for the autosend log's lock;
-// staleLock is the age past which a lock left by a killed hook is broken.
-const (
-	auditLockWait = 2 * time.Second
-	staleLock     = 30 * time.Second
-)
+// auditLockWait is the longest the gate waits for the autosend log's lock.
+const auditLockWait = 2 * time.Second
 
-// lockFile takes an exclusive lock: a file created only if absent. It
-// retries until wait ends, breaking a lock older than staleLock.
+// lockFile takes an exclusive operating system lock on the file at path,
+// retrying until wait ends. The system drops the lock when unlock closes
+// the file or the process dies, so a killed hook leaves no stale lock. The
+// file stays: deleting it while held would let another hook lock a new
+// file of the same name.
 func lockFile(path string, wait time.Duration) (unlock func(), err error) {
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, err
+	}
 	deadline := time.Now().Add(wait)
 	for {
-		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-		if err == nil {
+		held, err := tryLock(f)
+		switch {
+		case err != nil:
 			f.Close()
-			return func() { _ = os.Remove(path) }, nil
-		}
-		if !errors.Is(err, fs.ErrExist) {
 			return nil, err
-		}
-		if st, serr := os.Stat(path); serr == nil && time.Since(st.ModTime()) > staleLock {
-			_ = os.Remove(path)
-			continue
-		}
-		if time.Now().After(deadline) {
+		case !held:
+			return func() { f.Close() }, nil
+		case time.Now().After(deadline):
+			f.Close()
 			return nil, errors.New("another hook holds it")
 		}
 		time.Sleep(25 * time.Millisecond)

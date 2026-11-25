@@ -720,6 +720,29 @@ func TestAutosendBrakeLock(t *testing.T) {
 	}
 }
 
+// The lock is the operating system's: a lock file left on disk, by a hook
+// that was killed or an older version, never blocks, and an unlocked lock
+// can be taken again at once.
+func TestLockFileLeavesNoStaleLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "autosend.log.lock")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := lockFile(path, 0)
+	if err != nil {
+		t.Fatalf("left-over file: %v", err)
+	}
+	if _, err := lockFile(path, 100*time.Millisecond); err == nil {
+		t.Fatal("a held lock was taken twice")
+	}
+	unlock()
+	unlock, err = lockFile(path, 0)
+	if err != nil {
+		t.Fatalf("after unlock: %v", err)
+	}
+	unlock()
+}
+
 func TestRunWaitFor(t *testing.T) {
 	for timeout, want := range map[time.Duration]time.Duration{
 		30 * time.Second: 12 * time.Second, 20 * time.Second: 11 * time.Second, 10 * time.Second: time.Second, 5 * time.Second: 0,
