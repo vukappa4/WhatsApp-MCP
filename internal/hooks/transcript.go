@@ -48,33 +48,55 @@ func lastUserPrompt(path string) (typedPrompt, bool) {
 		return typedPrompt{}, false
 	}
 	lower := max(st.Size()-transcriptTail, 0)
-	var carry []byte // the start of the line the chunks read so far end in
+	// pending is the line the chunks read so far start in, cut into those
+	// chunks, newest first. Only a new chunk is searched for a newline, and
+	// a line is joined once, when it completes: a long line costs linear time.
+	var pending [][]byte
 	for pos := st.Size(); pos > lower; {
 		n := min(transcriptChunk, pos-lower)
 		pos -= n
-		data := make([]byte, n, n+int64(len(carry)))
+		data := make([]byte, n)
 		if _, err := f.ReadAt(data, pos); err != nil && err != io.EOF {
 			return typedPrompt{}, false
 		}
-		data = append(data, carry...)
 		for {
 			i := bytes.LastIndexByte(data, '\n')
 			if i < 0 {
 				break
 			}
-			if p, ok := promptEntry(data[i+1:]); ok {
+			if p, ok := promptEntry(joinLine(data[i+1:], pending)); ok {
 				return p, true
 			}
+			pending = pending[:0]
 			data = data[:i]
 		}
-		carry = data
+		pending = append(pending, data)
 	}
 	if lower == 0 { // the file's first line; past the limit it is cut mid-line
-		if p, ok := promptEntry(carry); ok {
+		if p, ok := promptEntry(joinLine(nil, pending)); ok {
 			return p, true
 		}
 	}
 	return typedPrompt{}, false
+}
+
+// joinLine is the line that starts with head and goes on with tail, whose
+// chunks run from the end of the file backwards. With no tail it is head,
+// not a copy.
+func joinLine(head []byte, tail [][]byte) []byte {
+	if len(tail) == 0 {
+		return head
+	}
+	n := len(head)
+	for _, c := range tail {
+		n += len(c)
+	}
+	line := make([]byte, 0, n)
+	line = append(line, head...)
+	for i := len(tail) - 1; i >= 0; i-- {
+		line = append(line, tail[i]...)
+	}
+	return line
 }
 
 // promptEntry reads one transcript line as a typed user prompt.

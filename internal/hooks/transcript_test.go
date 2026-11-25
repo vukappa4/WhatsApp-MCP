@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -78,6 +79,25 @@ func TestLastUserPromptStraddlesChunks(t *testing.T) {
 	withChunk(t, 10)
 	if p, ok := lastUserPrompt(writeTranscript(t, strings.TrimSuffix(prompt, "\n"))); !ok || p.Text != "manda il file a Giulia" {
 		t.Fatalf("one line: %+v %v", p, ok)
+	}
+}
+
+// A multi-MB last line, such as an image in base64, after the prompt costs
+// linear work: its chunks are joined once, not copied again for each chunk.
+func TestLastUserPromptLongLastLine(t *testing.T) {
+	at := time.Date(2026, 11, 25, 9, 0, 0, 0, time.UTC)
+	s := assistantLine(100) + userLine("manda la foto a Marco", at) + assistantLine(6<<20)
+	path := writeTranscript(t, s)
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	p, ok := lastUserPrompt(path)
+	runtime.ReadMemStats(&after)
+	if !ok || p.Text != "manda la foto a Marco" {
+		t.Fatalf("%+v %v", p, ok)
+	}
+	if got := after.TotalAlloc - before.TotalAlloc; got > 3*uint64(len(s)) {
+		t.Fatalf("allocated %d bytes for a transcript of %d", got, len(s))
 	}
 }
 
