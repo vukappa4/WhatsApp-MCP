@@ -108,8 +108,18 @@ func TestFindRun(t *testing.T) {
 	}
 	// Two files name the session: error.
 	f.run("d", map[string]any{"cliSessionId": "cli-2"}, now)
-	if _, err := FindRun(ctx, []string{f.root}, "cli-2"); err == nil || !strings.Contains(err.Error(), "2 Desktop session files") {
+	if _, err := FindRun(ctx, []string{f.root}, "cli-2"); !errors.Is(err, ErrAmbiguous) || !strings.Contains(err.Error(), "(2)") {
 		t.Fatalf("two: %v", err)
+	}
+	// Files untouched for over RunMaxAge are not read: neither a match nor a duplicate.
+	f.run("old", map[string]any{"cliSessionId": "cli-old", "scheduledTaskId": "follow-up"}, now.Add(-RunMaxAge-time.Minute))
+	if _, err := FindRun(ctx, []string{f.root}, "cli-old"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("old file: %v", err)
+	}
+	f.run("old-dup", map[string]any{"cliSessionId": "cli-1"}, now.Add(-RunMaxAge-time.Minute))
+	f.write(filepath.Join(f.org, "local_old-broken.json"), `{"cliSessionId": "cli-1", `, now.Add(-RunMaxAge-time.Minute))
+	if r, err := FindRun(ctx, []string{f.root}, "cli-1"); err != nil || r.SessionID != "local_a" {
+		t.Fatalf("old duplicate: %+v %v", r, err)
 	}
 	// Over 4 MB: error when the id is in it, skipped otherwise.
 	big := `{"cliSessionId": "cli-big", "pad": "` + strings.Repeat("x", maxFile) + `"}`

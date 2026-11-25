@@ -229,12 +229,20 @@ func matches(roots []string, name string) []string {
 	return out
 }
 
+// RunMaxAge bounds the session files FindRun reads: Desktop writes a
+// session's file when the session starts and as it changes, so a file
+// untouched for longer is no session the gate asks about.
+const RunMaxAge = 24 * time.Hour
+
+// ErrAmbiguous means more than one Desktop session file names the session.
+var ErrAmbiguous = errors.New("named by more than one Desktop session file")
+
 // FindRun finds the run whose cliSessionId is id, the session id Claude
-// Code gives its hooks. It reads the newest files first, skips files over
-// 4 MB that do not hold the id in their first 4 MB and files that do not
-// hold it at all, and checks ctx between files. Exactly one run must match:
-// none is ErrNotFound, two or more, or a matching file it cannot read, is an
-// error.
+// Code gives its hooks. It reads only files changed within RunMaxAge,
+// newest first, skips files over 4 MB that do not hold the id in their
+// first 4 MB and files that do not hold it at all, and checks ctx between
+// files. Exactly one of those runs must match: none is ErrNotFound, two or
+// more ErrAmbiguous, and a matching file it cannot read is an error.
 func FindRun(ctx context.Context, roots []string, id string) (Run, error) {
 	if strings.TrimSpace(id) == "" {
 		return Run{}, errors.New("no session id")
@@ -243,10 +251,11 @@ func FindRun(ctx context.Context, roots []string, id string) (Run, error) {
 		path string
 		mod  time.Time
 	}
+	since := time.Now().Add(-RunMaxAge)
 	var files []file
 	for _, p := range matches(roots, "local_*.json") {
 		st, err := os.Stat(p)
-		if err != nil || !st.Mode().IsRegular() {
+		if err != nil || !st.Mode().IsRegular() || st.ModTime().Before(since) {
 			continue
 		}
 		files = append(files, file{p, st.ModTime()})
@@ -284,7 +293,7 @@ func FindRun(ctx context.Context, roots []string, id string) (Run, error) {
 	case 1:
 		return found[0], nil
 	}
-	return Run{}, fmt.Errorf("session %s is named by %d Desktop session files", id, len(found))
+	return Run{}, fmt.Errorf("session %s is %w (%d)", id, ErrAmbiguous, len(found))
 }
 
 // Unreadable is a task record that does not decode as a Task. Its id and

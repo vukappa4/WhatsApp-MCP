@@ -228,9 +228,13 @@ var runPoll = 250 * time.Millisecond
 
 // waitForRun finds the session's run file, looking again every runPoll
 // for up to wait: Desktop saves the file some seconds after the run starts,
-// and a file caught mid-write reads as broken or twice. The last error
-// stands when the wait ends.
+// and a file caught mid-write reads as broken. The last error stands when
+// the wait ends. No session id, or a session two files name, is final: it
+// returns at once.
 func waitForRun(roots []string, session string, wait time.Duration) (desktop.Run, error) {
+	if strings.TrimSpace(session) == "" {
+		return desktop.Run{}, errors.New("the hook input has no session id")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), wait)
 	defer cancel()
 	type result struct {
@@ -248,6 +252,8 @@ func waitForRun(roots []string, session string, wait time.Duration) (desktop.Run
 			return desktop.Run{}, last
 		case res.err == nil:
 			return res.run, nil
+		case errors.Is(res.err, desktop.ErrAmbiguous):
+			return desktop.Run{}, res.err
 		case errors.Is(res.err, desktop.ErrNotFound):
 			last = fmt.Errorf("Claude Desktop had not saved this run's session file after %s", wait)
 		default:

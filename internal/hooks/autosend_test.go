@@ -287,6 +287,11 @@ func TestAutosendFallbacksDeny(t *testing.T) {
 				a.write(filepath.Join(a.org, "local_bad.json"), []byte(`{"cliSessionId": "sched-bad", `))
 			}},
 		{name: "no task id", session: "plain-1", to: "c_1", why: "this run names no scheduled task"},
+		{name: "no session id", session: "", to: "c_1", why: "the hook input has no session id"},
+		{name: "two run files", session: "sched-1", to: "c_1", why: "named by more than one Desktop session file",
+			setup: func(a *auto) {
+				a.write(filepath.Join(a.org, "local_copy.json"), []byte(`{"cliSessionId": "sched-1", "scheduledTaskId": "follow-up"}`))
+			}},
 		{name: "task missing", session: "sched-gone", to: "c_1", why: `task gone: task "gone": not found`},
 		{name: "to as name", session: "sched-1", to: "Marco Rossi", why: "to must be an approved c_N or p_N id, not Marco Rossi"},
 		{name: "to as phone", session: "sched-1", to: "+39 333 123 4567", why: "not +39 333 123 4567"},
@@ -524,8 +529,26 @@ func TestAutosendWaitsForTheRunFile(t *testing.T) {
 	}
 }
 
-// A file caught mid-write reads as broken, or twice: the gate looks again
-// until the wait ends.
+// No session id, or a session two files name, does not change by waiting:
+// the gate denies at once.
+func TestAutosendFinalRunErrorsReturnAtOnce(t *testing.T) {
+	a := newAuto(t)
+	env := a.env(true)
+	env.RunWait = 5 * time.Second
+	a.write(filepath.Join(a.org, "local_copy.json"), []byte(`{"cliSessionId": "sched-1", "scheduledTaskId": "follow-up"}`))
+	for _, session := range []string{"sched-1", ""} {
+		start := time.Now()
+		if kind, r := a.send(env, session, "c_1"); kind != deny {
+			t.Fatalf("%q: %s %q", session, kind, r)
+		}
+		if took := time.Since(start); took > 2*time.Second {
+			t.Fatalf("%q took %s", session, took)
+		}
+	}
+}
+
+// A file caught mid-write reads as broken: the gate looks again until the
+// wait ends.
 func TestAutosendRetriesABrokenRunFile(t *testing.T) {
 	a := newAuto(t)
 	env := a.env(true)
