@@ -36,6 +36,7 @@ import (
 	"github.com/vukappa4/whatsapp-mcp/internal/pairpage"
 	"github.com/vukappa4/whatsapp-mcp/internal/people"
 	"github.com/vukappa4/whatsapp-mcp/internal/store"
+	"github.com/vukappa4/whatsapp-mcp/internal/updatecheck"
 	"github.com/vukappa4/whatsapp-mcp/internal/wa"
 )
 
@@ -59,7 +60,8 @@ Usage:
                                                     import the old bridge's data (read-only; use copies)
   whatsapp-mcp setup-transcription [--engine parakeet|whisper|all] [--source-dir <dir>]...
                                                     install the transcription model into <app dir>/tools, and on
-                                                    Windows the pinned whisper.cpp tools (SHA-256 verified)
+                                                    Windows and macOS the pinned whisper.cpp tools (macOS: also
+                                                    ffmpeg), every file SHA-256 verified
   whatsapp-mcp install       [--profile prod|dev]   copy this binary to <app dir>/bin (prod) or bin-dev (dev),
                                                     register the autostart (Windows: logon task; macOS:
                                                     LaunchAgent) and (re)start the daemon
@@ -250,7 +252,7 @@ func runCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	tr, err := media.NewTranscriber(transcriber, toolsDir, config.FFmpegCandidates())
+	tr, err := media.NewTranscriber(transcriber, toolsDir, config.FFmpegLocations())
 	if err != nil {
 		return err
 	}
@@ -336,9 +338,17 @@ func runCmd(args []string) error {
 		log.Info("unconfirmed sends found stored: recorded as sent", "count", n)
 	}
 
+	updates := &updatecheck.Checker{Client: releaseClient(releaseAPIBase, nil), Version: version,
+		File: filepath.Join(cfg.DataDir, "update-check.json"), Log: log.With("component", "update"),
+		Enabled: func() (bool, error) {
+			s, err := config.LoadSettings(cfg.DataDir)
+			return s.UpdateCheckOn(), err
+		}}
+	go updates.Run(ctx)
+
 	reason := "signal"
 	srv := &mcpserver.Server{DB: db, WA: client, Media: mgr, Profile: string(cfg.Profile), DataDir: cfg.DataDir, Version: version, Log: log,
-		Stop: func() { reason = "stop command"; cancel() }, Sender: client, Ingest: client.Ingestor(), DesktopRoots: desktop.Roots()}
+		Stop: func() { reason = "stop command"; cancel() }, Sender: client, Ingest: client.Ingestor(), DesktopRoots: desktop.Roots(), Updates: updates}
 	if dir, err := hooks.DefaultDir(); err == nil {
 		srv.HooksDir = dir
 	}
@@ -847,7 +857,7 @@ func setupTranscriptionCmd(args []string) error {
 	ctx, cancel := signalContext()
 	defer cancel()
 	fmt.Println("Installing transcription tools into", dir)
-	if err := media.Setup(ctx, media.SetupOptions{ToolsDir: dir, Engine: engine, SourceDirs: sources, FFmpegCandidates: config.FFmpegCandidates(), Out: os.Stdout}); err != nil {
+	if err := media.Setup(ctx, media.SetupOptions{ToolsDir: dir, Engine: engine, SourceDirs: sources, FFmpegSearch: config.FFmpegLocations(), Out: os.Stdout}); err != nil {
 		return err
 	}
 	fmt.Println("Done. Restart the daemon if ffmpeg was just installed; otherwise the next voice note is transcribed.")

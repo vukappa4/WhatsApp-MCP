@@ -58,6 +58,13 @@ func ParseVersion(s string) (Version, error) {
 	return v, nil
 }
 
+// PlainTag reports whether tag is a plain vMAJOR.MINOR.PATCH: no prerelease
+// and no build suffix.
+func PlainTag(tag string) bool {
+	v, err := ParseVersion(tag)
+	return err == nil && tag == fmt.Sprintf("v%d.%d.%d", v.Major, v.Minor, v.Patch)
+}
+
 // Compare orders versions by semver precedence: -1 when a < b, 0 when
 // equal, +1 when a > b. A prerelease comes before its release; its
 // identifiers compare numerically when both are numbers, else as text, and

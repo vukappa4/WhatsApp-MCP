@@ -134,12 +134,15 @@ func encryptMedia(t *testing.T, plain, key []byte, mt whatsmeow.MediaType) []byt
 }
 
 type fakeTranscriber struct {
-	mu    sync.Mutex
-	calls int
-	err   error
+	mu     sync.Mutex
+	calls  int
+	err    error
+	silent bool // hears no speech
 }
 
 func (f *fakeTranscriber) setErr(err error) { f.mu.Lock(); defer f.mu.Unlock(); f.err = err }
+
+func (f *fakeTranscriber) setSilent(s bool) { f.mu.Lock(); defer f.mu.Unlock(); f.silent = s }
 
 func (f *fakeTranscriber) callCount() int { f.mu.Lock(); defer f.mu.Unlock(); return f.calls }
 
@@ -154,6 +157,9 @@ func (f *fakeTranscriber) Transcribe(_ context.Context, path string, _ bool, _ t
 	}
 	if _, err := os.Stat(path); err != nil {
 		return "", "", err
+	}
+	if f.silent {
+		return "", "", nil
 	}
 	return "ci vediamo domani in ufficio", "it", nil
 }
@@ -613,6 +619,37 @@ func TestTranscriptionErrorsAreRecorded(t *testing.T) {
 	e.tr.setErr(nil)
 	if r := e.get(msg, true); r.Job.Transcript == "" || r.Job.TranscriptError != "" {
 		t.Fatalf("retry: %+v", r.Job)
+	}
+}
+
+// Silence is an empty transcript with no sidecar. An empty sidecar on disk is
+// never adopted: after a reingest the engine runs again.
+func TestSilenceKeepsNoSidecar(t *testing.T) {
+	e := newEnv(t)
+	e.tr.setSilent(true)
+	msg, mediaID, _ := e.add(1, "voice", "audio/ogg", "", "/v/s.enc?x", 300)
+	r := e.get(msg, true)
+	if r.TranscriptErr != nil || !r.Job.HasTranscript || r.Job.Transcript != "" || r.Job.TranscriptError != "" {
+		t.Fatalf("silence: %+v", r)
+	}
+	if _, err := os.Stat(sidecarPath(r.Path)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("sidecar for silence: %v", err)
+	}
+	if err := os.WriteFile(sidecarPath(r.Path), []byte(`{"text":"","engine":"parakeet-tdt-0.6b-v3-q8_0"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.db.Exec(`UPDATE media SET state = 'pending', local_path = '', transcript = NULL WHERE id = ?`, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	e.tr.setSilent(false)
+	calls := e.tr.callCount()
+	e.src.set(func(f *fakeSource) { f.connected = false })
+	r = e.get(msg, true)
+	if r.Path == "" || r.Job.Transcript != "ci vediamo domani in ufficio" || e.tr.callCount() != calls+1 {
+		t.Fatalf("adoption: %+v (transcriptions %d->%d)", r, calls, e.tr.callCount())
+	}
+	if s, ok := readSidecar(r.Path); !ok || s.Text != r.Job.Transcript {
+		t.Fatalf("sidecar = %+v, %v", s, ok)
 	}
 }
 

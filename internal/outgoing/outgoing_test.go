@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/vukappa4/whatsapp-mcp/internal/childproc"
+	"github.com/vukappa4/whatsapp-mcp/internal/testaudio"
 )
 
 // native turns a test path written with backslashes into this OS's form.
@@ -369,13 +370,17 @@ func TestConvertVoice(t *testing.T) {
 		t.Skip(err)
 	}
 	dir := t.TempDir()
-	src := filepath.Join(dir, "memo.mp3")
-	// 3 s: 1 s silence, 2 s tone, stereo 44.1 kHz MP3.
-	gen := exec.Command(ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
-		"aevalsrc=if(lt(t\\,1)\\,0\\,0.8*sin(2*PI*440*t))|if(lt(t\\,1)\\,0\\,0.8*sin(2*PI*440*t)):s=44100:d=3", "-c:a", "libmp3lame", src)
-	childproc.Hide(gen)
-	if out, err := gen.CombinedOutput(); err != nil {
-		t.Fatalf("generate mp3: %v %s", err, out)
+	src := filepath.Join(dir, "memo.wav")
+	// 3 s: 1 s silence, 2 s tone, stereo 44.1 kHz.
+	tone := testaudio.Tone(440, 0.8)
+	silenceThenTone := func(t float64) float64 {
+		if t < 1 {
+			return 0
+		}
+		return tone(t)
+	}
+	if err := testaudio.WAV(src, 44100, 2, 3, silenceThenTone); err != nil {
+		t.Fatal(err)
 	}
 	v, err := ConvertVoice(context.Background(), src)
 	if err != nil {

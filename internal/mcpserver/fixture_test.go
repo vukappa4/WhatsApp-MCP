@@ -152,7 +152,9 @@ func serveFixture(tb testing.TB, db *store.DB) *Server {
 	tb.Cleanup(mgr.Stop)
 	return &Server{DB: db, WA: fixedStatus{State: wa.StateConnected, Since: fxEnd.Add(-26 * time.Hour), StartedAt: fxEnd.Add(-26 * time.Hour),
 		AccountPN: fxMe, AccountLID: fxMeLID}, Media: mgr, Profile: "dev", DataDir: "x", Version: "test",
-		Now: func() time.Time { return fxNow }}
+		Now: func() time.Time { return fxNow },
+		// Up to date, as almost always: the size report counts no notice.
+		Updates: fixedUpdate{Installed: "v0.1.1", Latest: "v0.1.1", CheckedAt: fxNow.Add(-5 * time.Hour), NextAt: fxNow.Add(19 * time.Hour)}}
 }
 
 func buildFixture() (dir string, err error) {

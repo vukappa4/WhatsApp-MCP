@@ -118,21 +118,50 @@ func ToolsDir() (string, error) {
 	return filepath.Join(base, "tools"), nil
 }
 
-// FFmpegCandidates lists, in order, where ffmpeg is looked for when it is not
-// on PATH: a copy in the tools directory, then the package managers'
-// install locations. A daemon started by Task Scheduler or launchd runs
-// without the user's interactive PATH, which is where those live.
-//   - Windows: winget's install of Gyan.FFmpeg (its Links shim, then the
-//     package folders, newest first).
-//   - macOS and others: Homebrew on Apple Silicon (/opt/homebrew), Homebrew
-//     on Intel (/usr/local), MacPorts (/opt/local).
-func FFmpegCandidates() []string {
+// PinnedFFmpegDir is the folder of ToolsDir where setup-transcription
+// installs the pinned ffmpeg build on macOS (internal/media pins the
+// archive).
+const PinnedFFmpegDir = "ffmpeg-8.1.3"
+
+// FFmpegSearch is where ffmpeg is looked for, in order: Pinned, then PATH,
+// then Fallback.
+type FFmpegSearch struct {
+	// Pinned is the build setup-transcription installs on macOS, the one
+	// tools.yml tests: it wins over PATH, which for the daemon includes
+	// Homebrew's folders. "" where no ffmpeg is pinned.
+	Pinned string
+	// Fallback are the places tried when PATH has no ffmpeg: a copy in the
+	// tools directory, then the package managers' install locations. A
+	// daemon started by Task Scheduler or launchd runs without the user's
+	// interactive PATH, which is where those live.
+	//   - Windows: winget's install of Gyan.FFmpeg (its Links shim, then the
+	//     package folders, newest first).
+	//   - macOS and others: Homebrew on Apple Silicon (/opt/homebrew),
+	//     Homebrew on Intel (/usr/local), MacPorts (/opt/local).
+	Fallback []string
+}
+
+// Places lists the files s names, Pinned first: where ffmpeg was looked for
+// besides PATH.
+func (s FFmpegSearch) Places() []string {
+	if s.Pinned == "" {
+		return s.Fallback
+	}
+	return append([]string{s.Pinned}, s.Fallback...)
+}
+
+// FFmpegLocations is where this OS looks for ffmpeg.
+func FFmpegLocations() FFmpegSearch {
 	base, err := AppDir()
 	if err != nil {
-		return nil
+		return FFmpegSearch{}
 	}
 	if runtime.GOOS != "windows" {
-		return []string{filepath.Join(base, "tools", "ffmpeg"), "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/opt/local/bin/ffmpeg"}
+		s := FFmpegSearch{Fallback: []string{filepath.Join(base, "tools", "ffmpeg"), "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/opt/local/bin/ffmpeg"}}
+		if runtime.GOOS == "darwin" {
+			s.Pinned = filepath.Join(base, "tools", PinnedFFmpegDir, "ffmpeg")
+		}
+		return s
 	}
 	local := filepath.Dir(base)
 	out := []string{filepath.Join(base, "tools", "ffmpeg.exe"), filepath.Join(local, "Microsoft", "WinGet", "Links", "ffmpeg.exe")}
@@ -145,7 +174,7 @@ func FFmpegCandidates() []string {
 		return fi.ModTime()
 	}
 	sort.SliceStable(pkgs, func(i, j int) bool { return mod(pkgs[i]).After(mod(pkgs[j])) })
-	return append(out, pkgs...)
+	return FFmpegSearch{Fallback: append(out, pkgs...)}
 }
 
 // FFmpegInstallHint is the command that installs ffmpeg on this OS.
@@ -154,7 +183,7 @@ func FFmpegInstallHint() string {
 	case "windows":
 		return "winget install Gyan.FFmpeg"
 	case "darwin":
-		return "brew install ffmpeg"
+		return "run `whatsapp-mcp setup-transcription`, or `brew install ffmpeg`"
 	}
 	return "install ffmpeg with the system package manager"
 }

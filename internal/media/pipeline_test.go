@@ -28,6 +28,9 @@ func TestPipelineHelperProcess(t *testing.T) {
 	case "ffmpeg-sigpipe":
 		// Outside Windows, a writer that keeps SIGPIPE dies from it.
 		stream()
+	case "ffmpeg-decodes":
+		os.Stdout.Write(make([]byte, 64<<10))
+		os.Exit(0)
 	case "ffmpeg-fails":
 		fmt.Fprintln(os.Stderr, "Invalid data found when processing input")
 		os.Exit(1)
@@ -39,6 +42,45 @@ func TestPipelineHelperProcess(t *testing.T) {
 			fmt.Fprintln(os.Stderr, "error: no audio")
 			os.Exit(1)
 		}
+		fmt.Println("ok")
+		os.Exit(0)
+	case "engine-unreadable":
+		// parakeet-cli on audio it cannot read: the error, then exit 0.
+		io.Copy(io.Discard, os.Stdin)
+		fmt.Fprintln(os.Stderr, "load_backend: loaded CPU backend from ggml-cpu.dll")
+		fmt.Fprintln(os.Stderr, "read_audio_data: failed to open audio data from stdin (Unknown error)")
+		fmt.Fprintln(os.Stderr, "error: failed to read audio file '-'")
+		os.Exit(0)
+	case "whisper-unreadable":
+		// whisper-cli on the same audio exits 11.
+		io.Copy(io.Discard, os.Stdin)
+		fmt.Fprintln(os.Stderr, "read_audio_data: failed to open audio data from stdin (Unknown error)")
+		fmt.Fprintln(os.Stderr, "error: failed to read audio file '-'")
+		fmt.Fprintln(os.Stderr, "error: 1 input file(s) failed")
+		os.Exit(11)
+	case "engine-quits":
+		// The same error before reading all of stdin breaks ffmpeg's output.
+		fmt.Fprintln(os.Stderr, "error: failed to read audio file '-'")
+		os.Exit(0)
+	case "engine-silent":
+		// parakeet-cli on silence: progress on stderr, an empty line of text.
+		n, _ := io.Copy(io.Discard, os.Stdin)
+		fmt.Fprintf(os.Stderr, "read_audio_data: read %d bytes from stdin\n", n)
+		fmt.Print("\r\n")
+		os.Exit(0)
+	case "whisper-error-exit0":
+		// whisper-cli on audio it cannot read, as parakeet-cli exits: 0.
+		io.Copy(io.Discard, os.Stdin)
+		fmt.Fprintln(os.Stderr, "error: failed to read audio file '-'")
+		os.Exit(0)
+	case "engine-warns":
+		// Library lines that name an error or a warning mid-line, and
+		// warnings: a backend that falls back to the CPU still transcribes.
+		io.Copy(io.Discard, os.Stdin)
+		fmt.Fprintln(os.Stderr, "ggml_metal_init: error: failed to allocate buffer, falling back to CPU")
+		fmt.Fprintln(os.Stderr, "whisper_init_state: compute buffer: no error: 12 MB")
+		fmt.Fprintln(os.Stderr, "warning: the language is set to auto")
+		fmt.Fprint(os.Stderr, "progress = 50%\rprogress = 100%\r")
 		fmt.Println("ok")
 		os.Exit(0)
 	}
@@ -64,6 +106,7 @@ func stream() {
 
 // TestPipelineReportsTheCause names the cause, not the symptom: an engine
 // that quits breaks ffmpeg's output, and a failing ffmpeg starves the engine.
+// An engine that prints an error line failed, whatever its exit code.
 func TestPipelineReportsTheCause(t *testing.T) {
 	t.Setenv("WHATSAPP_MCP_PIPELINE_HELPER", "1")
 	exe, err := os.Executable()
@@ -77,12 +120,69 @@ func TestPipelineReportsTheCause(t *testing.T) {
 		{"ffmpeg-streams", "engine-fails", "failed to load model"},
 		{"ffmpeg-sigpipe", "engine-fails", "failed to load model"},
 		{"ffmpeg-fails", "engine-reads", "Invalid data found when processing input"},
+		{"ffmpeg-decodes", "engine-unreadable", "failed: read_audio_data: failed to open audio data from stdin (Unknown error); error: failed to read audio file '-'"},
+		{"ffmpeg-decodes", "whisper-unreadable", "exit status 11: read_audio_data: failed to open audio data from stdin (Unknown error); error: failed to read audio file '-'; error: 1 input file(s) failed"},
+		{"ffmpeg-streams", "engine-quits", "failed to read audio file"},
+		{"ffmpeg-sigpipe", "engine-quits", "failed to read audio file"},
+		{"ffmpeg-decodes", "whisper-error-exit0", "failed: error: failed to read audio file '-'"},
 	} {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		_, err := pipeline(ctx, exe, args(tc.ffmpeg), exe, args(tc.engine))
 		cancel()
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s | %s: error %v, want it to name %q", tc.ffmpeg, tc.engine, err, tc.want)
+		}
+	}
+}
+
+// An engine that reports no error and prints an empty line heard no speech:
+// that is a result, not a failure.
+func TestPipelineSilenceIsNoError(t *testing.T) {
+	t.Setenv("WHATSAPP_MCP_PIPELINE_HELPER", "1")
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := func(role string) []string { return []string{"-test.run=^TestPipelineHelperProcess$", "--", role} }
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	out, err := pipeline(ctx, exe, args("ffmpeg-decodes"), exe, args("engine-silent"))
+	if err != nil || strings.TrimSpace(string(out)) != "" {
+		t.Fatalf("silence: %q, %v", out, err)
+	}
+	// "error:" inside a library line, and warnings, are no failure.
+	out, err = pipeline(ctx, exe, args("ffmpeg-decodes"), exe, args("engine-warns"))
+	if err != nil || strings.TrimSpace(string(out)) != "ok" {
+		t.Fatalf("warnings: %q, %v", out, err)
+	}
+}
+
+// Only a line that starts with "error:" fails a run, however the writes
+// split it: whisper.cpp's tools print their errors that way, while library
+// lines such as "ggml_metal_init: error: ..." report a fallback, not a
+// failed run (and -np turns them off).
+func TestEngineLogErrorLines(t *testing.T) {
+	for _, tc := range []struct {
+		writes []string
+		failed bool
+	}{
+		{[]string{"error: failed to read audio file '-'\n"}, true},
+		{[]string{"  Error: no model\n"}, true},
+		{[]string{"progress = 10%\rerror: out of memory"}, true},
+		{[]string{"read_audio_data: ok\ner", "ror: failed to read audio file '-'\n"}, true},
+		{[]string{"ggml_metal_init: error: failed to allocate buffer\n"}, false},
+		{[]string{"whisper_full: no error: done\n", "warning: error: later\n"}, false},
+		{[]string{"warning: falling back to the CPU\n"}, false},
+		{[]string{strings.Repeat("x", 40) + " error: mid-line\n"}, false},
+		{[]string{"errors: 0\n", "error\n"}, false},
+	} {
+		var l engineLog
+		l.tail.n = 2048
+		for _, w := range tc.writes {
+			l.Write([]byte(w))
+		}
+		if l.failed != tc.failed {
+			t.Errorf("%q: failed = %v, want %v", tc.writes, l.failed, tc.failed)
 		}
 	}
 }

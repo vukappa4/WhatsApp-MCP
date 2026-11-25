@@ -155,6 +155,9 @@ func (s *Server) freshLine(d freshData, from, to int64) string {
 	if stale {
 		line += " - results may be stale"
 	}
+	if n := s.updateNotice(); n != "" {
+		line += " | " + n
+	}
 	return line + "]"
 }
 

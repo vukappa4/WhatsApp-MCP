@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/vukappa4/whatsapp-mcp/internal/childproc"
+	"github.com/vukappa4/whatsapp-mcp/internal/config"
 )
 
 // Transcriber turns an audio file into text.
@@ -41,19 +42,19 @@ const (
 type CLITranscriber struct {
 	Choice   string // EngineParakeet or EngineWhisper
 	ToolsDir string
-	// LookPath finds ffmpeg and, outside Windows, the engine on PATH;
-	// exec.LookPath when nil.
+	// LookPath finds ffmpeg and, where the tools are not pinned (see
+	// toolExe), the engine on PATH; exec.LookPath when nil.
 	LookPath func(string) (string, error)
-	// FFmpegCandidates are tried in order when ffmpeg is not on PATH.
-	FFmpegCandidates []string
+	// FFmpegSearch is where ffmpeg is looked for besides PATH.
+	FFmpegSearch config.FFmpegSearch
 }
 
 // NewTranscriber returns the transcriber for a --transcriber choice; nil for
-// "off". ffmpegCandidates are the places to find ffmpeg when PATH lacks it.
-func NewTranscriber(choice, toolsDir string, ffmpegCandidates []string) (Transcriber, error) {
+// "off". ffmpeg is where ffmpeg is looked for besides PATH.
+func NewTranscriber(choice, toolsDir string, ffmpeg config.FFmpegSearch) (Transcriber, error) {
 	switch choice {
 	case EngineParakeet, EngineWhisper:
-		return &CLITranscriber{Choice: choice, ToolsDir: toolsDir, FFmpegCandidates: ffmpegCandidates}, nil
+		return &CLITranscriber{Choice: choice, ToolsDir: toolsDir, FFmpegSearch: ffmpeg}, nil
 	case EngineOff:
 		return nil, nil
 	}
@@ -84,7 +85,7 @@ func (t *CLITranscriber) Engine() string {
 
 // FFmpeg is the ffmpeg executable the transcriber runs.
 func (t *CLITranscriber) FFmpeg() (string, error) {
-	return childproc.FindFFmpeg(t.LookPath, t.FFmpegCandidates)
+	return childproc.FindFFmpeg(t.LookPath, t.FFmpegSearch)
 }
 
 func (t *CLITranscriber) Check() error {
@@ -196,6 +197,56 @@ func (t *tailBuffer) Write(p []byte) (int, error) {
 
 func (t *tailBuffer) String() string { return strings.TrimSpace(string(t.b)) }
 
+// engineLog is an engine's stderr: its tail, and whether a line reported an
+// error. whisper.cpp's tools print "error: ..." for a failed input and carry
+// on: parakeet-cli then exits 0 with no text, which is a failure, not silence.
+type engineLog struct {
+	tail   tailBuffer
+	head   []byte // the current line's first bytes
+	failed bool
+}
+
+func (l *engineLog) Write(p []byte) (int, error) {
+	l.tail.Write(p)
+	for _, c := range p {
+		switch {
+		case c == '\n' || c == '\r':
+			l.head = l.head[:0]
+		case len(l.head) < 32:
+			l.head = append(l.head, c)
+			l.failed = l.failed || isErrorLine(string(l.head))
+		}
+	}
+	return len(p), nil
+}
+
+// isErrorLine reports whether a line is one of the "error: ..." lines
+// whisper.cpp's tools print on a failure.
+func isErrorLine(line string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(line)), "error:")
+}
+
+// cause explains a failed run. whisper.cpp prints the specific reason on the
+// line before its generic error line, so the cause runs from that line to
+// the end; without an error line it is the last line.
+func (l *engineLog) cause() string {
+	var lines []string
+	for _, s := range strings.Split(l.tail.String(), "\n") {
+		if s = strings.TrimSpace(s); s != "" {
+			lines = append(lines, s)
+		}
+	}
+	for i, s := range lines {
+		if isErrorLine(s) {
+			return strings.Join(lines[max(0, i-1):], "; ")
+		}
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return lines[len(lines)-1]
+}
+
 // pipeline runs `first | second` and returns second's stdout.
 func pipeline(ctx context.Context, first string, firstArgs []string, second string, secondArgs []string) ([]byte, error) {
 	a := exec.CommandContext(ctx, first, firstArgs...)
@@ -209,7 +260,7 @@ func pipeline(ctx context.Context, first string, firstArgs []string, second stri
 		return nil, err
 	}
 	var out bytes.Buffer
-	aErr, bErr := &tailBuffer{n: 2048}, &tailBuffer{n: 2048}
+	aErr, bErr := &tailBuffer{n: 2048}, &engineLog{tail: tailBuffer{n: 2048}}
 	a.Stdout, a.Stderr = pw, aErr
 	b.Stdin, b.Stdout, b.Stderr = pr, &out, bErr
 	if err := a.Start(); err != nil {
@@ -229,14 +280,17 @@ func pipeline(ctx context.Context, first string, firstArgs []string, second stri
 	pw.Close()
 	errA := a.Wait()
 	errB := b.Wait()
+	engineFailed := errB != nil || bErr.failed
 	// A failing ffmpeg starves the engine, and an engine that quits breaks
 	// ffmpeg's output: report the cause, not the symptom. Which one exits
 	// first is a race, so only ffmpeg's own error tells them apart.
 	switch {
-	case errA != nil && (errB == nil || !closedPipe(errA, aErr.String())):
+	case errA != nil && (!engineFailed || !closedPipe(errA, aErr.String())):
 		return nil, fmt.Errorf("ffmpeg failed: %v: %s", errA, lastLine(aErr.String()))
 	case errB != nil:
-		return nil, fmt.Errorf("%s failed: %v: %s", filepath.Base(second), errB, lastLine(bErr.String()))
+		return nil, fmt.Errorf("%s failed: %v: %s", filepath.Base(second), errB, bErr.cause())
+	case bErr.failed:
+		return nil, fmt.Errorf("%s failed: %s", filepath.Base(second), bErr.cause())
 	}
 	return out.Bytes(), nil
 }

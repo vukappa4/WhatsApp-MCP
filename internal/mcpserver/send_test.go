@@ -31,6 +31,7 @@ import (
 	"github.com/vukappa4/whatsapp-mcp/internal/outgoing"
 	"github.com/vukappa4/whatsapp-mcp/internal/people"
 	"github.com/vukappa4/whatsapp-mcp/internal/store"
+	"github.com/vukappa4/whatsapp-mcp/internal/testaudio"
 	"github.com/vukappa4/whatsapp-mcp/internal/wa"
 )
 
@@ -549,9 +550,8 @@ func TestSendFile(t *testing.T) {
 	}
 	wav := filepath.Join(e.home, "Music", "memo.wav")
 	_ = os.MkdirAll(filepath.Dir(wav), 0o700)
-	gen := exec.Command("ffmpeg", "-nostdin", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=300:duration=2", wav)
-	if out, err := gen.CombinedOutput(); err != nil {
-		t.Fatalf("generate wav: %v %s", err, out)
+	if err := testaudio.WAV(wav, 44100, 1, 2, testaudio.Tone(300, 0.125)); err != nil {
+		t.Fatal(err)
 	}
 	text, isErr = call(t, e.cs, toolSendFile, map[string]any{"to": "+39 333 111 1111", "path": wav, "kind": "voice_note"})
 	if isErr {
@@ -636,9 +636,8 @@ func TestSentFileServedFromMediaFolder(t *testing.T) {
 	if _, err := exec.LookPath("ffmpeg"); err == nil {
 		wav := filepath.Join(e.home, "Music", "memo.wav")
 		_ = os.MkdirAll(filepath.Dir(wav), 0o700)
-		gen := exec.Command("ffmpeg", "-nostdin", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=300:duration=2", wav)
-		if out, err := gen.CombinedOutput(); err != nil {
-			t.Fatalf("generate wav: %v %s", err, out)
+		if err := testaudio.WAV(wav, 44100, 1, 2, testaudio.Tone(300, 0.125)); err != nil {
+			t.Fatal(err)
 		}
 		ids = append(ids, send(map[string]any{"to": "+39 333 111 1111", "path": wav, "kind": "voice_note"}))
 		opus := e.fake.uploaded[1]

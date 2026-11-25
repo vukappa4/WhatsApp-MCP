@@ -18,7 +18,7 @@ type migration struct {
 
 // migrations is append-only. Entry i upgrades the schema to version i+1.
 // Never edit an applied entry: add a new one.
-var migrations = []migration{{sql: schemaV1}, {sql: schemaV2}, {sql: schemaV3}, {sql: schemaV4, noFK: true}, {sql: schemaV5}, {sql: schemaV6}, {sql: schemaV7}, {sql: schemaV8}, {sql: schemaV9}, {sql: schemaV10}, {sql: schemaV11}, {sql: schemaV12}, {sql: schemaV13}}
+var migrations = []migration{{sql: schemaV1}, {sql: schemaV2}, {sql: schemaV3}, {sql: schemaV4, noFK: true}, {sql: schemaV5}, {sql: schemaV6}, {sql: schemaV7}, {sql: schemaV8}, {sql: schemaV9}, {sql: schemaV10}, {sql: schemaV11}, {sql: schemaV12}, {sql: schemaV13}, {sql: schemaV14}}
 
 // SchemaVersion is the version a fresh database ends at.
 func SchemaVersion() int { return len(migrations) }
@@ -382,12 +382,12 @@ CREATE TRIGGER media_fts_transcript AFTER UPDATE OF transcript ON media BEGIN
 END;
 `
 
-// schemaV13: autosend approvals. A rule lets one Desktop scheduled task, of
+// schemaV14: autosend approvals. A rule lets one Desktop scheduled task, of
 // one Desktop account/org folder, send to fixed JIDs while the task's
 // fingerprint is unchanged. Rules match sends on JIDs, never on chat or
 // person ids (a reingest reuses those): ref only records the id approved.
 // No foreign key to chats: ResetDerived leaves the rules alone.
-const schemaV13 = `
+const schemaV14 = `
 CREATE TABLE autosend_rules (
 	task_id     TEXT PRIMARY KEY,
 	task_dir    TEXT    NOT NULL,  -- the account/org folder of the task's scheduled-tasks.json
@@ -403,6 +403,14 @@ CREATE TABLE autosend_chats (
 	label   TEXT NOT NULL,
 	PRIMARY KEY (task_id, jid)
 );
+`
+
+// schemaV13: empty transcripts are transcribed again. An empty transcript
+// may hide an engine failure: parakeet-cli prints an error and exits 0 with
+// no text. The sweep picks the rows up again; silence comes back empty.
+const schemaV13 = `
+UPDATE media SET transcript = NULL, transcript_lang = NULL, transcript_engine = NULL, transcript_error = ''
+WHERE transcript = '';
 `
 
 // schemaV12: indexes for the exact-name chat lookup (FindChats), one per

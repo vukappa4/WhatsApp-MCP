@@ -643,7 +643,10 @@ func (m *Manager) storeReuploadPath(ctx context.Context, j store.MediaJob, path 
 }
 
 // sidecar is a transcript stored next to its audio file, so a reingest that
-// rebuilds data.db keeps transcripts without running the engine again.
+// rebuilds data.db keeps transcripts without running the engine again. Only
+// text gets a sidecar: an empty one cannot tell silence from an engine
+// failure stored as silence, so it is never written or adopted, and silence
+// is transcribed again, which is cheap.
 type sidecar struct {
 	Text   string `json:"text"`
 	Lang   string `json:"lang,omitempty"`
@@ -655,7 +658,7 @@ func sidecarPath(abs string) string { return abs + ".transcript.json" }
 func readSidecar(abs string) (sidecar, bool) {
 	var s sidecar
 	b, err := os.ReadFile(sidecarPath(abs))
-	if err != nil || json.Unmarshal(b, &s) != nil || s.Engine == "" {
+	if err != nil || json.Unmarshal(b, &s) != nil || s.Engine == "" || s.Text == "" {
 		return s, false
 	}
 	return s, true
@@ -712,7 +715,7 @@ func (m *Manager) runTranscribe(t *task) error {
 	if err != nil {
 		return err
 	}
-	if b, err := json.Marshal(sidecar{Text: text, Lang: lang, Engine: engine}); err == nil {
+	if b, err := json.Marshal(sidecar{Text: text, Lang: lang, Engine: engine}); err == nil && text != "" {
 		if err := os.WriteFile(sidecarPath(abs), b, 0o600); err != nil {
 			m.o.Log.Warn("write transcript sidecar", "err", err)
 		}

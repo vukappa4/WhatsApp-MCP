@@ -13,7 +13,7 @@ import (
 func launchdLabel(p config.Profile) string { return "io.github.vukappa4.whatsapp-mcp." + string(p) }
 
 // launchdPATH is the daemon's PATH: launchd's default (/usr/bin:/bin:
-// /usr/sbin:/sbin) lacks Homebrew, where ffmpeg and whisper.cpp live.
+// /usr/sbin:/sbin) lacks Homebrew, where the user's own ffmpeg lives.
 const launchdPATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 // launchdThrottle is the least time between two starts: a daemon that
