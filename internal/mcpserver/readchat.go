@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -378,17 +379,25 @@ type shown struct {
 // shows it: in detailed mode, or when w.transcripts asks for it.
 func (w wrapper) shown(m *store.MessageRow, full bool) shown {
 	var s shown
-	s.text = m.Text
-	if r, max := []rune(m.Text), w.textCap(full); max > 0 && len(r) > max {
-		s.text, s.textCut = string(r[:max])+"…", len(r)
-	}
+	s.text, s.textCut = cutRunes(m.Text, w.textCap(full))
 	if t := m.Transcript(); t != "" && (full || w.transcripts) {
-		s.transcript = t
-		if r := []rune(t); w.capText > 0 && len(r) > w.capText {
-			s.transcript, s.transcriptCut = string(r[:w.capText])+"…", len(r)
-		}
+		s.transcript, s.transcriptCut = cutRunes(t, w.capText)
 	}
 	return s
+}
+
+// cutRunes cuts s to max runes plus "…" and gives its length in runes, or
+// returns s whole and 0 when it fits or max is 0. Only a cut converts s to
+// runes.
+func cutRunes(s string, max int) (string, int) {
+	if max <= 0 || len(s) <= max { // a rune takes at least one byte
+		return s, 0
+	}
+	n := utf8.RuneCountInString(s)
+	if n <= max {
+		return s, 0
+	}
+	return string([]rune(s)[:max]) + "…", n
 }
 
 // line renders one transcript line, for a block.

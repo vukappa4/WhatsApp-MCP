@@ -341,19 +341,30 @@ func (w wrapper) cutLine(m *store.MessageRow, full bool, maxText int, textExcerp
 		}
 		return w.lineOf(m, full, s)
 	}
-	if r := []rune(m.Text); len(r) > maxText {
-		s.text, s.textCut = textExcerpt, len(r)
-		if s.text == "" || len([]rune(s.text)) >= len(r) {
-			s.text = string(r[:maxText]) + "…"
-		}
+	if t, n, ok := excerptOf(m.Text, maxText, textExcerpt); ok {
+		s.text, s.textCut = t, n
 	}
-	if r := []rune(s.transcript); len(r) > maxText {
-		s.transcript, s.transcriptCut = transcriptExcerpt, len(r)
-		if s.transcript == "" || len([]rune(s.transcript)) >= len(r) {
-			s.transcript = string(r[:maxText]) + "…"
-		}
+	if t, n, ok := excerptOf(s.transcript, maxText, transcriptExcerpt); ok {
+		s.transcript, s.transcriptCut = t, n
 	}
 	return w.lineOf(m, false, s)
+}
+
+// excerptOf cuts s when it is over max runes: to excerpt, or to its first max
+// runes when the excerpt is empty or no shorter. n is the length of s in
+// runes; ok is false when s fits. Only a cut without excerpt converts s to
+// runes.
+func excerptOf(s string, max int, excerpt string) (cut string, n int, ok bool) {
+	if len(s) <= max { // a rune takes at least one byte
+		return "", 0, false
+	}
+	if n = utf8.RuneCountInString(s); n <= max {
+		return "", 0, false
+	}
+	if excerpt == "" || utf8.RuneCountInString(excerpt) >= n {
+		return string([]rune(s)[:max]) + "…", n, true
+	}
+	return excerpt, n, true
 }
 
 // window cuts s to n runes centred on excerpt, the match's FTS snippet ("…"
