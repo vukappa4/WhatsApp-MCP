@@ -17,7 +17,7 @@ func TestSearchMessages(t *testing.T) {
 	// Accents: "perche" finds "Perché" in the DM and in the group; senders render as names.
 	text, isErr := search(map[string]any{"query": "perche"})
 	if isErr || hits(text) != 2 || !strings.HasPrefix(text, "[whatsapp: ") || !strings.Contains(text, "Perché non vieni") ||
-		!strings.Contains(text, "Niccolò D'Amico:") || !strings.Contains(text, "Calcetto</untrusted_wa") {
+		!strings.Contains(text, "Niccolò D'Amico:") || !strings.Contains(text, `#2 c_3 "Calcetto" (group)`) {
 		t.Fatalf("accents:\n%s", text)
 	}
 
@@ -44,13 +44,13 @@ func TestSearchMessages(t *testing.T) {
 
 	// The transcript is searchable and shown with the voice note.
 	text, _ = search(map[string]any{"query": "bonifico"})
-	if !strings.Contains(text, "[voice 0:07 · transcript: <untrusted_wa") {
+	if !strings.Contains(text, "[voice 0:07 · transcript] ") {
 		t.Fatalf("transcript hit:\n%s", text)
 	}
 
 	// A long transcript becomes an excerpt around the match in concise mode.
 	text, _ = search(map[string]any{"query": "assicurazione"})
-	if !strings.Contains(text, "della assicurazione") || !strings.Contains(text, "[transcript excerpt of ") || len(text) > 1200 {
+	if !strings.Contains(text, "della assicurazione") || !strings.Contains(text, "[cut ") || len(text) > 1200 {
 		t.Fatalf("long transcript (%d chars):\n%s", len(text), text)
 	}
 
@@ -123,7 +123,7 @@ func TestSearchMessages(t *testing.T) {
 	// Paging, both orders: 25 hits in pages of 20 + 5, no repeats; concise output stays small.
 	for _, sort := range []string{"relevance", "newest"} {
 		text, _ = search(map[string]any{"query": "pizza", "sort": sort})
-		if len(text) > 16000 || !strings.Contains(text, "[excerpt of ") || !strings.Contains(text, "25 matches") {
+		if len(text) > 16000 || !strings.Contains(text, "[cut ") || !strings.Contains(text, "25 matches") {
 			t.Fatalf("%s page 1 (%d chars):\n%s", sort, len(text), text)
 		}
 		seen := map[string]bool{}
@@ -150,7 +150,7 @@ func TestSearchMessages(t *testing.T) {
 		t.Fatalf("newest first:\n%s", text)
 	}
 	full, _ := search(map[string]any{"query": "pizza", "limit": 1, "response_format": "detailed"})
-	if strings.Contains(full, "[excerpt") || !strings.Contains(full, "(wa_id ") {
+	if strings.Contains(full, "[cut ") || !strings.Contains(full, "(wa_id ") {
 		t.Fatalf("detailed must show the full text:\n%s", full)
 	}
 }

@@ -45,16 +45,16 @@ func TestFreshnessGapCacheFollowsLog(t *testing.T) {
 		}
 		same()
 	}
-	line("gap 09:59 - 10:30 overlaps this range")
-	line("gap 09:59 - 10:30 overlaps this range") // served from the cache
+	line("gaps in this range: 09:59 - 10:30]")
+	line("gaps in this range: 09:59 - 10:30]") // served from the cache
 	store.LogConnection(ctx, db, t0.Add(150*time.Minute), store.EvDisconnected, "")
-	line("gap 12:30 - now overlaps this range")
+	line("gaps in this range: 09:59 - 10:30; 12:30 - now]")
 	store.LogConnection(ctx, db, t0.Add(160*time.Minute), store.EvConnected, "")
-	line("gap 12:30 - 12:40 overlaps this range")
+	line("gaps in this range: 09:59 - 10:30; 12:30 - 12:40]")
 	// A row older than the newest still counts: Gaps orders by ts, so the
 	// first gap now opens at the keepalive timeout.
 	store.LogConnection(ctx, db, t0.Add(-30*time.Minute), store.EvKeepAliveLost, "")
-	line("gap 09:30 - 10:30 overlaps this range")
+	line("gaps in this range: 09:30 - 10:30; 12:30 - 12:40]")
 	res, err := s.status(ctx, nil, statusIn{})
 	if err != nil {
 		t.Fatal(err)
@@ -62,6 +62,12 @@ func TestFreshnessGapCacheFollowsLog(t *testing.T) {
 	text := res.Content[0].(*mcp.TextContent).Text
 	if !strings.Contains(text, "Offline gaps (daemon not connected): 2 recorded:\n") || !strings.Contains(text, "(keepalive_timeout)") {
 		t.Fatalf("status gaps:\n%s", text)
+	}
+	// The events list leaves out the events a listed gap starts or ends with.
+	if !strings.Contains(text, "Other recent connection events:\n") ||
+		!strings.Contains(text, "- 12 Oct 09:59 disconnected\n- 12 Oct 09:00 connected") ||
+		strings.Contains(text, "12:30 disconnected") || strings.Contains(text, "12:40 connected") || strings.Contains(text, "09:30 keepalive_timeout") {
+		t.Fatalf("status events:\n%s", text)
 	}
 }
 

@@ -61,7 +61,7 @@ func (s *Server) loadFresh(ctx context.Context) (freshData, error) {
 }
 
 // freshness builds the line that starts every read result. from/to (unix)
-// bound the data shown; gaps of the daemon overlapping them are named.
+// bound the data shown; the daemon's gaps overlapping them are listed.
 func (s *Server) freshness(ctx context.Context, from, to int64) (string, error) {
 	d, err := s.loadFresh(ctx)
 	if err != nil {
@@ -142,13 +142,15 @@ func (s *Server) freshLine(d freshData, from, to int64) string {
 			if !g.To.IsZero() {
 				end = fmtShort(g.To, now)
 			}
-			hits = append(hits, fmt.Sprintf("gap %s - %s overlaps this range", fmtShort(g.From, now), end))
+			hits = append(hits, fmtShort(g.From, now)+" - "+end)
 		}
 	}
 	if len(hits) > 3 {
 		hits = append(hits[len(hits)-3:], fmt.Sprintf("%d older gaps", len(hits)-3))
 	}
-	parts = append(parts, hits...)
+	if len(hits) > 0 {
+		parts = append(parts, "gaps in this range: "+strings.Join(hits, "; "))
+	}
 	line := "[whatsapp: " + strings.Join(parts, " | ")
 	if stale {
 		line += " - results may be stale"

@@ -24,10 +24,16 @@ type typedPrompt struct {
 	At   time.Time
 }
 
+// transcriptChunk is how much of the transcript lastUserPrompt reads at a
+// time, from the end backwards.
+var transcriptChunk int64 = 64 << 10
+
 // lastUserPrompt finds the newest prompt typed by the user in a Claude Code
 // session transcript (JSONL): a "user" entry whose content is text, not a
-// tool result, not meta and not a subagent's. ok is false when there is
-// none or the file cannot be read.
+// tool result, not meta and not a subagent's. It reads the last
+// transcriptTail bytes from the end in chunks and stops at the first prompt
+// it finds; a line cut by that limit does not count. ok is false when there
+// is none or the file cannot be read.
 func lastUserPrompt(path string) (typedPrompt, bool) {
 	if path == "" {
 		return typedPrompt{}, false
@@ -41,21 +47,56 @@ func lastUserPrompt(path string) (typedPrompt, bool) {
 	if err != nil {
 		return typedPrompt{}, false
 	}
-	off := max(st.Size()-transcriptTail, 0)
-	buf := make([]byte, st.Size()-off)
-	if _, err := f.ReadAt(buf, off); err != nil && err != io.EOF {
-		return typedPrompt{}, false
+	lower := max(st.Size()-transcriptTail, 0)
+	// pending is the line the chunks read so far start in, cut into those
+	// chunks, newest first. Only a new chunk is searched for a newline, and
+	// a line is joined once, when it completes: a long line costs linear time.
+	var pending [][]byte
+	for pos := st.Size(); pos > lower; {
+		n := min(transcriptChunk, pos-lower)
+		pos -= n
+		data := make([]byte, n)
+		if _, err := f.ReadAt(data, pos); err != nil && err != io.EOF {
+			return typedPrompt{}, false
+		}
+		for {
+			i := bytes.LastIndexByte(data, '\n')
+			if i < 0 {
+				break
+			}
+			if p, ok := promptEntry(joinLine(data[i+1:], pending)); ok {
+				return p, true
+			}
+			pending = pending[:0]
+			data = data[:i]
+		}
+		pending = append(pending, data)
 	}
-	lines := bytes.Split(buf, []byte("\n"))
-	if off > 0 && len(lines) > 0 {
-		lines = lines[1:] // cut mid-line
-	}
-	for i := len(lines) - 1; i >= 0; i-- {
-		if p, ok := promptEntry(lines[i]); ok {
+	if lower == 0 { // the file's first line; past the limit it is cut mid-line
+		if p, ok := promptEntry(joinLine(nil, pending)); ok {
 			return p, true
 		}
 	}
 	return typedPrompt{}, false
+}
+
+// joinLine is the line that starts with head and goes on with tail, whose
+// chunks run from the end of the file backwards. With no tail it is head,
+// not a copy.
+func joinLine(head []byte, tail [][]byte) []byte {
+	if len(tail) == 0 {
+		return head
+	}
+	n := len(head)
+	for _, c := range tail {
+		n += len(c)
+	}
+	line := make([]byte, 0, n)
+	line = append(line, head...)
+	for i := len(tail) - 1; i >= 0; i-- {
+		line = append(line, tail[i]...)
+	}
+	return line
 }
 
 // promptEntry reads one transcript line as a typed user prompt.

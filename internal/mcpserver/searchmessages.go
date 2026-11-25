@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -23,7 +24,7 @@ type searchMessagesIn struct {
 	Context        int    `json:"context,omitempty" jsonschema:"messages of the same chat shown before and after each hit, 0-3, default 0"`
 	Limit          int    `json:"limit,omitempty" jsonschema:"hits per page, 1-50, default 20 (10 with context)"`
 	Cursor         string `json:"cursor,omitempty" jsonschema:"next_cursor of the previous page; it carries query, filters, sort and context"`
-	ResponseFormat string `json:"response_format,omitempty" jsonschema:"default concise (long texts cut to an excerpt around the match); detailed gives full texts, WhatsApp ids, media details and who reacted"`
+	ResponseFormat string `json:"response_format,omitempty" jsonschema:"default concise (long texts cut to an excerpt around the match); detailed gives texts up to 4,000 characters, WhatsApp ids, media details and who reacted"`
 }
 
 // Concise bodies: a hit is cut to an excerpt around the match, a context line shorter.
@@ -170,6 +171,9 @@ func (s *Server) searchMessages(ctx context.Context, _ *mcp.CallToolRequest, in 
 	}
 	w := newWrapper(s.now())
 	full := detailed(in.ResponseFormat)
+	if full {
+		w.capText = maxDetailedText
+	}
 
 	var b strings.Builder
 	b.WriteString(fresh + "\n")
@@ -215,14 +219,16 @@ func (s *Server) searchMessages(ctx context.Context, _ *mcp.CallToolRequest, in 
 	if err != nil {
 		return nil, err
 	}
+	lines := make([]string, 0, len(hits)*(2+2*c.Ctx)) // a header and the hit, its context and a day line or so
 	for i := range hits {
 		h := &hits[i]
 		var chat *store.ChatRow
 		if row, ok := chats[h.ChatID]; ok {
 			chat = &row
 		}
-		b.WriteString(w.hitBlock(i+1+c.Off, chat, h, before[i], after[i], full, c.Ctx > 0))
+		lines = append(lines, w.inner().hitLines(i+1+c.Off, chat, h, before[i], after[i], full, c.Ctx > 0)...)
 	}
+	b.WriteString(w.block(lines) + "\n")
 	if more {
 		next := c
 		if ranked {
@@ -287,23 +293,22 @@ func (s *Server) describeSearch(ctx context.Context, w wrapper, c cursor, q stor
 	return strings.Join(parts, " "), nil
 }
 
-// hitBlock renders one hit under a header naming its chat and day, with
-// context messages around it marked apart from the hit.
-func (w wrapper) hitBlock(n int, chat *store.ChatRow, h *store.SearchHit, before, after []store.MessageRow, full, withContext bool) string {
-	var b strings.Builder
+// hitLines renders one hit, for a block: a header naming its chat and day,
+// then the hit, with context messages around it marked apart from it.
+func (w wrapper) hitLines(n int, chat *store.ChatRow, h *store.SearchHit, before, after []store.MessageRow, full, withContext bool) []string {
 	name := "deleted chat"
 	kind := ""
 	if chat != nil {
 		name, kind = w.chatName(chat), " ("+chat.Kind+")"
 	}
 	day := fmtDay(h.TS, w.now)
-	fmt.Fprintf(&b, "#%d %s %s%s · %s\n", n, chatID(h.ChatID), name, kind, day)
+	lines := []string{fmt.Sprintf("#%d %s %s%s · %s", n, chatID(h.ChatID), name, kind, day)}
 	ctxLine := func(m *store.MessageRow) {
 		if d := fmtDay(m.TS, w.now); d != day {
 			day = d
-			fmt.Fprintf(&b, "  ── %s ──\n", d)
+			lines = append(lines, "  ── "+d+" ──")
 		}
-		b.WriteString("  " + w.cutLine(m, full, maxContextText, "") + "\n")
+		lines = append(lines, "  "+w.cutLine(m, full, maxContextText, "", ""))
 	}
 	for i := range before {
 		ctxLine(&before[i])
@@ -312,35 +317,77 @@ func (w wrapper) hitBlock(n int, chat *store.ChatRow, h *store.SearchHit, before
 	if withContext {
 		prefix = "> "
 	}
-	m := h.MessageRow
-	note := ""
-	if n := len([]rune(m.Transcript())); !full && n > maxHitText {
-		md := *m.Media
-		md.Transcript = h.TranscriptExcerpt
-		m.Media = &md
-		note = fmt.Sprintf(" [transcript excerpt of %d characters; whatsapp_read_chat with around=%s, limit=1, response_format=detailed shows all]", n, messageID(m.ID))
-	}
 	hw := w
 	hw.transcripts = true // the hit may have matched in its transcript
-	b.WriteString(prefix + hw.cutLine(&m, full, maxHitText, h.TextExcerpt) + note + "\n")
+	lines = append(lines, prefix+hw.cutLine(&h.MessageRow, full, maxHitText, h.TextExcerpt, h.TranscriptExcerpt))
 	day = fmtDay(h.TS, w.now)
 	for i := range after {
 		ctxLine(&after[i])
 	}
-	return b.String()
+	return lines
 }
 
-// cutLine renders a transcript line; in concise mode a body over maxText
-// runes becomes the excerpt (or its start) with a pointer to the full text.
-func (w wrapper) cutLine(m *store.MessageRow, full bool, maxText int, excerpt string) string {
-	n := len([]rune(m.Text))
-	if full || n <= maxText {
-		return w.line(m, full)
+// cutLine renders a transcript line; in concise mode a text or transcript
+// over maxText runes becomes its excerpt (or its start), marked [cut N]. In
+// detailed mode one over w.capText keeps the capText runes around its excerpt.
+func (w wrapper) cutLine(m *store.MessageRow, full bool, maxText int, textExcerpt, transcriptExcerpt string) string {
+	s := w.shown(m, full)
+	if full {
+		if s.textCut > 0 {
+			s.text = window(m.Text, w.capText, textExcerpt)
+		}
+		if s.transcriptCut > 0 {
+			s.transcript = window(m.Transcript(), w.capText, transcriptExcerpt)
+		}
+		return w.lineOf(m, full, s)
 	}
-	cp := *m
-	if excerpt == "" || len([]rune(excerpt)) >= n {
-		excerpt = string([]rune(m.Text)[:maxText]) + "…"
+	if t, n, ok := excerptOf(m.Text, maxText, textExcerpt); ok {
+		s.text, s.textCut = t, n
 	}
-	cp.Text = excerpt
-	return w.line(&cp, false) + fmt.Sprintf(" [excerpt of %d characters; whatsapp_read_chat with around=%s, limit=1, response_format=detailed shows all]", n, messageID(m.ID))
+	if t, n, ok := excerptOf(s.transcript, maxText, transcriptExcerpt); ok {
+		s.transcript, s.transcriptCut = t, n
+	}
+	return w.lineOf(m, false, s)
+}
+
+// excerptOf cuts s when it is over max runes: to excerpt, or to its first max
+// runes when the excerpt is empty or no shorter. n is the length of s in
+// runes; ok is false when s fits. Only a cut without excerpt converts s to
+// runes.
+func excerptOf(s string, max int, excerpt string) (cut string, n int, ok bool) {
+	if len(s) <= max { // a rune takes at least one byte
+		return "", 0, false
+	}
+	if n = utf8.RuneCountInString(s); n <= max {
+		return "", 0, false
+	}
+	if excerpt == "" || utf8.RuneCountInString(excerpt) >= n {
+		return string([]rune(s)[:max]) + "…", n, true
+	}
+	return excerpt, n, true
+}
+
+// window cuts s to n runes centred on excerpt, the match's FTS snippet ("…"
+// where the snippet cut), or to its start when s does not hold the excerpt.
+// "…" marks each end it cut.
+func window(s string, n int, excerpt string) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	start := 0
+	if e := strings.Trim(excerpt, "…"); e != "" {
+		if i := strings.Index(s, e); i >= 0 {
+			mid := utf8.RuneCountInString(s[:i]) + utf8.RuneCountInString(e)/2
+			start = min(max(mid-n/2, 0), len(r)-n)
+		}
+	}
+	out := string(r[start : start+n])
+	if start > 0 {
+		out = "…" + out
+	}
+	if start+n < len(r) {
+		out += "…"
+	}
+	return out
 }

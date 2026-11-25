@@ -14,6 +14,7 @@ import (
 	"time"
 	_ "time/tzdata" // Europe/Rome without relying on the OS zone database
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/vukappa4/whatsapp-mcp/internal/people"
 	"github.com/vukappa4/whatsapp-mcp/internal/store"
@@ -210,38 +211,124 @@ var tagName = regexp.MustCompile(`(?i)` + strings.Join(strings.Split("untrusted_
 
 // sanitize strips control, invisible and bidi formatting characters (keeping
 // newlines, tabs and the emoji zero-width joiner) and defuses the wrapper tag.
+// A string with nothing to change comes back as it is, without a copy.
 func sanitize(s string) string {
-	var b strings.Builder
-	b.Grow(len(s))
-	for _, r := range s {
-		switch {
-		case r == '\n' || r == '\t':
-		case r == '\r':
-			continue
-		case unicode.IsControl(r):
-			continue
-		case r == 0x200D: // ZWJ joins emoji sequences
-		case unicode.Is(unicode.Cf, r): // ZWSP, LRM/RLM, LRE..RLO, isolates, BOM, soft hyphen, tag chars...
-			continue
-		case r == 0x2065 || r >= 0xFFF0 && r <= 0xFFF8 || r >= 0xE0000 && r <= 0xE0FFF && !unicode.Is(unicode.Mn, r):
-			continue // unassigned, but Unicode reserves them to render as nothing
-		case r == 0x2028 || r == 0x2029:
-			r = '\n'
+	out := s
+	for i, r := range s {
+		// Invalid UTF-8 decodes as RuneError and is written back as U+FFFD.
+		if c, keep := cleanRune(r); !keep || c != r || r == utf8.RuneError {
+			out = strip(s, i)
+			break
 		}
-		b.WriteRune(r)
 	}
-	out := b.String()
-	if !strings.Contains(out, "_") { // every tagName match holds an underscore; the regex is slow
+	if !mayHoldTag(out) { // the regex is slow: run it only where it can match
 		return out
 	}
 	return tagName.ReplaceAllString(out, "untrusted-w")
 }
 
-// wrapper marks sender-written text with a per-response nonce.
+// strip is sanitize's cleaning of s, whose first i bytes need none.
+func strip(s string, i int) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	b.WriteString(s[:i])
+	for _, r := range s[i:] {
+		if c, keep := cleanRune(r); keep {
+			b.WriteRune(c)
+		}
+	}
+	return b.String()
+}
+
+// cleanRune is what sanitize writes for r: c, or nothing when keep is false.
+func cleanRune(r rune) (c rune, keep bool) {
+	switch {
+	case r == '\n' || r == '\t':
+	case r == '\r':
+		return 0, false
+	case unicode.IsControl(r):
+		return 0, false
+	case r == 0x200D: // ZWJ joins emoji sequences
+	case unicode.Is(unicode.Cf, r): // ZWSP, LRM/RLM, LRE..RLO, isolates, BOM, soft hyphen, tag chars...
+		return 0, false
+	case r == 0x2065 || r >= 0xFFF0 && r <= 0xFFF8 || r >= 0xE0000 && r <= 0xE0FFF && !unicode.Is(unicode.Mn, r):
+		return 0, false // unassigned, but Unicode reserves them to render as nothing
+	case r == 0x2028 || r == 0x2029:
+		return '\n', true
+	}
+	return r, true
+}
+
+// mayHoldTag reports whether tagName can match in s, without allocating: a
+// "u" starting "untrusted_w" in any case (by Unicode simple folding, as (?i)
+// matches), with the runes tagName skips allowed between the letters.
+func mayHoldTag(s string) bool {
+	const word = "untrusted_w"
+	for i := 0; i < len(s); i++ {
+		if s[i] != 'u' && s[i] != 'U' { // u folds only to U
+			continue
+		}
+		j, k := i+1, 1
+		for k < len(word) && j < len(s) {
+			r, n := utf8.DecodeRuneInString(s[j:])
+			switch {
+			case foldEqual(r, rune(word[k])):
+				k++
+			case !tagIgnorable(r):
+				j = len(s) // a mismatch: no match starts at i
+				continue
+			}
+			j += n
+		}
+		if k == len(word) {
+			return true
+		}
+	}
+	return false
+}
+
+// tagIgnorable is a rune tagName skips between the letters of the tag name.
+// (?i) folds the class too, so a rune whose simple case folding reaches a
+// skipped rune is skipped: U+0345 (a mark) brings in the iotas U+0399,
+// U+03B9 and U+1FBE.
+func tagIgnorable(r rune) bool {
+	if tagSkipped(r) {
+		return true
+	}
+	for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+		if tagSkipped(f) {
+			return true
+		}
+	}
+	return false
+}
+
+// tagSkipped is a rune of tagName's class between the letters, before folding.
+func tagSkipped(r rune) bool {
+	return r == 0x200D || r == 0x115F || r == 0x1160 || r == 0x3164 || r == 0xFFA0 || unicode.Is(unicode.M, r)
+}
+
+// foldEqual reports whether r equals the lower-case ASCII letter c under
+// Unicode simple case folding (s also matches the long s, U+017F).
+func foldEqual(r, c rune) bool {
+	if r == c {
+		return true
+	}
+	for f := unicode.SimpleFold(c); f != c; f = unicode.SimpleFold(f) {
+		if f == r {
+			return true
+		}
+	}
+	return false
+}
+
+// wrapper marks sender-written text with a per-response nonce: one field
+// alone with wrap, a list of lines at once with block.
 // transcripts shows voice-note transcripts in concise lines too.
 type wrapper struct {
 	nonce       string
 	transcripts bool
+	inBlock     bool      // the text goes into a block: wrap leaves the tags to it
 	capText     int       // detailed mode: most runes of a body or transcript, 0 for no cap
 	now         time.Time // times omit now's year
 }
@@ -255,16 +342,68 @@ func newWrapper(now time.Time) wrapper {
 // ts is fmtTS as of the response's now.
 func (w wrapper) ts(ts int64) string { return fmtTS(ts, w.now) }
 
+// wrap encloses one field of sender text in the tags, or quotes it for a
+// block.
 func (w wrapper) wrap(s string) string {
 	s = sanitize(s)
-	if s == "" {
+	switch {
+	case s == "":
 		return ""
+	case w.inBlock:
+		return quote(s)
 	}
 	return "<untrusted_wa n=" + w.nonce + ">" + s + "</untrusted_wa n=" + w.nonce + ">"
 }
 
+var quoter = strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
+
+// quote renders sanitized sender text as a quoted string: \ and " are
+// escaped and a line break is \n, so the text can neither end the quote nor
+// start a line.
+func quote(s string) string { return `"` + quoter.Replace(s) + `"` }
+
+var plainWAID = regexp.MustCompile(`^[0-9A-Za-z]+$`)
+
+// waID renders a WhatsApp message id: bare when it is letters and digits, as
+// sender text otherwise, since the sending client picks it.
+func (w wrapper) waID(id string) string {
+	if plainWAID.MatchString(id) {
+		return id
+	}
+	return w.wrap(id)
+}
+
+// inner is w for rendering the lines of a block.
+func (w wrapper) inner() wrapper {
+	w.inBlock = true
+	return w
+}
+
+// block encloses lines in one pair of tags, each tag on a line of its own.
+// Every line is server text with the sender text in it quoted (see wrap and
+// reactionText). Each line is also sanitized whole, which leaves \n as the
+// only line break, and that becomes ⏎: whatever a field lets through, sender
+// text never starts a line, so it cannot pass for a message, a hit or a
+// chat, and nothing in a line closes the block.
+func (w wrapper) block(lines []string) string {
+	n := 64 // the two tags
+	for _, l := range lines {
+		n += len(l) + 1
+	}
+	var b strings.Builder
+	b.Grow(n)
+	b.WriteString("<untrusted_wa n=" + w.nonce + ">\n")
+	for _, l := range lines {
+		b.WriteString(strings.ReplaceAll(sanitize(l), "\n", "⏎") + "\n")
+	}
+	b.WriteString("</untrusted_wa n=" + w.nonce + ">")
+	return b.String()
+}
+
 // name renders a person's name: plain from the address book, "~Name" (cleaned
-// and capped, like WhatsApp shows strangers) when the person chose it.
+// and capped, like WhatsApp shows strangers) when the person chose it. A
+// chosen name is sender text: bare in a block, where it cannot hold a quote,
+// and in tags outside one.
 func (w wrapper) name(p *store.PersonRef) string {
 	switch {
 	case p == nil:
@@ -276,7 +415,10 @@ func (w wrapper) name(p *store.PersonRef) string {
 	}
 	if p.Source != people.SourcePhone {
 		if n := people.ProfileName(p.Name); n != "" {
-			return n
+			if w.inBlock {
+				return n
+			}
+			return w.wrap(n)
 		}
 	}
 	if p.Phone != "" {
@@ -311,13 +453,14 @@ func parseID(s, prefix string) (int64, bool) {
 	return n, err == nil && n > 0
 }
 
-// cursor is the opaque paging state. Tool binds it to the tool that issued it.
+// cursor is the opaque paging state. Tool binds it to the tool that issued
+// it; the JSON carries the tool as its code in cursorCodes.
 type cursor struct {
-	Tool   string `json:"t"`
+	Tool   string `json:"-"`
 	Chat   int64  `json:"c,omitempty"`
 	Newer  bool   `json:"n,omitempty"`
-	TS     int64  `json:"ts"`
-	ID     int64  `json:"id"`
+	TS     int64  `json:"ts,omitempty"`
+	ID     int64  `json:"id,omitempty"`
 	After  int64  `json:"a,omitempty"`
 	Before int64  `json:"b,omitempty"`
 	Kind   string `json:"k,omitempty"`
@@ -331,22 +474,49 @@ type cursor struct {
 	Off    int    `json:"o,omitempty"`
 }
 
+// cursorCodes is the one-letter code of each tool that pages with a cursor.
+var cursorCodes = map[string]string{
+	toolListChats:      "l",
+	toolReadChat:       "r",
+	toolSearchPeople:   "p",
+	toolSearchMessages: "s",
+}
+
+// wireCursor is a cursor as JSON: the tool code, then the paging state.
+type wireCursor struct {
+	Code string `json:"t"`
+	cursor
+}
+
 func (c cursor) encode() string {
-	b, _ := json.Marshal(c)
+	code, ok := cursorCodes[c.Tool]
+	if !ok {
+		panic("cursor for a tool without a code: " + c.Tool)
+	}
+	b, _ := json.Marshal(wireCursor{code, c})
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
 func decodeCursor(s, tool string) (cursor, error) {
-	var c cursor
+	var w wireCursor
 	b, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(s))
 	if err == nil {
-		err = json.Unmarshal(b, &c)
+		err = json.Unmarshal(b, &w)
 	}
-	if err == nil && c.Off < 0 {
+	if err == nil && w.Off < 0 {
 		err = errors.New("negative offset") // a forged cursor; a negative slice bound panics the daemon
 	}
 	if err != nil {
-		return c, errors.New("invalid cursor: pass back the cursor string exactly as returned")
+		return w.cursor, errors.New("invalid cursor: pass back the cursor string exactly as returned")
+	}
+	c := w.cursor
+	for t, code := range cursorCodes {
+		if code == w.Code {
+			c.Tool = t
+		}
+	}
+	if c.Tool == "" {
+		return c, fmt.Errorf("invalid cursor: unknown tool code %q; pass back the cursor string exactly as returned", w.Code)
 	}
 	if c.Tool != tool {
 		return c, fmt.Errorf("this cursor belongs to %s, not %s", c.Tool, tool)

@@ -1,0 +1,294 @@
+package mcpserver
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/vukappa4/whatsapp-mcp/internal/autosend"
+	"github.com/vukappa4/whatsapp-mcp/internal/desktop"
+	"github.com/vukappa4/whatsapp-mcp/internal/store"
+)
+
+const (
+	toolAutosendAllow  = autosend.ToolAllow
+	toolAutosendRevoke = autosend.ToolRevoke
+)
+
+type autosendAllowIn struct {
+	Task  string   `json:"task" jsonschema:"the taskId given to create_scheduled_task, or the task's exact title"`
+	Chats []string `json:"chats" jsonschema:"c_N or p_N ids the task may send to"`
+}
+
+type autosendRevokeIn struct {
+	Task string `json:"task" jsonschema:"task id or title"`
+}
+
+func (s *Server) addAutosendTools(srv *mcp.Server) {
+	f, t := false, true
+	allowSchema := schemaFor[autosendAllowIn](nil)
+	// A Go slice is nullable to the schema generator: chats must be an array.
+	allowSchema.Properties["chats"].Type, allowSchema.Properties["chats"].Types = "array", nil
+	addTool(srv, &mcp.Tool{
+		Name: toolAutosendAllow,
+		Description: "Let one Claude Desktop scheduled task send text messages, with nobody present, to fixed chats. Call only when " +
+			"the user asks, in a session with them, after creating the task. Put the same chat ids in the task's prompt: its runs " +
+			"may only call whatsapp_send_message with to set to one of them, at most " + strconv.Itoa(autosend.MaxPerDay) +
+			" a day per chat; anything else is refused. The user confirms a card; a scheduled run cannot approve. Task mode must " +
+			"be default, acceptEdits, plan or auto. Changing the task's prompt, schedule or folder ends the approval; calling " +
+			"again replaces the chats. Never bulk or unsolicited: WhatsApp bans for it.",
+		InputSchema: allowSchema,
+		Annotations: &mcp.ToolAnnotations{Title: "Approve WhatsApp autosend", DestructiveHint: &f, OpenWorldHint: &f},
+	}, s.autosendAllow)
+
+	addTool(srv, &mcp.Tool{
+		Name:        toolAutosendRevoke,
+		Description: "End a scheduled task's autosend approval. whatsapp_status lists approvals.",
+		InputSchema: schemaFor[autosendRevokeIn](nil),
+		Annotations: &mcp.ToolAnnotations{Title: "Revoke WhatsApp autosend", DestructiveHint: &t, IdempotentHint: true, OpenWorldHint: &f},
+	}, s.autosendRevoke)
+}
+
+func (s *Server) autosendAllow(ctx context.Context, _ *mcp.CallToolRequest, in autosendAllowIn) (*mcp.CallToolResult, error) {
+	ids := autosend.Normalize(in.Chats)
+	if strings.TrimSpace(in.Task) == "" || len(ids) == 0 {
+		return errResult("Not approved: task and at least one chat (c_N or p_N) are required.")
+	}
+	notApproved := fmt.Sprintf("Not approved: the send gate did not ask the user for exactly these arguments (task %q, chats %s). "+
+		"If the user approved a card, the program the send gate runs is older than this daemon: update it (prod), restart "+
+		"Claude Code, and call again.", strings.TrimSpace(in.Task), strings.Join(ids, ", "))
+	if s.HooksDir == "" {
+		return errResult("%s", notApproved)
+	}
+	r, err := autosend.TakeReceipt(s.HooksDir, autosend.ArgsKey(s.Profile, in.Task, in.Chats), s.now())
+	switch {
+	case errors.Is(err, autosend.ErrNoReceipt):
+		return errResult("%s", notApproved)
+	case errors.Is(err, autosend.ErrReceiptExpired):
+		return errResult("Not approved: the approval card expired (answer it within %d minutes): call again to show the user a new card.",
+			int(autosend.ReceiptTTL.Minutes()))
+	case err != nil:
+		return errResult("Not approved: cannot read the send gate's receipt: %v", err)
+	case r.Profile != s.Profile:
+		return errResult("Not approved: the user approved this for the %s profile, and this server is %s.", r.Profile, s.Profile)
+	case r.TaskID == "" || len(r.Chats) == 0:
+		return errResult("%s", notApproved)
+	}
+	// The receipt says what the card showed; the daemon checks it against
+	// its own data and Desktop's files before trusting it.
+	if why, err := s.checkReceipt(ctx, r, ids); err != nil || why != "" {
+		if err != nil {
+			return nil, err
+		}
+		return errResult("Not approved: %s since the card was shown. Call again to show the user a new card.", why)
+	}
+	rule := store.AutosendRule{TaskID: r.TaskID, TaskDir: r.TaskDir, TaskName: r.TaskName, Schedule: r.Schedule, Fingerprint: r.Fingerprint,
+		ApprovedAt: s.now().Unix()}
+	for _, c := range r.Chats {
+		rule.Chats = append(rule.Chats, store.AutosendChat{JID: c.JID, Ref: c.Ref, Label: c.Label})
+	}
+	if err := store.PutAutosendRule(ctx, s.DB, rule); err != nil {
+		return nil, err
+	}
+	w := newWrapper(s.now())
+	bw := w.inner()
+	lines := []string{fmt.Sprintf("task %s (%s), id %s", bw.wrap(r.TaskName), bw.wrap(r.Schedule), bw.wrap(r.TaskID))}
+	for _, c := range r.Chats {
+		lines = append(lines, "to "+bw.wrap(c.Label))
+	}
+	return textResult(fmt.Sprintf("Approved: this Desktop scheduled task may send text messages with nobody present:\n%s\n"+
+		"Its runs must call %s with to set to one of: %s.", w.block(lines), toolSendMessage, strings.Join(ids, ", "))), nil
+}
+
+func (s *Server) autosendRevoke(ctx context.Context, _ *mcp.CallToolRequest, in autosendRevokeIn) (*mcp.CallToolResult, error) {
+	if strings.TrimSpace(in.Task) == "" {
+		return errResult("task is required: the scheduled task's id or name")
+	}
+	r, err := store.DeleteAutosendRule(ctx, s.DB, in.Task)
+	switch {
+	case errors.Is(err, store.ErrNoRule):
+		return errResult("No autosend approval for task %q: whatsapp_status lists approvals.", strings.TrimSpace(in.Task))
+	case errors.Is(err, store.ErrAmbiguousRule):
+		return errResult("%v", err)
+	case err != nil:
+		return nil, err
+	}
+	w := newWrapper(s.now())
+	return textResult(fmt.Sprintf("Revoked: the Desktop scheduled task %s (id %s) can no longer send without asking.",
+		w.wrap(r.TaskName), w.wrap(r.TaskID))), nil
+}
+
+// refJID resolves a c_N or p_N id to the JID a send to it goes to, as
+// whatsapp_send_message and the send gate do; why says why it cannot.
+func (s *Server) refJID(ctx context.Context, ref string) (jid, why string, err error) {
+	if kind, _ := store.ParseRef(ref); kind == "" {
+		return "", ref + " is not a c_N or p_N id", nil
+	}
+	d, err := store.ResolveDestination(ctx, s.DB, ref)
+	if why, err := destinationProblem(ref, d, err); why != "" || err != nil {
+		return "", why, err
+	}
+	return d.JID, "", nil
+}
+
+// checkReceipt compares a receipt with the daemon's own view: every chat id
+// still goes to the JID the card showed, and the task in Claude Desktop's
+// files, in the same account/org folder, still has the card's fingerprint.
+func (s *Server) checkReceipt(ctx context.Context, r autosend.Receipt, ids []string) (why string, err error) {
+	want := map[string]bool{}
+	for _, c := range r.Chats {
+		want[c.JID] = true
+	}
+	got := map[string]bool{}
+	for _, id := range ids {
+		jid, why, err := s.refJID(ctx, id)
+		if err != nil || why != "" {
+			return "cannot resolve " + id + " (" + why + ")", err
+		}
+		if !want[jid] {
+			return id + " goes to another chat", nil
+		}
+		got[jid] = true
+	}
+	if len(got) != len(want) {
+		return "the chats changed", nil
+	}
+	task, err := desktop.FindTaskByID(ctx, s.DesktopRoots, r.TaskID)
+	if err != nil {
+		return "the task cannot be read (" + err.Error() + ")", nil
+	}
+	if !desktop.SamePath(task.Dir, r.TaskDir) {
+		return "the task moved to another Claude Desktop account or organization", nil
+	}
+	fp, err := desktop.Fingerprint(task)
+	if err != nil {
+		return "the task cannot be read (" + err.Error() + ")", nil
+	}
+	if fp != r.Fingerprint {
+		return "the task's prompt, schedule or folder changed", nil
+	}
+	if why := autosend.TaskModeProblem(desktop.EffectiveMode(task, s.ClaudeDir)); why != "" {
+		return why, nil
+	}
+	return "", nil
+}
+
+// autosendLogLines is how many of the newest autosend log lines whatsapp_status shows.
+const autosendLogLines = 5
+
+// autosendStatus renders the approvals, each with its state, and the newest
+// lines of the autosend log, in one untrusted block: labels hold names
+// other people chose.
+func (s *Server) autosendStatus(ctx context.Context, now time.Time) (string, error) {
+	rules, err := store.AutosendRules(ctx, s.DB)
+	if err != nil {
+		return "", err
+	}
+	logLines := tailLines(filepath.Join(s.DataDir, "logs", autosend.LogName), autosendLogLines)
+	if len(rules) == 0 && len(logLines) == 0 {
+		return "Autosend: none approved", nil
+	}
+	w := newWrapper(now)
+	bw := w.inner()
+	var lines []string
+	for _, r := range rules {
+		state := s.autosendState(ctx, r)
+		labels := make([]string, len(r.Chats))
+		for i, c := range r.Chats {
+			labels[i] = bw.wrap(c.Label)
+			if state != "active" || c.Ref == "" {
+				continue
+			}
+			// A reingest can give the id to another chat, or the person a new account.
+			if jid, why, err := s.refJID(ctx, c.Ref); err != nil || why != "" || jid != c.JID {
+				labels[i] += " (" + c.Ref + ": chat changed: approve again)"
+			}
+		}
+		lines = append(lines, fmt.Sprintf("task %s (%s), id %s, approved %s, %s; to %s", bw.wrap(r.TaskName), bw.wrap(r.Schedule),
+			bw.wrap(r.TaskID), fmtTS(r.ApprovedAt, now), state, strings.Join(labels, ", ")))
+	}
+	for _, l := range logLines {
+		var e struct {
+			At        string `json:"at"`
+			TaskName  string `json:"task_name"`
+			Label     string `json:"label"`
+			TextChars int    `json:"text_chars"`
+		}
+		if json.Unmarshal([]byte(l), &e) != nil {
+			continue
+		}
+		at := e.At
+		if t, err := time.Parse(time.RFC3339, e.At); err == nil {
+			at = fmtTS(t.Unix(), now)
+		}
+		lines = append(lines, fmt.Sprintf("sent %s by task %s to %s, %d characters", at, bw.wrap(e.TaskName), bw.wrap(e.Label), e.TextChars))
+	}
+	return fmt.Sprintf("Autosend (%d approved Desktop scheduled tasks, then the newest sends of %s):\n%s",
+		len(rules), autosend.LogName, w.block(lines)), nil
+}
+
+// autosendState tells whether a rule still lets its task send: the task
+// must exist with the fingerprint it was approved with.
+func (s *Server) autosendState(ctx context.Context, r store.AutosendRule) string {
+	task, err := desktop.FindTaskByID(ctx, s.DesktopRoots, r.TaskID)
+	if errors.Is(err, desktop.ErrNotFound) {
+		return "inactive: task not found"
+	}
+	if err != nil {
+		return "unknown: " + err.Error()
+	}
+	if !desktop.SamePath(task.Dir, r.TaskDir) {
+		return "inactive: the task is in another Claude Desktop account or organization"
+	}
+	if why := autosend.TaskModeProblem(desktop.EffectiveMode(task, s.ClaudeDir)); why != "" {
+		return "inactive: " + why
+	}
+	fp, err := desktop.Fingerprint(task)
+	switch {
+	case err != nil:
+		return "unknown: " + err.Error()
+	case fp != r.Fingerprint:
+		return "inactive: the task's prompt, schedule or folder changed since approval"
+	}
+	return "active"
+}
+
+// tailLines returns the last n lines of the file at path, nil when it
+// cannot be read. It reads at most the last 64 KB.
+func tailLines(path string, n int) []string {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil
+	}
+	off := max(st.Size()-64<<10, 0)
+	b := make([]byte, st.Size()-off)
+	if _, err := f.ReadAt(b, off); err != nil && err != io.EOF {
+		return nil
+	}
+	lines := bytes.Split(bytes.TrimSpace(b), []byte("\n"))
+	if off > 0 && len(lines) > 0 {
+		lines = lines[1:] // cut mid-line
+	}
+	var out []string
+	for _, l := range lines[max(len(lines)-n, 0):] {
+		if l = bytes.TrimSpace(l); len(l) > 0 {
+			out = append(out, string(l))
+		}
+	}
+	return out
+}

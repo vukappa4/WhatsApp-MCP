@@ -233,7 +233,26 @@ func (s *Server) status(ctx context.Context, _ *mcp.CallToolRequest, _ statusIn)
 	default:
 		fmt.Fprintf(&b, " %d recorded:\n", len(gaps))
 	}
-	for _, g := range gaps[max(0, len(gaps)-maxStatusGaps):] {
+	// Events that open or close a listed gap without a detail add nothing to
+	// it: the events list leaves them out.
+	shown := gaps[max(0, len(gaps)-maxStatusGaps):]
+	type edge struct {
+		ts    int64
+		event string
+	}
+	bound := map[edge]bool{}
+	for _, g := range shown {
+		bound[edge{g.From.Unix(), g.Reason}] = true
+		switch {
+		case g.To.IsZero():
+		case g.Reason == store.EvKeepAliveLost:
+			bound[edge{g.To.Unix(), store.EvKeepAliveBack}] = true
+			bound[edge{g.To.Unix(), store.EvConnected}] = true
+		default:
+			bound[edge{g.To.Unix(), store.EvConnected}] = true
+		}
+	}
+	for _, g := range shown {
 		to := "still open"
 		if !g.To.IsZero() {
 			to = fmtTS(g.To.Unix(), now)
@@ -245,7 +264,10 @@ func (s *Server) status(ctx context.Context, _ *mcp.CallToolRequest, _ statusIn)
 	if stats.OldestTS != 0 {
 		fmt.Fprintf(&b, ", from %s to %s", fmtTS(stats.OldestTS, now), fmtTS(stats.NewestTS, now))
 	}
-	fmt.Fprintf(&b, "; %d chats have no human name yet\n", stats.UnnamedChats)
+	if stats.UnnamedChats > 0 {
+		fmt.Fprintf(&b, "; %d chats have no human name yet", stats.UnnamedChats)
+	}
+	b.WriteString("\n")
 	if histAt.IsZero() {
 		b.WriteString("History sync: none received yet\n")
 	} else {
@@ -275,15 +297,24 @@ func (s *Server) status(ctx context.Context, _ *mcp.CallToolRequest, _ statusIn)
 		}
 	}
 	b.WriteString(phoneHealth(d.phoneSeen(), s.now()) + "\n")
-	if len(events) > 0 {
-		b.WriteString("Recent connection events:\n")
-		for _, e := range events {
-			line := fmt.Sprintf("%s %s", fmtTS(e.TS.Unix(), now), e.Event)
-			if e.Detail != "" {
-				line += " (" + clip(e.Detail, 120) + ")"
-			}
-			b.WriteString("- " + line + "\n")
+	auto, err := s.autosendStatus(ctx, now)
+	if err != nil {
+		return nil, err
+	}
+	b.WriteString(auto + "\n")
+	var other []string
+	for _, e := range events {
+		if e.Detail == "" && bound[edge{e.TS.Unix(), e.Event}] {
+			continue
 		}
+		line := fmt.Sprintf("%s %s", fmtTS(e.TS.Unix(), now), e.Event)
+		if e.Detail != "" {
+			line += " (" + clip(e.Detail, 120) + ")"
+		}
+		other = append(other, "- "+line+"\n")
+	}
+	if len(other) > 0 {
+		b.WriteString("Other recent connection events:\n" + strings.Join(other, ""))
 	}
 	return textResult(strings.TrimRight(b.String(), "\n")), nil
 }
@@ -389,34 +420,36 @@ func (s *Server) listChats(ctx context.Context, _ *mcp.CallToolRequest, in listC
 		return textResult(b.String()), nil
 	}
 	fmt.Fprintf(&b, "%d chats, newest first:\n", len(chats))
+	bw := w.inner()
+	lines := make([]string, 0, 2*len(chats))
 	for i := range chats {
 		c := &chats[i]
-		fmt.Fprintf(&b, "%s %s · %s · %s", chatID(c.ID), w.chatName(c), c.Kind, orNever(w.ts(c.LastMessageAt)))
+		line := fmt.Sprintf("%s %s · %s · %s", chatID(c.ID), bw.chatName(c), c.Kind, orNever(w.ts(c.LastMessageAt)))
 		if c.Unread > 0 {
-			fmt.Fprintf(&b, " · %d unread", c.Unread)
+			line += fmt.Sprintf(" · %d unread", c.Unread)
 		}
 		if full {
-			fmt.Fprintf(&b, " · jid %s", c.JID)
+			line += " · jid " + c.JID
 			if c.Person != nil {
-				fmt.Fprintf(&b, " · person %s", personID(c.Person.ID))
+				line += " · person " + personID(c.Person.ID)
 			}
 			if c.Archived {
-				b.WriteString(" · archived")
+				line += " · archived"
 			}
 			if c.MutedUntil > s.now().Unix() {
-				b.WriteString(" · muted")
+				line += " · muted"
 			}
 		}
-		b.WriteString("\n")
+		lines = append(lines, line)
 		if m := c.Last; m != nil {
 			n := 80
 			if full {
 				n = 300
 			}
-			who := w.sender(m)
-			fmt.Fprintf(&b, "   last: %s: %s\n", who, w.summary(m, n))
+			lines = append(lines, fmt.Sprintf("   last: %s: %s", bw.sender(m), bw.summary(m, n)))
 		}
 	}
+	b.WriteString(w.block(lines) + "\n")
 	if more {
 		last := chats[len(chats)-1]
 		next := cursor{Tool: toolListChats, TS: last.LastMessageAt, ID: last.ID, Kind: f.Kind, Unread: f.UnreadOnly, Query: f.Query}.encode()

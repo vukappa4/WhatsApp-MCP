@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/vukappa4/whatsapp-mcp/internal/hooks"
 )
@@ -24,8 +25,15 @@ var ReadTools = []string{
 	"whatsapp_search_people", "whatsapp_search_messages", "whatsapp_get_media",
 }
 
-// HookTimeout is the timeout, in seconds, of both registered hooks.
-const HookTimeout = 10
+// PromptTimeout is the timeout, in seconds, of the UserPromptSubmit hook.
+const PromptTimeout = 10
+
+// PreToolTimeout is the timeout, in seconds, of the PreToolUse gate. In a
+// Desktop scheduled run the gate waits up to 12 s for Desktop to save the
+// run's session file, then checks within its budgets: 30 s leaves room. A
+// settings file registered with another timeout is stale (Check), so
+// setup-claude rewrites it.
+const PreToolTimeout = 30
 
 // ConfigDir is Claude Code's user config dir: $CLAUDE_CONFIG_DIR, else ~/.claude.
 func ConfigDir() (string, error) {
@@ -56,10 +64,10 @@ func hookGroups(exe string) map[string]*object {
 	exe = filepath.ToSlash(exe)
 	return map[string]*object{
 		"UserPromptSubmit": obj("hooks", []any{
-			obj("type", "command", "command", exe, "args", []any{"hook", "user-prompt"}, "timeout", HookTimeout),
+			obj("type", "command", "command", exe, "args", []any{"hook", "user-prompt"}, "timeout", PromptTimeout),
 		}),
 		"PreToolUse": obj("matcher", hooks.PreToolMatcher, "hooks", []any{
-			obj("type", "command", "command", exe, "args", []any{"hook", "pre-tool"}, "timeout", HookTimeout, "onFailure", "block"),
+			obj("type", "command", "command", exe, "args", []any{"hook", "pre-tool"}, "timeout", PreToolTimeout, "onFailure", "block"),
 		}),
 	}
 }
@@ -373,4 +381,53 @@ func setOrDrop(o *object, k string, l []any) {
 		return
 	}
 	o.set(k, l)
+}
+
+// GateTimeout reads the timeout of the PreToolUse gate registered in the
+// settings file at file: the hook entry whose args are "hook pre-tool", the
+// shortest when there are several. A file without one is an error.
+func GateTimeout(file string) (time.Duration, error) {
+	b, err := os.ReadFile(file)
+	if err != nil {
+		return 0, err
+	}
+	root, err := parseObject(b)
+	if err != nil {
+		return 0, err
+	}
+	hs, _ := root.vals["hooks"].(*object)
+	if hs == nil {
+		return 0, errors.New("no hooks")
+	}
+	groups, _ := hs.vals["PreToolUse"].([]any)
+	best := time.Duration(-1)
+	for _, g := range groups {
+		group, _ := g.(*object)
+		if group == nil {
+			continue
+		}
+		inner, _ := group.vals["hooks"].([]any)
+		for _, h := range inner {
+			o, _ := h.(*object)
+			if o == nil {
+				continue
+			}
+			args, _ := o.vals["args"].([]any)
+			if len(args) != 2 || args[0] != "hook" || args[1] != "pre-tool" {
+				continue
+			}
+			n, _ := o.vals["timeout"].(json.Number)
+			secs, err := n.Float64()
+			if err != nil || secs <= 0 {
+				continue
+			}
+			if d := time.Duration(secs * float64(time.Second)); best < 0 || d < best {
+				best = d
+			}
+		}
+	}
+	if best < 0 {
+		return 0, errors.New("no PreToolUse gate with a timeout")
+	}
+	return best, nil
 }

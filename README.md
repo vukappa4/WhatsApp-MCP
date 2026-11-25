@@ -8,8 +8,22 @@ Ask Claude things like "what did Marco say about Friday?", "summarize the family
 
 - **Reads everything you see in the app**: chats, groups, people, replies, edits, reactions, photos, documents, and voice notes as text (transcribed on your computer).
 - **Searches** messages, people and chats across your whole history, including the history the phone sends when you link it.
-- **Sends messages and files only when you ask.** A Claude Code hook checks every send against your own last message: it passes silently only when you asked to send to that person, otherwise Claude Code asks you to confirm. Text Claude reads in a message cannot authorize a send by itself.
+- **Sends messages and files only when you ask.** A Claude Code hook checks every send against your own last message: it passes silently only when you asked to send to that person, otherwise Claude Code asks you to confirm. Text Claude reads in a message cannot authorize a send by itself. The one exception: a Claude Desktop scheduled task you approve sends text messages to the chats you approved for it ([Scheduled follow-ups](#scheduled-follow-ups)).
 - **Always says how fresh the data is**: every answer starts with the connection state, so stale data is never shown as current.
+
+## Scheduled follow-ups
+
+Claude Desktop runs Claude Code tasks on a schedule. One such task can send WhatsApp text messages with nobody at the computer, to chats you approve:
+
+1. In a Claude Code session in Claude Desktop, ask for it, like "every weekday at 9 ask Marco whether the invoice arrived". Claude creates the scheduled task, then calls `whatsapp_send_autosend_allow` with the task and the chats.
+2. Claude Code asks you to confirm, showing the task, its schedule, permission mode and folder, its whole prompt (at most 1,500 characters) and the chats: people with their phone numbers (none for a person without a stored number), groups with their c_N id. Approve only if you asked for it.
+3. From then on, runs of that task send text messages to those chats without asking, at most 20 a day to each chat. Nobody is there to confirm anything else, so the gate refuses it and Claude reports it in the run's final message: a send past the 20, another chat, a file, a history request. The gate refuses rather than asks because Claude Desktop can remember a task's answer to a confirmation and replay it in later runs.
+
+A run counts as unattended until someone types in it: a run you start with "Run now" autosends like a scheduled one. Once you type a message in a run, the run is yours: autosend stops for it, and every send in it asks you to confirm, even one your message asked for. The task's own prompt never counts as your request.
+
+The approval lasts until you revoke it (ask Claude: it calls `whatsapp_send_autosend_revoke`) or until the task's prompt, schedule or folder changes; then approve it again. Approving again replaces the chats. A scheduled run can never approve itself. The task and the session that approves it must use the default, accept edits, plan or auto permission mode, which show you every confirmation; any other mode, such as "bypass permissions" or "don't ask", is refused. A task saved without a mode runs in the default mode of your Claude Code settings: `permissions.defaultMode` in the task folder's `.claude/settings.local.json`, else its `.claude/settings.json`, else `settings.json` in your Claude config folder (`CLAUDE_CONFIG_DIR`, else `~/.claude`), else "default". The card then shows "mode default (from your settings)". If one of those files exists but cannot be read, the task is refused. The card does not read managed settings, so each send also checks the mode Claude Code reports for the run itself. While the task's or the run's mode is outside that list, its sends are refused. `whatsapp_status` lists the approvals and whether each is active. Every such send is logged, without its text, in `autosend.log` in the profile's logs folder (`%LOCALAPPDATA%\WhatsAppMCP\prod\logs\` on Windows, `~/Library/Application Support/WhatsAppMCP/prod/logs/` on macOS).
+
+Limits: only Claude Desktop's local scheduled tasks, on Windows and macOS, while the app is open and the computer awake. Autosend needs the program the hooks run at this version or later (prod's when it is installed, so update prod), and the hooks registered by this version's `setup-claude`: after updating, run it for every Claude config folder you use (for example `~/.claude` and `~/.claude-work`). It guards against Claude and the messages it reads, not against a program running as you, which can edit Desktop's files, the database or the settings; nor does it check that a run received the prompt its task file holds. Never use it for bulk or unsolicited messages.
 
 ## Install
 

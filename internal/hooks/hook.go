@@ -19,6 +19,7 @@ import (
 	"unicode"
 
 	"github.com/vukappa4/whatsapp-mcp/internal/config"
+	"github.com/vukappa4/whatsapp-mcp/internal/useracl"
 )
 
 // decodeInput reads the hook's JSON input, skipping a UTF-8 byte order mark:
@@ -35,8 +36,10 @@ func decodeInput(r io.Reader, v any) (raw []byte, err error) {
 // FlagTTL is how long a send intent stays valid without a new prompt.
 const FlagTTL = 2 * time.Hour
 
-// PreToolBudget bounds the PreToolUse hook: past it the hook asks. The
-// registered hook timeout (10 s) is well above it.
+// PreToolBudget bounds each lookup of the PreToolUse hook: past it the hook
+// asks, or in a scheduled run with nobody present denies. The wait for a
+// scheduled run's file (RunWaitFor) leaves the hook's worst case at least
+// 3 s under its registered timeout.
 const PreToolBudget = 4 * time.Second
 
 // PreToolMatcher is the PreToolUse matcher registered for the gate: the send
@@ -83,6 +86,7 @@ type toolInput struct {
 	TranscriptPath string          `json:"transcript_path"`
 	ToolName       string          `json:"tool_name"`
 	ToolInput      json.RawMessage `json:"tool_input"`
+	PermissionMode string          `json:"permission_mode"`
 }
 
 var safeID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,100}$`)
@@ -110,13 +114,21 @@ const maxPromptWords = 20000
 
 var reSessionID = regexp.MustCompile(`"session_id"\s*:\s*"([^"\\]{1,200})"`)
 
+// PromptOptions is what the UserPromptSubmit hook reads besides its input.
+type PromptOptions struct {
+	Scheduled bool // CLAUDE_CODE_HOST_SCHEDULED_RUN=1: Claude Desktop started this session for a scheduled task
+}
+
 // UserPrompt handles UserPromptSubmit: it writes the session's flag (the
 // time and the folded prompt, readable by the user only) when the prompt
-// asks to send, and removes it otherwise. Any failure removes the flag when
-// the session is known, even from input that is not valid JSON: an old
-// intent never survives a prompt. It never writes to stdout: Claude Code
-// adds a UserPromptSubmit hook's stdout to the context.
-func UserPrompt(stdin io.Reader, dir string, now time.Time) error {
+// asks to send, and removes it otherwise. The first prompt of a session
+// Claude Desktop started for a scheduled task is the task's SKILL.md, not
+// the user's words, also when the user started the run by hand: it removes
+// the flag; later prompts there are typed by a person. Any
+// failure removes the flag when the session is known, even from input that
+// is not valid JSON: an old intent never survives a prompt. It never writes
+// to stdout: Claude Code adds a UserPromptSubmit hook's stdout to the context.
+func UserPrompt(stdin io.Reader, dir string, now time.Time, opts PromptOptions) error {
 	var in promptInput
 	raw, err := decodeInput(stdin, &in)
 	if err != nil {
@@ -129,6 +141,12 @@ func UserPrompt(stdin io.Reader, dir string, now time.Time) error {
 		return errors.New("hook input has no session_id")
 	}
 	path := flagPath(dir, in.SessionID)
+	if opts.Scheduled && scheduledPrompt(dir, in.SessionID, now) {
+		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
 	err = writeFlag(dir, path, in.Prompt, now)
 	if err != nil {
 		_ = os.Remove(path) // never keep an old intent
@@ -140,7 +158,7 @@ func writeFlag(dir, path, prompt string, now time.Time) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	if err := restrictToUser(dir, true); err != nil {
+	if err := useracl.Restrict(dir, true); err != nil {
 		return fmt.Errorf("restrict %s to the user: %w", dir, err)
 	}
 	pruneFlags(dir, now)
@@ -164,7 +182,7 @@ func writeFlag(dir, path, prompt string, now time.Time) error {
 	if err != nil {
 		return err
 	}
-	if err := restrictToUser(tmp, false); err != nil {
+	if err := useracl.Restrict(tmp, false); err != nil {
 		f.Close()
 		os.Remove(tmp)
 		return fmt.Errorf("restrict %s to the user: %w", tmp, err)
@@ -182,13 +200,17 @@ func writeFlag(dir, path, prompt string, now time.Time) error {
 	return err
 }
 
-// pruneFlags removes flags of sessions that have expired.
+// pruneFlags removes flags of sessions that have expired. Folders (the
+// autosend receipts) are not flags: it leaves them.
 func pruneFlags(dir string, now time.Time) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
 	}
 	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
 		if _, ok := readFlag(filepath.Join(dir, e.Name()), now); ok {
 			continue
 		}
@@ -220,31 +242,41 @@ type preToolOutput struct {
 
 // PreToolEnv is what the PreToolUse hook reads besides its input.
 type PreToolEnv struct {
-	Dir      string    // flag directory
-	Now      time.Time // the current time
-	Resolver Resolver  // maps a tool's recipient to the names it is known by
+	Dir          string        // flag directory, holding the autosend receipts too
+	Now          time.Time     // the current time
+	Resolver     Resolver      // maps a tool's recipient to the names it is known by
+	Scheduled    bool          // CLAUDE_CODE_HOST_SCHEDULED_RUN=1: Claude Desktop started this session for a scheduled task
+	DesktopRoots []string      // desktop.Roots
+	AppDir       string        // config.AppDir: <AppDir>/<profile> holds data.db and logs/autosend.log
+	RunWait      time.Duration // how long to wait for Desktop to save a scheduled run's file (RunWaitFor)
+	ClaudeDir    string        // the Claude config folder (CLAUDE_CONFIG_DIR, else ~/.claude): its settings.json gives a task without a mode its mode
 }
 
-// PreTool handles PreToolUse for the gated tools. It stays silent (Claude
-// Code's normal permission flow decides) only when the user's last prompt
-// asked to send, named the recipient and, for a file, mentioned it;
-// otherwise it prints an "ask" decision naming what to confirm. Input it
-// cannot read, a missing or stale flag, a recipient it cannot resolve and a
-// check that overruns PreToolBudget all ask: the gate fails closed.
+// PreTool handles PreToolUse for the gated tools. In a session with a
+// person, it stays silent (Claude Code's normal permission flow decides)
+// only when the user's last prompt asked to send, named the recipient and,
+// for a file, mentioned it; otherwise it prints an "ask" decision naming
+// what to confirm. Input it cannot read, a missing or stale flag, a
+// recipient it cannot resolve and a check that overruns PreToolBudget all
+// ask: the gate fails closed. In a Desktop scheduled run with nobody
+// present it answers "allow" for a text message an approved task sends to
+// an approved chat and "deny" for everything else (see decide). It also
+// answers "allow" for revoking an autosend approval, and "deny" for an
+// autosend approval it cannot show the user.
 func PreTool(stdin io.Reader, stdout io.Writer, env PreToolEnv) error {
 	var in toolInput
 	_, err := decodeInput(stdin, &in)
 	if _, _, gated := gatedTool(in.ToolName); err == nil && !gated {
 		return nil
 	}
-	reason := askReason(in, err, env)
-	if reason == "" {
+	d := decide(in, err, env)
+	if d.kind == "" {
 		return nil
 	}
 	var out preToolOutput
 	out.HookSpecificOutput.HookEventName = "PreToolUse"
-	out.HookSpecificOutput.PermissionDecision = "ask"
-	out.HookSpecificOutput.PermissionDecisionReason = reason
+	out.HookSpecificOutput.PermissionDecision = d.kind
+	out.HookSpecificOutput.PermissionDecisionReason = d.reason
 	return json.NewEncoder(stdout).Encode(out)
 }
 
@@ -258,8 +290,8 @@ type toolArgs struct {
 }
 
 // askReason returns why the call needs the user's confirmation, "" when it
-// does not.
-func askReason(in toolInput, inputErr error, env PreToolEnv) string {
+// does not, and what to confirm ("this send to Marco Rossi (+39...)").
+func askReason(in toolInput, inputErr error, env PreToolEnv) (reason, what string) {
 	var args toolArgs
 	_ = json.Unmarshal(in.ToolInput, &args)
 	server, tool, _ := gatedTool(in.ToolName)
@@ -270,13 +302,13 @@ func askReason(in toolInput, inputErr error, env PreToolEnv) string {
 	if tool == "whatsapp_request_history" {
 		target = args.Chat
 	}
-	what := "this send to " + display(target)
+	what = "this send to " + display(target)
 	if tool == "whatsapp_request_history" {
 		what = "this history request for " + display(target)
 	}
 	const lead = "WhatsApp: "
 	if inputErr != nil || in.SessionID == "" || env.Dir == "" {
-		return lead + "the hook could not read this call. Confirm " + what + "."
+		return lead + "the hook could not read this call. Confirm " + what + ".", what
 	}
 	r, rerr := resolve(env.Resolver, ProfileOf(server), target)
 	if rerr == nil && r.Label != "" {
@@ -284,26 +316,26 @@ func askReason(in toolInput, inputErr error, env PreToolEnv) string {
 	}
 	fl, ok := readFlag(flagPath(env.Dir, in.SessionID), env.Now)
 	if !ok {
-		return lead + "your last message did not ask to send anything. Confirm " + what + "."
+		return lead + "your last message did not ask to send anything. Confirm " + what + ".", what
 	}
 	if !flagMatchesTranscript(fl, in.TranscriptPath) {
-		return lead + "the send gate did not check your last message (its hook did not run). Confirm " + what + "."
+		return lead + "the send gate did not check your last message (its hook did not run). Confirm " + what + ".", what
 	}
 	if rerr != nil {
-		return lead + "cannot check the recipient " + display(target) + " (" + display(rerr.Error()) + "). Confirm " + what + "."
+		return lead + "cannot check the recipient " + display(target) + " (" + errText(rerr) + "). Confirm " + what + ".", what
 	}
 	prompt := strings.Fields(fl.Prompt)
 	if !r.NamedIn(prompt) {
 		return lead + "your last message does not name " + display(r.Label) +
-			" (nicknames are not known to the check). Confirm " + what + "."
+			" (nicknames are not known to the check). Confirm " + what + ".", what
 	}
 	if path := firstNonEmpty(args.Path, args.MediaPath); tool == "whatsapp_send_file" || tool == "send_file" || tool == "send_audio_message" {
 		if !FileNamedIn(path, prompt) {
 			return lead + "your last message does not mention a file. Confirm sending " + display(filepath.Base(path)) +
-				" in " + what + "."
+				" in " + what + ".", what
 		}
 	}
-	return ""
+	return "", what
 }
 
 // resolve runs the resolver within PreToolBudget.
@@ -339,20 +371,29 @@ func firstNonEmpty(ss ...string) string {
 	return ""
 }
 
-// display cleans a model-written or sender-chosen value for the permission prompt.
+// display cleans a model-written or sender-chosen value for the permission
+// prompt, capped at 80 characters.
 func display(s string) string {
+	if s = displayN(s, 80); s == "" {
+		return "an unnamed recipient"
+	}
+	return s
+}
+
+// displayN cleans s like display, capped at n characters, "" when nothing is left.
+func displayN(s string, n int) string {
 	s = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+		switch {
+		case unicode.IsSpace(r):
+			return ' '
+		case unicode.IsControl(r) || unicode.Is(unicode.Cf, r):
 			return -1
 		}
 		return r
 	}, s)
 	s = strings.Join(strings.Fields(s), " ")
-	if r := []rune(s); len(r) > 80 {
-		s = string(r[:79]) + "…"
-	}
-	if s == "" {
-		return "an unnamed recipient"
+	if r := []rune(s); len(r) > n {
+		s = string(r[:max(n-3, 0)]) + "..." // ASCII: some hosts mangle other characters in a reason
 	}
 	return s
 }

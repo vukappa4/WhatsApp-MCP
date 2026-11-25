@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -73,12 +75,12 @@ func (s *Server) resolveChat(ctx context.Context, arg string) (*store.ChatRow, s
 }
 
 func candidateList(w wrapper, chats []store.ChatRow) string {
-	var b strings.Builder
+	lines := make([]string, len(chats))
 	for i := range chats {
 		c := &chats[i]
-		fmt.Fprintf(&b, "- %s %s (%s, last message %s)\n", chatID(c.ID), w.chatName(c), c.Kind, orNever(w.ts(c.LastMessageAt)))
+		lines[i] = fmt.Sprintf("- %s %s (%s, last message %s)", chatID(c.ID), w.inner().chatName(c), c.Kind, orNever(w.ts(c.LastMessageAt)))
 	}
-	return b.String()
+	return w.block(lines) + "\n"
 }
 
 // phoneDigits returns the digits of s when s looks like a phone number.
@@ -231,7 +233,7 @@ func (s *Server) readChat(ctx context.Context, _ *mcp.CallToolRequest, in readCh
 	lines := make([]string, len(msgs))
 	size := 0
 	for i := range msgs {
-		lines[i] = w.line(&msgs[i], full)
+		lines[i] = w.inner().line(&msgs[i], full)
 		size += len(lines[i]) + 1
 	}
 	left := 0
@@ -298,9 +300,15 @@ func (s *Server) readChat(ctx context.Context, _ *mcp.CallToolRequest, in readCh
 		return nil, err
 	}
 
+	// The chat's title is the first line of the block; without messages there
+	// is no block, and the header names it.
 	var b strings.Builder
 	b.WriteString(fresh + "\n")
-	fmt.Fprintf(&b, "Chat %s: %s (%s)", chatID(chat.ID), w.chatName(chat), chat.Kind)
+	b.WriteString("Chat " + chatID(chat.ID))
+	if len(msgs) == 0 {
+		b.WriteString(": " + w.chatName(chat))
+	}
+	fmt.Fprintf(&b, " (%s)", chat.Kind)
 	if chat.Person != nil && !chat.Person.IsMe {
 		fmt.Fprintf(&b, ", person %s", personID(chat.Person.ID))
 	}
@@ -312,9 +320,6 @@ func (s *Server) readChat(ctx context.Context, _ *mcp.CallToolRequest, in readCh
 		return textResult(b.String()), nil
 	}
 	fmt.Fprintf(&b, ". %d messages, %s to %s.\n", len(msgs), w.ts(msgs[0].TS), w.ts(msgs[len(msgs)-1].TS))
-	if chat.Kind != "dm" {
-		b.WriteString(w.participants(msgs))
-	}
 	if left > 0 {
 		fmt.Fprintf(&b, "%d more messages of this page left out to keep the answer under about 20k tokens: page with the cursors.\n", left)
 	}
@@ -323,13 +328,21 @@ func (s *Server) readChat(ctx context.Context, _ *mcp.CallToolRequest, in readCh
 	}
 
 	day := ""
+	rows := make([]string, 0, len(msgs)+10)
+	rows = append(rows, "Title: "+w.inner().chatName(chat))
+	if chat.Kind != "dm" {
+		if sp := w.inner().participants(msgs); sp != "" {
+			rows = append(rows, sp)
+		}
+	}
 	for i := range msgs {
 		if d := fmtDay(msgs[i].TS, w.now); d != day {
 			day = d
-			fmt.Fprintf(&b, "── %s ──\n", d)
+			rows = append(rows, "── "+d+" ──")
 		}
-		b.WriteString(lines[i] + "\n")
+		rows = append(rows, lines[i])
 	}
+	b.WriteString(w.block(rows) + "\n")
 	if newerCur != "" {
 		fmt.Fprintf(&b, "Newer messages: cursor=%q", newerCur)
 	}
@@ -337,7 +350,7 @@ func (s *Server) readChat(ctx context.Context, _ *mcp.CallToolRequest, in readCh
 }
 
 // participants lists the people speaking in a group window once, so message
-// lines can use bare names.
+// lines can use bare names: the first line of the block.
 func (w wrapper) participants(msgs []store.MessageRow) string {
 	seen := map[int64]bool{}
 	var parts []string
@@ -352,11 +365,50 @@ func (w wrapper) participants(msgs []store.MessageRow) string {
 	if len(parts) == 0 {
 		return ""
 	}
-	return "Speakers: " + strings.Join(parts, "; ") + "\n"
+	return "Speakers: " + strings.Join(parts, "; ")
 }
 
-// line renders one transcript line.
+// shown is what a line shows of a message's text and transcript, with the
+// full length in runes of each one it cut (0 when whole).
+type shown struct {
+	text, transcript       string
+	textCut, transcriptCut int
+}
+
+// shown cuts the text to textCap runes, and the transcript too when the line
+// shows it: in detailed mode, or when w.transcripts asks for it.
+func (w wrapper) shown(m *store.MessageRow, full bool) shown {
+	var s shown
+	s.text, s.textCut = cutRunes(m.Text, w.textCap(full))
+	if t := m.Transcript(); t != "" && (full || w.transcripts) {
+		s.transcript, s.transcriptCut = cutRunes(t, w.capText)
+	}
+	return s
+}
+
+// cutRunes cuts s to max runes plus "…" and gives its length in runes, or
+// returns s whole and 0 when it fits or max is 0. Only a cut converts s to
+// runes.
+func cutRunes(s string, max int) (string, int) {
+	if max <= 0 || len(s) <= max { // a rune takes at least one byte
+		return s, 0
+	}
+	n := utf8.RuneCountInString(s)
+	if n <= max {
+		return s, 0
+	}
+	return string([]rune(s)[:max]) + "…", n
+}
+
+// line renders one transcript line, for a block.
 func (w wrapper) line(m *store.MessageRow, full bool) string {
+	return w.lineOf(m, full, w.shown(m, full))
+}
+
+// lineOf renders a line showing s: the time, id and sender, the markers, then
+// the text, which runs to the end of the line. [cut N] marks a text shown in
+// part, N runes long.
+func (w wrapper) lineOf(m *store.MessageRow, full bool, s shown) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s %s ", clock(local(m.TS)), messageID(m.ID))
 	b.WriteString(w.sender(m) + ":")
@@ -381,15 +433,7 @@ func (w wrapper) line(m *store.MessageRow, full bool) string {
 		b.WriteString(" " + w.mediaTag(m, full))
 	}
 	if m.DeletedAt != 0 {
-		b.WriteString(" [deleted by sender; original below]")
-	}
-	if t := w.wrap(w.body(m, full)); t != "" {
-		b.WriteString(" " + t)
-		if n, max := len([]rune(m.Text)), w.textCap(full); max > 0 && n > max {
-			fmt.Fprintf(&b, " [truncated: %d characters; call whatsapp_read_chat with around=%s, limit=1, response_format=detailed for the full text]", n, messageID(m.ID))
-		}
-	} else if m.Kind == "text" && m.DeletedAt != 0 {
-		b.WriteString(" (text not available)")
+		b.WriteString(" [deleted by sender; original shown]")
 	}
 	if m.EditedAt != 0 {
 		if full {
@@ -402,11 +446,27 @@ func (w wrapper) line(m *store.MessageRow, full bool) string {
 		b.WriteString(" " + w.reactions(m.Reactions, full))
 	}
 	if full {
-		fmt.Fprintf(&b, " (wa_id %s", m.WAID)
-		if m.SenderJID != "" {
+		fmt.Fprintf(&b, " (wa_id %s", w.waID(m.WAID))
+		if m.SenderJID != "" && !m.FromMe { // my own JID is in whatsapp_status
 			fmt.Fprintf(&b, ", from %s", m.SenderJID)
 		}
 		b.WriteString(")")
+	}
+	text, tr := w.wrap(s.text), w.wrap(s.transcript)
+	if text != "" && tr != "" { // audio carries no caption: never seen, kept apart if it comes
+		text += " transcript " + tr
+	} else if tr != "" {
+		text = tr
+	}
+	// One cut marker: limit=1 in detailed mode shows the text and the
+	// transcript whole.
+	if n := max(s.textCut, s.transcriptCut); n > 0 && text != "" {
+		fmt.Fprintf(&b, " [cut %d]", n)
+	}
+	if text != "" {
+		b.WriteString(" " + text)
+	} else if m.Kind == "text" && m.DeletedAt != 0 {
+		b.WriteString(" (text not available)")
 	}
 	return b.String()
 }
@@ -432,17 +492,9 @@ func (w wrapper) textCap(full bool) int {
 	return w.capText
 }
 
-// body is the message text, cut to textCap runes.
-func (w wrapper) body(m *store.MessageRow, full bool) string {
-	r := []rune(m.Text)
-	if max := w.textCap(full); max == 0 || len(r) <= max {
-		return m.Text
-	}
-	return string(r[:w.textCap(full)]) + "…"
-}
-
-// mediaTag renders "[voice 0:42 · transcript]": the transcript text itself
-// only in detailed mode, or when w.transcripts asks for it (a search hit).
+// mediaTag renders "[voice 0:42 · transcript]". The line shows the transcript
+// as its text in detailed mode, or when w.transcripts asks for it (a search
+// hit); otherwise "transcript" only says there is one.
 func (w wrapper) mediaTag(m *store.MessageRow, full bool) string {
 	head := m.Kind
 	var parts []string
@@ -462,17 +514,7 @@ func (w wrapper) mediaTag(m *store.MessageRow, full bool) string {
 			}
 			parts = append(parts, "media "+md.State)
 		}
-		switch {
-		case md.Transcript == "":
-		case full || w.transcripts:
-			t := md.Transcript
-			if r := []rune(t); w.capText > 0 && len(r) > w.capText {
-				t = string(r[:w.capText]) + "…"
-				parts = append(parts, "transcript: "+w.wrap(t)+fmt.Sprintf(" [transcript truncated: %d characters; whatsapp_get_media message=%s mode=transcript shows all]", len(r), messageID(m.ID)))
-				break
-			}
-			parts = append(parts, "transcript: "+w.wrap(t))
-		default:
+		if md.Transcript != "" {
 			parts = append(parts, "transcript")
 		}
 	}
@@ -488,14 +530,14 @@ func (w wrapper) reactions(rs []store.ReactionRow, full bool) string {
 				p := r.Person
 				who = w.name(&p)
 			}
-			parts = append(parts, sanitize(r.Emoji)+" "+who)
+			parts = append(parts, w.reactionText(r.Emoji)+" "+who)
 		}
 		return "{" + strings.Join(parts, ", ") + "}"
 	}
 	counts := map[string]int{}
 	var order []string
 	for _, r := range rs {
-		e := sanitize(r.Emoji)
+		e := w.reactionText(r.Emoji)
 		if counts[e] == 0 {
 			order = append(order, e)
 		}
@@ -509,4 +551,70 @@ func (w wrapper) reactions(rs []store.ReactionRow, full bool) string {
 		}
 	}
 	return "{" + strings.Join(parts, " ") + "}"
+}
+
+// reactionText renders a reaction: bare when it is an emoji, quoted like any
+// sender text otherwise. WhatsApp sends a reaction as free text, so a sender
+// can react with words.
+func (w wrapper) reactionText(s string) string {
+	s = sanitize(s)
+	if isEmoji(s) {
+		return s
+	}
+	return w.wrap(s)
+}
+
+// isEmoji reports whether s is a short run of emoji: pictographs, regional
+// indicators, skin tones, joiners, variation selectors and keycaps (0-9, #
+// or * right before U+20E3). Symbols that read as letters or punctuation
+// (circled and squared letters, Braille, box drawing, quote ornaments) are
+// not emoji, so a sender cannot spell words with them.
+func isEmoji(s string) bool {
+	r := []rune(s)
+	if len(r) == 0 || len(r) > 16 {
+		return false
+	}
+	seen := false
+	for i := 0; i < len(r); i++ {
+		switch c := r[i]; {
+		case unicode.Is(emoji, c):
+			seen = true
+		case c == 0x200D, c == 0xFE0E, c == 0xFE0F:
+		case c >= '0' && c <= '9', c == '#', c == '*':
+			j := i + 1
+			if j < len(r) && r[j] == 0xFE0F {
+				j++
+			}
+			if j == len(r) || r[j] != 0x20E3 {
+				return false
+			}
+			i, seen = j, true
+		default:
+			return false
+		}
+	}
+	return seen
+}
+
+// emoji holds the pictographs WhatsApp offers as emoji, skin tones and
+// regional indicators included.
+var emoji = &unicode.RangeTable{
+	R16: []unicode.Range16{
+		{0x00A9, 0x00A9, 1}, {0x00AE, 0x00AE, 1}, {0x203C, 0x203C, 1}, {0x2049, 0x2049, 1},
+		{0x2122, 0x2122, 1}, {0x2139, 0x2139, 1}, {0x2194, 0x2199, 1}, {0x21A9, 0x21AA, 1},
+		{0x231A, 0x231B, 1}, {0x2328, 0x2328, 1}, {0x23CF, 0x23CF, 1}, {0x23E9, 0x23F3, 1},
+		{0x23F8, 0x23FA, 1}, {0x24C2, 0x24C2, 1}, {0x25AA, 0x25AB, 1}, {0x25B6, 0x25B6, 1},
+		{0x25C0, 0x25C0, 1}, {0x25FB, 0x25FE, 1}, {0x2600, 0x2757, 1}, {0x2763, 0x2767, 1},
+		{0x2795, 0x2797, 1}, {0x27A1, 0x27A1, 1}, {0x27B0, 0x27B0, 1}, {0x27BF, 0x27BF, 1},
+		{0x2934, 0x2935, 1}, {0x2B05, 0x2B07, 1}, {0x2B1B, 0x2B1C, 1}, {0x2B50, 0x2B50, 1},
+		{0x2B55, 0x2B55, 1}, {0x3030, 0x3030, 1}, {0x303D, 0x303D, 1}, {0x3297, 0x3297, 1},
+		{0x3299, 0x3299, 1},
+	},
+	R32: []unicode.Range32{
+		{0x1F004, 0x1F004, 1}, {0x1F0CF, 0x1F0CF, 1}, {0x1F170, 0x1F171, 1}, {0x1F17E, 0x1F17F, 1},
+		{0x1F18E, 0x1F18E, 1}, {0x1F191, 0x1F19A, 1}, {0x1F1E6, 0x1F1FF, 1}, {0x1F201, 0x1F202, 1},
+		{0x1F21A, 0x1F21A, 1}, {0x1F22F, 0x1F22F, 1}, {0x1F232, 0x1F23A, 1}, {0x1F250, 0x1F251, 1},
+		{0x1F300, 0x1F64F, 1}, {0x1F680, 0x1F6FF, 1}, {0x1F7E0, 0x1F7EB, 1}, {0x1F7F0, 0x1F7F0, 1},
+		{0x1F900, 0x1F9FF, 1}, {0x1FA70, 0x1FAFF, 1},
+	},
 }

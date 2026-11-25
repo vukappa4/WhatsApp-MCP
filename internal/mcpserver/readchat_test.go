@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -18,7 +19,7 @@ import (
 )
 
 var (
-	readChatHead  = regexp.MustCompile(`(?m)^Chat c_(\d+): .*\. (\d+) messages, `)
+	readChatHead  = regexp.MustCompile(`(?m)^Chat c_(\d+) .*\. (\d+) messages, `)
 	newerCursorRe = regexp.MustCompile(`(?m)^Newer messages: cursor="([^"]+)"`)
 )
 
@@ -245,4 +246,48 @@ func TestReadChatCursorsAfterBudget(t *testing.T) {
 		t.Fatal("no page was cut to the budget")
 	}
 	c.covered(1, 2, 3)
+}
+
+// A detailed line names the sender's JID for messages of others only: mine
+// would repeat the account's JID on every line.
+func TestDetailedLineOmitsOwnJID(t *testing.T) {
+	db := seed(t)
+	ctx := context.Background()
+	in := &wa.Ingestor{DB: db, Self: func() (types.JID, types.JID) { return me, meLID }}
+	a := types.NewJID("393331111111", types.DefaultUserServer)
+	if err := in.Message(ctx, &events.Message{Info: types.MessageInfo{MessageSource: types.MessageSource{Chat: a, Sender: me, IsFromMe: true},
+		ID: "ME1", Timestamp: t0.Add(5 * time.Minute)}, Message: &waE2E.Message{Conversation: proto.String("risposta mia")}}); err != nil {
+		t.Fatal(err)
+	}
+	text, _ := call(t, connect(t, db), toolReadChat, map[string]any{"chat": "+39 333 111 1111", "response_format": "detailed"})
+	if !regexp.MustCompile(`(?m) me: \(wa_id ME1\) "risposta mia"$`).MatchString(text) ||
+		!regexp.MustCompile(`(?m) ~Marco: \[edited [^]]+\] \(wa_id A2, from 393331111111@s\.whatsapp\.net\) `).MatchString(text) {
+		t.Fatalf("detailed lines:\n%s", text)
+	}
+}
+
+// A cursor's JSON names its tool by a one-letter code and leaves zero fields
+// out; a code no tool owns is refused.
+func TestCursorEncoding(t *testing.T) {
+	for tool := range cursorCodes {
+		c := cursor{Tool: tool, Query: "marco", Off: 10}
+		got, err := decodeCursor(c.encode(), tool)
+		if err != nil || got != c {
+			t.Fatalf("%s: round trip %+v, %v; want %+v", tool, got, err, c)
+		}
+	}
+	b, _ := base64.RawURLEncoding.DecodeString(cursor{Tool: toolSearchPeople, Query: "marco", Off: 10}.encode())
+	if string(b) != `{"t":"p","q":"marco","o":10}` {
+		t.Fatalf("cursor JSON %s", b)
+	}
+	if _, err := decodeCursor(cursor{Tool: toolReadChat, Chat: 1, TS: 5, ID: 7}.encode(), toolListChats); err == nil ||
+		!strings.Contains(err.Error(), "belongs to "+toolReadChat) {
+		t.Fatalf("cursor of another tool: %v", err)
+	}
+	for _, raw := range []string{`{"t":"x","ts":5,"id":7}`, `{"ts":5,"id":7}`, `{"t":"whatsapp_read_chat","ts":5,"id":7}`} {
+		if _, err := decodeCursor(base64.RawURLEncoding.EncodeToString([]byte(raw)), toolReadChat); err == nil ||
+			!strings.Contains(err.Error(), "invalid cursor: unknown tool code") {
+			t.Fatalf("%s: %v", raw, err)
+		}
+	}
 }

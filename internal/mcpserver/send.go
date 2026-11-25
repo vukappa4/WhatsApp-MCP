@@ -90,6 +90,8 @@ func (s *Server) addSendTools(srv *mcp.Server) {
 		InputSchema: schemaFor[requestHistoryIn](nil),
 		Annotations: sendAnnotations("Request older WhatsApp history"),
 	}, s.requestHistory)
+
+	s.addAutosendTools(srv)
 }
 
 // ---- recipients ----
@@ -133,19 +135,34 @@ func (s *Server) resolveRecipient(ctx context.Context, arg string) (*recipient, 
 	if arg == "" {
 		return nil, "to is required: " + toHelp, nil
 	}
-	if id, ok := parseID(arg, "c_"); ok {
-		c, found, err := store.ChatByID(ctx, s.DB, id)
-		if err != nil || !found {
-			return nil, fmt.Sprintf("no chat %s: call whatsapp_list_chats for current ids", arg), err
+	if kind, id := store.ParseRef(arg); kind != "" {
+		// The send gate approves autosends by the same Destination.
+		d, err := store.ResolveDestination(ctx, s.DB, arg)
+		if msg, err := destinationProblem(arg, d, err); msg != "" || err != nil {
+			return nil, msg, err
 		}
-		return s.chatRecipient(ctx, &c)
-	}
-	if id, ok := parseID(arg, "p_"); ok {
-		c, found, err := store.PersonCandidateByID(ctx, s.DB, id)
-		if err != nil || !found {
-			return nil, fmt.Sprintf("no person %s: use whatsapp_search_people to find the id", arg), err
+		if d.Kind == "group" {
+			j, err := types.ParseJID(d.JID)
+			if err != nil {
+				return nil, "", err
+			}
+			return &recipient{jid: j, chatID: d.ChatID, kind: "group", groupName: d.Name}, "", nil
 		}
-		return s.personRecipient(ctx, &c.PersonRef)
+		var p *store.PersonRef
+		if kind == "c" {
+			c, found, err := store.ChatByID(ctx, s.DB, id)
+			if err != nil || !found || c.Person == nil {
+				return nil, fmt.Sprintf("no chat %s: call whatsapp_list_chats for current ids", arg), err
+			}
+			p = c.Person
+		} else {
+			c, found, err := store.PersonCandidateByID(ctx, s.DB, id)
+			if err != nil || !found {
+				return nil, fmt.Sprintf("no person %s: use whatsapp_search_people to find the id", arg), err
+			}
+			p = &c.PersonRef
+		}
+		return s.dmRecipient(ctx, p, d)
 	}
 	// Only a plain name may match a name: the send gate reads anything shaped
 	// like an id or a JID as one, so a group named "P-Rossi" must never take
@@ -169,24 +186,47 @@ func (s *Server) resolveRecipient(ctx context.Context, arg string) (*recipient, 
 	return s.nameRecipient(ctx, arg)
 }
 
-func (s *Server) chatRecipient(ctx context.Context, c *store.ChatRow) (*recipient, string, error) {
-	switch c.Kind {
-	case "dm":
-		if c.Person == nil {
-			return nil, fmt.Sprintf("chat %s has no person", chatID(c.ID)), nil
-		}
-		return s.personRecipient(ctx, c.Person)
-	case "group":
-		j, err := types.ParseJID(c.JID)
-		if err != nil {
-			return nil, "", err
-		}
-		return &recipient{jid: j, chatID: c.ID, kind: "group", groupName: c.Name}, "", nil
+// destinationProblem says why a send cannot go to ref, given what
+// store.ResolveDestination or store.PersonDestination returned: a message
+// for Claude, or an error for a failure of the database.
+func destinationProblem(ref string, d store.Destination, err error) (string, error) {
+	var many store.ErrManyLIDs
+	var kind store.ErrChatKind
+	switch {
+	case err == nil:
+		return "", nil
+	case errors.Is(err, store.ErrUnknownRef) && strings.HasPrefix(ref, "c_"):
+		return fmt.Sprintf("no chat %s: call whatsapp_list_chats for current ids", ref), nil
+	case errors.Is(err, store.ErrUnknownRef):
+		return fmt.Sprintf("no person %s: use whatsapp_search_people to find the id", ref), nil
+	case errors.Is(err, store.ErrNotRef):
+		return fmt.Sprintf("%q is not a chat (c_N) or person (p_N) id: "+toHelp, ref), nil
+	case errors.Is(err, store.ErrChatNoPerson):
+		return fmt.Sprintf("chat %s has no person", ref), nil
+	case errors.As(err, &kind):
+		return fmt.Sprintf("chat %s is a %s: only people and groups can receive messages", ref, kind.Kind), nil
+	case errors.As(err, &many):
+		// A DM goes to the account (LID): a stored number can be out of date,
+		// or WhatsApp may have given it to someone else.
+		return fmt.Sprintf("%s holds %d WhatsApp accounts (LIDs), so which one is meant is unknown: cannot send. "+
+			"Rebuilding data.db (whatsapp-mcp reingest) splits them into separate people.", personID(d.PersonID), many.N), nil
+	case errors.Is(err, store.ErrNoSendJID):
+		return fmt.Sprintf("%s has no phone number or WhatsApp id stored: cannot send", personID(d.PersonID)), nil
 	}
-	return nil, fmt.Sprintf("chat %s is a %s: only people and groups can receive messages", chatID(c.ID), c.Kind), nil
+	return "", err
 }
 
 func (s *Server) personRecipient(ctx context.Context, p *store.PersonRef) (*recipient, string, error) {
+	d, err := store.PersonDestination(ctx, s.DB, p.ID)
+	if msg, err := destinationProblem(personID(p.ID), d, err); msg != "" || err != nil {
+		return nil, msg, err
+	}
+	return s.dmRecipient(ctx, p, d)
+}
+
+// dmRecipient is a direct message to p at d, the JID the send gate picks
+// too: the person's LID, else their number.
+func (s *Server) dmRecipient(ctx context.Context, p *store.PersonRef, d store.Destination) (*recipient, string, error) {
 	act, err := store.GetPersonActivity(ctx, s.DB, p.ID, 0)
 	if err != nil {
 		return nil, "", err
@@ -196,29 +236,11 @@ func (s *Server) personRecipient(ctx context.Context, p *store.PersonRef) (*reci
 		r.chatID = act.DM.Chat.ID
 	}
 	r.first = (act.DM == nil || act.DM.Messages == 0) && act.GroupsTotal == 0
-	var lids []string
-	for _, j := range act.JIDs {
-		if j.Kind == "lid" {
-			lids = append(lids, j.JID)
-		}
+	if r.jid, err = types.ParseJID(d.JID); err != nil {
+		return nil, "", err
 	}
-	// A DM goes to the account (LID): a stored number can be out of date, or
-	// WhatsApp may have given it to someone else. The number is used only for
-	// a person with no known LID.
-	switch {
-	case len(lids) > 1:
-		return nil, fmt.Sprintf("%s holds %d WhatsApp accounts (LIDs), so which one is meant is unknown: cannot send. "+
-			"Rebuilding data.db (whatsapp-mcp reingest) splits them into separate people.", personID(p.ID), len(lids)), nil
-	case len(lids) == 1:
-		if r.jid, err = types.ParseJID(lids[0]); err != nil {
-			return nil, "", err
-		}
-	case p.Phone != "":
-		digits := strings.TrimPrefix(p.Phone, "+")
-		r.jid = types.NewJID(digits, types.DefaultUserServer)
-		if r.chatID == 0 {
-			r.checkPhone = digits
-		}
+	if d.ViaPhone && r.chatID == 0 {
+		r.checkPhone = r.jid.User
 	}
 	if r.jid.IsEmpty() {
 		return nil, fmt.Sprintf("%s has no phone number or WhatsApp id stored: cannot send", personID(p.ID)), nil
@@ -265,7 +287,7 @@ func (s *Server) nameRecipient(ctx context.Context, arg string) (*recipient, str
 	case len(exact) == 1 && len(groups) == 0:
 		return s.personRecipient(ctx, &exact[0].PersonRef)
 	case len(exact) == 0 && len(groups) == 1:
-		return s.chatRecipient(ctx, &groups[0])
+		return s.resolveRecipient(ctx, chatID(groups[0].ID))
 	case len(exact)+len(groups) > 1:
 		var b strings.Builder
 		fmt.Fprintf(&b, "Not sent: %q names %d recipients:\n", arg, len(exact)+len(groups))

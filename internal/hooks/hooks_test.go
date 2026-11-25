@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/vukappa4/whatsapp-mcp/internal/store"
+	"github.com/vukappa4/whatsapp-mcp/internal/useracl"
 )
 
 // intentCases is the accuracy table: prompts a user writes to Claude Code,
@@ -137,7 +138,7 @@ func userPrompt(t *testing.T, dir, session, prompt string, now time.Time) {
 		"session_id": session, "transcript_path": "x.jsonl", "cwd": `C:\x`, "permission_mode": "default",
 		"hook_event_name": "UserPromptSubmit", "prompt": prompt,
 	})
-	if err := UserPrompt(bytes.NewReader(in), dir, now); err != nil {
+	if err := UserPrompt(bytes.NewReader(in), dir, now, PromptOptions{}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -471,11 +472,11 @@ func TestUserPromptFiles(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "old")); !os.IsNotExist(err) {
 		t.Fatalf("expired flag kept: %v", err)
 	}
-	if err := UserPrompt(strings.NewReader("garbage"), dir, now); err == nil {
+	if err := UserPrompt(strings.NewReader("garbage"), dir, now, PromptOptions{}); err == nil {
 		t.Fatal("garbage input accepted")
 	}
 	// Input that fails to parse still clears the session's flag when its id can be read.
-	if err := UserPrompt(strings.NewReader(`{"session_id":"s1","prompt":`), dir, now); err == nil {
+	if err := UserPrompt(strings.NewReader(`{"session_id":"s1","prompt":`), dir, now, PromptOptions{}); err == nil {
 		t.Fatal("truncated input accepted")
 	}
 	if _, err := os.Stat(filepath.Join(dir, "s1")); !os.IsNotExist(err) {
@@ -488,9 +489,6 @@ func TestUserPromptFiles(t *testing.T) {
 	}
 }
 
-// aceRe matches an allow ACE in SDDL and captures its SID token.
-var aceRe = regexp.MustCompile(`\(A;[^;]*;[^;]*;[^;]*;[^;]*;([^)]+)\)`)
-
 // The flag dir and files grant access to the user only.
 func TestFlagsAreUserOnly(t *testing.T) {
 	if runtime.GOOS != "windows" {
@@ -499,23 +497,9 @@ func TestFlagsAreUserOnly(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "hooks")
 	now := time.Date(2026, 10, 13, 10, 0, 0, 0, time.UTC)
 	userPrompt(t, dir, "s1", "invia a Marco il file", now)
-	sid, err := currentUserSID()
-	if err != nil {
-		t.Fatal(err)
-	}
 	for _, p := range []string{dir, filepath.Join(dir, "s1")} {
-		sddl, err := fileDACL(p)
-		if err != nil {
-			t.Fatal(err)
-		}
-		aces := aceRe.FindAllStringSubmatch(sddl, -1)
-		if !strings.HasPrefix(sddl, "D:P") || strings.Count(sddl, "(") != 1 || len(aces) != 1 {
-			t.Errorf("%s: DACL %s, want one ACE for %s", p, sddl, sid)
-			continue
-		}
-		// SDDL writes some SIDs as aliases, like LA when the user is the built-in Administrator.
-		if got, err := canonicalSID(aces[0][1]); err != nil || got != sid {
-			t.Errorf("%s: DACL %s grants %s (%v), want %s", p, sddl, got, err, sid)
+		if err := useracl.Check(p); err != nil {
+			t.Error(err)
 		}
 	}
 }
@@ -545,7 +529,7 @@ func TestPreToolMatcher(t *testing.T) {
 func TestHookInputWithBOM(t *testing.T) {
 	g := newGate(t)
 	bom := "\xEF\xBB\xBF"
-	if err := UserPrompt(strings.NewReader(bom+`{"session_id":"s1","prompt":"rispondi a Marco che arrivo"}`), g.dir, g.now); err != nil {
+	if err := UserPrompt(strings.NewReader(bom+`{"session_id":"s1","prompt":"rispondi a Marco che arrivo"}`), g.dir, g.now, PromptOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	in := bom + `{"session_id":"s1","tool_name":"mcp__whatsapp__whatsapp_send_message","tool_input":{"to":"Marco"}}`

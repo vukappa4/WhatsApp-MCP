@@ -17,7 +17,10 @@ Go daemon that links to WhatsApp as a device (whatsmeow), stores everything in S
 
 - Copy or share a `session.db`: it owns the account, and two clients on one session corrupt its encryption.
 - Re-enable the legacy task `WhatsApp MCP Bridge`.
-- Automate bulk or unsolicited sends: WhatsApp bans for them.
+- Automate bulk or unsolicited sends: WhatsApp bans for them. The only automated sends are whatsapp_send_message calls from a Desktop scheduled task the user approved with whatsapp_send_autosend_allow, to the chats approved with it, while the task's prompt, schedule and folder are unchanged and the mode its runs use (its own, else `permissions.defaultMode` from the Claude Code settings) is default, acceptEdits, plan or auto.
+- Let the send gate answer allow for anything but an approved task's send or a revoke, or accept an approval from a scheduled run.
+- Name an acting tool outside whatsapp_send_*: past installs gate only that range.
+- Key autosend rules on c_N or p_N ids: reingest reuses them.
 - Ack a message before it is archived in `raw_events`.
 - Send `BuildFatalAppStateExceptionNotification`: it logs out every linked device.
 - Build with `-H=windowsgui`: shells lose the exit code and stdout.
