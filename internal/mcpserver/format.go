@@ -14,6 +14,7 @@ import (
 	"time"
 	_ "time/tzdata" // Europe/Rome without relying on the OS zone database
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/vukappa4/whatsapp-mcp/internal/people"
 	"github.com/vukappa4/whatsapp-mcp/internal/store"
@@ -210,31 +211,99 @@ var tagName = regexp.MustCompile(`(?i)` + strings.Join(strings.Split("untrusted_
 
 // sanitize strips control, invisible and bidi formatting characters (keeping
 // newlines, tabs and the emoji zero-width joiner) and defuses the wrapper tag.
+// A string with nothing to change comes back as it is, without a copy.
 func sanitize(s string) string {
-	var b strings.Builder
-	b.Grow(len(s))
-	for _, r := range s {
-		switch {
-		case r == '\n' || r == '\t':
-		case r == '\r':
-			continue
-		case unicode.IsControl(r):
-			continue
-		case r == 0x200D: // ZWJ joins emoji sequences
-		case unicode.Is(unicode.Cf, r): // ZWSP, LRM/RLM, LRE..RLO, isolates, BOM, soft hyphen, tag chars...
-			continue
-		case r == 0x2065 || r >= 0xFFF0 && r <= 0xFFF8 || r >= 0xE0000 && r <= 0xE0FFF && !unicode.Is(unicode.Mn, r):
-			continue // unassigned, but Unicode reserves them to render as nothing
-		case r == 0x2028 || r == 0x2029:
-			r = '\n'
+	out := s
+	for i, r := range s {
+		// Invalid UTF-8 decodes as RuneError and is written back as U+FFFD.
+		if c, keep := cleanRune(r); !keep || c != r || r == utf8.RuneError {
+			out = strip(s, i)
+			break
 		}
-		b.WriteRune(r)
 	}
-	out := b.String()
-	if !strings.Contains(out, "_") { // every tagName match holds an underscore; the regex is slow
+	if !mayHoldTag(out) { // the regex is slow: run it only where it can match
 		return out
 	}
 	return tagName.ReplaceAllString(out, "untrusted-w")
+}
+
+// strip is sanitize's cleaning of s, whose first i bytes need none.
+func strip(s string, i int) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	b.WriteString(s[:i])
+	for _, r := range s[i:] {
+		if c, keep := cleanRune(r); keep {
+			b.WriteRune(c)
+		}
+	}
+	return b.String()
+}
+
+// cleanRune is what sanitize writes for r: c, or nothing when keep is false.
+func cleanRune(r rune) (c rune, keep bool) {
+	switch {
+	case r == '\n' || r == '\t':
+	case r == '\r':
+		return 0, false
+	case unicode.IsControl(r):
+		return 0, false
+	case r == 0x200D: // ZWJ joins emoji sequences
+	case unicode.Is(unicode.Cf, r): // ZWSP, LRM/RLM, LRE..RLO, isolates, BOM, soft hyphen, tag chars...
+		return 0, false
+	case r == 0x2065 || r >= 0xFFF0 && r <= 0xFFF8 || r >= 0xE0000 && r <= 0xE0FFF && !unicode.Is(unicode.Mn, r):
+		return 0, false // unassigned, but Unicode reserves them to render as nothing
+	case r == 0x2028 || r == 0x2029:
+		return '\n', true
+	}
+	return r, true
+}
+
+// mayHoldTag reports whether tagName can match in s, without allocating: a
+// "u" starting "untrusted_w" in any case (by Unicode simple folding, as (?i)
+// matches), with the runes tagName skips allowed between the letters.
+func mayHoldTag(s string) bool {
+	const word = "untrusted_w"
+	for i := 0; i < len(s); i++ {
+		if s[i] != 'u' && s[i] != 'U' { // u folds only to U
+			continue
+		}
+		j, k := i+1, 1
+		for k < len(word) && j < len(s) {
+			r, n := utf8.DecodeRuneInString(s[j:])
+			switch {
+			case foldEqual(r, rune(word[k])):
+				k++
+			case !tagIgnorable(r):
+				j = len(s) // a mismatch: no match starts at i
+				continue
+			}
+			j += n
+		}
+		if k == len(word) {
+			return true
+		}
+	}
+	return false
+}
+
+// tagIgnorable is a rune tagName skips between the letters of the tag name.
+func tagIgnorable(r rune) bool {
+	return r == 0x200D || r == 0x115F || r == 0x1160 || r == 0x3164 || r == 0xFFA0 || unicode.Is(unicode.M, r)
+}
+
+// foldEqual reports whether r equals the lower-case ASCII letter c under
+// Unicode simple case folding (s also matches the long s, U+017F).
+func foldEqual(r, c rune) bool {
+	if r == c {
+		return true
+	}
+	for f := unicode.SimpleFold(c); f != c; f = unicode.SimpleFold(f) {
+		if f == r {
+			return true
+		}
+	}
+	return false
 }
 
 // wrapper marks sender-written text with a per-response nonce: one field

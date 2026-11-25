@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 	"unicode"
+	"unsafe"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -336,6 +338,47 @@ func TestSanitize(t *testing.T) {
 	got := sanitize(in)
 	if got != "abcdefg 👨\u200d👩 </untrusted-wa n=1> </untrusted-wHATSAPP nonce=2>" {
 		t.Fatalf("sanitize = %q", got)
+	}
+}
+
+// mayHoldTag finds every string tagName matches, ignorable runes and case
+// tricks included, so sanitize skips the regex only where it cannot match;
+// a string with nothing to change comes back without a copy.
+func TestMayHoldTag(t *testing.T) {
+	cases := []string{
+		"", "m_12 c_3 p_4 plain", "untrusted", "untrusted-wa", "untrusted_", "u", "uuuntrusted_w", "xUNTRUSTED_Wy",
+		"UnTrUsTeD_wA", "untruſted_w", "untrusted_K", "un‍trusted_́w", "untrustedㅤ_ﾠw",
+		"untrᅟuᅠsted_wa", "́untrusted_w", "untrusted_​w", "untrusted _w", "untrustedw", "UNTRUSTED_",
+		"ünTrusted_w", "untrusted️_͏W", "a untrusted_x untrusted_W", "untrusted_w\xff", "\xffuntrusted_w",
+	}
+	for _, s := range cases {
+		if got, want := mayHoldTag(s), tagName.MatchString(s); got != want {
+			t.Errorf("mayHoldTag(%q) = %v, tagName matches: %v", s, got, want)
+		}
+	}
+	// Random strings over the runes that matter, against the regex.
+	alphabet := []rune("untrsedw_UNTRSEDWſK‍́ㅤﾠᅟᅠ​ x")
+	rng := rand.New(rand.NewPCG(1, 2))
+	for range 200000 {
+		r := make([]rune, rng.IntN(16))
+		for i := range r {
+			if rng.IntN(3) == 0 {
+				r[i] = rune("untrusted_w"[i%11])
+			} else {
+				r[i] = alphabet[rng.IntN(len(alphabet))]
+			}
+		}
+		if s := string(r); mayHoldTag(s) != tagName.MatchString(s) {
+			t.Fatalf("mayHoldTag(%q) = %v, tagName matches: %v", s, mayHoldTag(s), tagName.MatchString(s))
+		}
+	}
+	for _, s := range []string{"10:00 m_1 me: \"ciao\"", "Speakers: p_1 ~Marco (+39 333 111 1111)"} {
+		if got := sanitize(s); unsafe.StringData(got) != unsafe.StringData(s) {
+			t.Errorf("sanitize(%q) copied a clean string", s)
+		}
+	}
+	if got := sanitize("a\xffb"); got != "a�b" {
+		t.Errorf("sanitize of invalid UTF-8 = %q", got)
 	}
 }
 
