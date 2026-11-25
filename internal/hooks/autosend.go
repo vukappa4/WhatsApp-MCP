@@ -83,7 +83,8 @@ func autosendProfile(server string) (string, bool) {
 //     to answer an ask, and Desktop can store a task's answer to an ask and
 //     replay it, past the chat check and the brake; a deny is never stored.
 //  6. Otherwise, a person typed or the session is not a scheduled run: the
-//     user-prompt gate decides (askReason).
+//     user-prompt gate decides (askReason). In a scheduled session it asks
+//     at most: Claude can write the marker and the flag it trusts.
 //
 // Steps 1, 2 and 4 hold only for the exact server names setup-claude
 // registers. Nothing here turns an ask of the user-prompt gate into silence.
@@ -127,7 +128,13 @@ func decide(in toolInput, inputErr error, env PreToolEnv) decision {
 		return decision{deny, "WhatsApp: this scheduled run has nobody present and is not approved for " + callWhat(in, tool, l.label) +
 			" (" + displayN(why, 400) + "). Do not retry; tell the user in your final message."}
 	}
-	if r, _ := askReason(in, inputErr, env); r != "" {
+	r, what := askReason(in, inputErr, env)
+	if r == "" && env.Scheduled {
+		// The typed marker and the flag sit in a folder Claude can write to:
+		// in a scheduled session they never make a send silent.
+		r = "WhatsApp: this session runs a Desktop scheduled task. Confirm " + what + "."
+	}
+	if r != "" {
 		return decision{ask, r}
 	}
 	return decision{}

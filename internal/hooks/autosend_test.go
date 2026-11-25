@@ -582,8 +582,11 @@ func TestScheduledRunPresence(t *testing.T) {
 	if kind, r := a.send(a.env(true), "sched-1", "c_1"); kind != ask || !strings.Contains(r, "did not ask to send") {
 		t.Fatalf("typed prompt without intent: %s %q", kind, r)
 	}
+	// Even a typed prompt that asked to send and named the recipient asks:
+	// Claude can write the marker and the flag.
 	a.prompt(sched, "sched-1", "rispondi a Lorenzo che arrivo")
-	if kind, r := a.send(a.env(true), "sched-1", "p_2"); kind != silent {
+	if kind, r := a.send(a.env(true), "sched-1", "p_2"); kind != ask ||
+		r != "WhatsApp: this session runs a Desktop scheduled task. Confirm this send to Lorenzo Bianchi (+393339876543)." {
 		t.Fatalf("typed prompt naming Lorenzo: %s %q", kind, r)
 	}
 	if lines := a.auditLines(); len(lines) != 1 {
@@ -592,6 +595,32 @@ func TestScheduledRunPresence(t *testing.T) {
 	// A typed marker that cannot be read is nobody.
 	if personTyped(a.dir, "sched-404") || personTyped("", "sched-1") || personTyped(a.dir, "") {
 		t.Fatal("presence without a marker")
+	}
+}
+
+// Claude can write files in the hooks folder. A typed marker and a flag it
+// forged in a scheduled session turn a deny into an ask at most, never
+// into silence, for any gated tool.
+func TestScheduledForgedFlagsNeverSilent(t *testing.T) {
+	a := newAuto(t)
+	a.write(typedPath(a.dir, "sched-1"), nil)
+	b, _ := json.Marshal(flag{At: a.now.Unix(), Prompt: "manda a lorenzo e a marco il file fattura pdf e la cronologia"})
+	a.write(flagPath(a.dir, "sched-1"), b)
+	for _, c := range []struct {
+		tool string
+		args map[string]any
+	}{
+		{send, map[string]any{"to": "p_2", "text": "x"}},
+		{sendFile, map[string]any{"to": "c_1", "path": `C:\x\fattura.pdf`}},
+		{history, map[string]any{"chat": "c_1"}},
+	} {
+		if kind, r := a.call(a.env(true), "sched-1", c.tool, c.args); kind != ask || !strings.Contains(r, "runs a Desktop scheduled task") {
+			t.Errorf("%s: %s %q", c.tool, kind, r)
+		}
+	}
+	// Outside a scheduled session the same flag still passes silently.
+	if kind, r := a.send(a.env(false), "sched-1", "p_2"); kind != silent {
+		t.Fatalf("interactive: %s %q", kind, r)
 	}
 }
 
