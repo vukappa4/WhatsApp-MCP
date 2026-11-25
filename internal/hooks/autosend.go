@@ -461,9 +461,12 @@ func approvalCard(ctx context.Context, in toolInput, inputErr error, profile str
 	if env.Scheduled {
 		return no(scheduledRun)
 	}
-	// Desktop's file for the session also says whether it runs a task, in
-	// case the variable did not reach the hook. A session with no file is
-	// not one of Desktop's.
+	// CLAUDE_CODE_HOST_SCHEDULED_RUN is the check. Desktop's file for the
+	// session is a best-effort second one, in case the variable did not
+	// reach the hook: a file naming a task refuses. No file found must pass,
+	// since an interactive CLI session has none; so this check misses a run
+	// whose file Desktop has not written yet. It does not wait for one: that
+	// would delay every interactive approval.
 	switch run, err := findRun(ctx, env.DesktopRoots, in.SessionID); {
 	case err == nil && run.TaskID != "":
 		return no(scheduledRun)

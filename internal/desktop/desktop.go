@@ -231,7 +231,10 @@ func matches(roots []string, name string) []string {
 
 // RunMaxAge bounds the session files FindRun reads: Desktop writes a
 // session's file when the session starts and as it changes, so a file
-// untouched for longer is no session the gate asks about.
+// untouched for longer is no session the gate asks about. ErrNotFound is
+// no proof that a session is not Desktop's: its file may not be written
+// yet. A caller that needs the file waits for it; one that only rules out
+// a scheduled run treats FindRun as best effort.
 const RunMaxAge = 24 * time.Hour
 
 // ErrAmbiguous means more than one Desktop session file names the session.
