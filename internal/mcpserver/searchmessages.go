@@ -219,7 +219,7 @@ func (s *Server) searchMessages(ctx context.Context, _ *mcp.CallToolRequest, in 
 	if err != nil {
 		return nil, err
 	}
-	var lines []string
+	lines := make([]string, 0, len(hits)*(2+2*c.Ctx)) // a header and the hit, its context and a day line or so
 	for i := range hits {
 		h := &hits[i]
 		var chat *store.ChatRow

@@ -320,7 +320,7 @@ func (s *Server) searchPeople(ctx context.Context, _ *mcp.CallToolRequest, in se
 	if err != nil {
 		return nil, err
 	}
-	var lines []string
+	lines := make([]string, 0, 4*len(page)) // identity, last interaction, chats, and other numbers or names and ids
 	for i := range page {
 		act := acts[page[i].ID]
 		lines = append(lines, w.inner().personLines(&page[i], &act, full)...)

@@ -370,7 +370,12 @@ func (w wrapper) inner() wrapper {
 // text never starts a line, so it cannot pass for a message, a hit or a
 // chat, and nothing in a line closes the block.
 func (w wrapper) block(lines []string) string {
+	n := 64 // the two tags
+	for _, l := range lines {
+		n += len(l) + 1
+	}
 	var b strings.Builder
+	b.Grow(n)
 	b.WriteString("<untrusted_wa n=" + w.nonce + ">\n")
 	for _, l := range lines {
 		b.WriteString(strings.ReplaceAll(sanitize(l), "\n", "⏎") + "\n")
