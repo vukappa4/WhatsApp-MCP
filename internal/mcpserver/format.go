@@ -288,7 +288,23 @@ func mayHoldTag(s string) bool {
 }
 
 // tagIgnorable is a rune tagName skips between the letters of the tag name.
+// (?i) folds the class too, so a rune whose simple case folding reaches a
+// skipped rune is skipped: U+0345 (a mark) brings in the iotas U+0399,
+// U+03B9 and U+1FBE.
 func tagIgnorable(r rune) bool {
+	if tagSkipped(r) {
+		return true
+	}
+	for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+		if tagSkipped(f) {
+			return true
+		}
+	}
+	return false
+}
+
+// tagSkipped is a rune of tagName's class between the letters, before folding.
+func tagSkipped(r rune) bool {
 	return r == 0x200D || r == 0x115F || r == 0x1160 || r == 0x3164 || r == 0xFFA0 || unicode.Is(unicode.M, r)
 }
 

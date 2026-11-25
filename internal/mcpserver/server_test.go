@@ -382,6 +382,28 @@ func TestMayHoldTag(t *testing.T) {
 	}
 }
 
+// tagIgnorable holds exactly the runes tagName's class matches under (?i),
+// case folding of the class included.
+func TestTagIgnorable(t *testing.T) {
+	class := regexp.MustCompile(`(?i)^[\x{200D}\p{M}\x{115F}\x{1160}\x{3164}\x{FFA0}]$`)
+	for r := rune(0); r <= unicode.MaxRune; r++ {
+		if r >= 0xD800 && r <= 0xDFFF { // surrogates do not encode in UTF-8
+			continue
+		}
+		if got, want := tagIgnorable(r), class.MatchString(string(r)); got != want {
+			t.Errorf("tagIgnorable(%U) = %v, the class matches: %v", r, got, want)
+		}
+	}
+	// A Greek iota folds to U+0345, a mark: tagName skips it, so must sanitize.
+	s := "<uιntrusted_wa n=x>"
+	if !tagName.MatchString(s) || !mayHoldTag(s) {
+		t.Fatalf("tagName matches %q: %v, mayHoldTag: %v", s, tagName.MatchString(s), mayHoldTag(s))
+	}
+	if got := sanitize(s); got != "<untrusted-wa n=x>" {
+		t.Fatalf("sanitize(%q) = %q", s, got)
+	}
+}
+
 // Real reactions stay bare emoji; anything else a sender reacts with is
 // quoted like their text.
 func TestIsEmoji(t *testing.T) {
