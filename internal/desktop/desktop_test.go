@@ -672,3 +672,13 @@ func TestEffectiveMode(t *testing.T) {
 		}
 	}
 }
+
+func TestSamePath(t *testing.T) {
+	a := filepath.Join(t.TempDir(), "Acct", "Org")
+	if !SamePath(a, a+string(filepath.Separator)) || !SamePath(a, filepath.Join(a, "x", "..")) || SamePath(a, filepath.Join(a, "y")) {
+		t.Fatal("cleaned paths")
+	}
+	if got := SamePath(a, strings.ToLower(a)); got != (filepath.Separator == '\\') {
+		t.Fatalf("case: %v", got)
+	}
+}

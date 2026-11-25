@@ -422,7 +422,7 @@ func autosendCheck(ctx context.Context, in toolInput, server string, env PreTool
 			l.label = c.Label
 		}
 	}
-	if !samePath(rule.TaskDir, run.Dir) {
+	if !desktop.SamePath(rule.TaskDir, run.Dir) {
 		return "this run's task is in another Claude Desktop account or organization than the approved one"
 	}
 	file, _, err := desktop.ReadSkill(task)
@@ -446,12 +446,6 @@ func autosendCheck(ctx context.Context, in toolInput, server string, env PreTool
 	l.allow = &autoSend{taskID: task.ID, taskName: task.Title(), approvedAt: rule.ApprovedAt, to: to, jid: dest.JID,
 		label: dest.Label, textChars: len([]rune(args.Text))}
 	return ""
-}
-
-// samePath compares two folder paths read from the same roots.
-func samePath(a, b string) bool {
-	a, b = filepath.Clean(a), filepath.Clean(b)
-	return a == b || filepath.Separator == '\\' && strings.EqualFold(a, b)
 }
 
 // approvalCard answers whatsapp_send_autosend_allow: an "ask" whose reason is

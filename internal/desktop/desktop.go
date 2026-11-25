@@ -461,6 +461,13 @@ func (l List) find(match func(Task) bool, mightBe func(Unreadable) bool, ref str
 	return Task{}, fmt.Errorf("task %q: %w", ref, ErrNotFound)
 }
 
+// SamePath reports whether two account/org folder paths name the same
+// folder: equal once cleaned, case ignored on Windows.
+func SamePath(a, b string) bool {
+	a, b = filepath.Clean(a), filepath.Clean(b)
+	return a == b || filepath.Separator == '\\' && strings.EqualFold(a, b)
+}
+
 // TaskByID returns the task with id from dir's task list.
 func TaskByID(dir, id string) (Task, error) {
 	if id == "" {

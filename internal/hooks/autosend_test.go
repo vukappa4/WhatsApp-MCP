@@ -413,8 +413,8 @@ func TestAutosendFallbacksDeny(t *testing.T) {
 }
 
 // The send brake: past autosend.MaxPerDay sends of a task to one chat in
-// 24 hours, the next asks. Older sends, other chats and other tasks do not
-// count; the rotated log does.
+// 24 hours, the next is denied. Older sends, other chats and other tasks do
+// not count; the rotated log does.
 func TestAutosendBrake(t *testing.T) {
 	a := newAuto(t)
 	now := a.now.Add(time.Minute)

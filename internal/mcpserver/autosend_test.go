@@ -283,6 +283,18 @@ func TestAutosendRevokeAndStatus(t *testing.T) {
 	if text, isErr := call(t, a.cs, toolAutosendRevoke, map[string]any{"task": "nope"}); !isErr || !strings.Contains(text, `No autosend approval for task "nope"`) {
 		t.Fatalf("revoke missing:\n%s", text)
 	}
+	// A name two approved tasks share revokes neither.
+	put("twin-a", "Twin", "x")
+	put("twin-b", "twin", "x")
+	if text, isErr := call(t, a.cs, toolAutosendRevoke, map[string]any{"task": "TWIN"}); !isErr ||
+		!strings.Contains(text, `"TWIN" names more than one approved task: use the task id (2)`) {
+		t.Fatalf("revoke ambiguous:\n%s", text)
+	}
+	for _, id := range []string{"twin-a", "twin-b"} {
+		if _, err := store.DeleteAutosendRule(ctx, a.db, id); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if text, isErr := call(t, a.cs, toolAutosendRevoke, map[string]any{"task": "follow-up"}); isErr || !strings.Contains(text, "Revoked") {
 		t.Fatalf("revoke by id:\n%s", text)
 	}

@@ -118,7 +118,7 @@ func (s *Server) autosendRevoke(ctx context.Context, _ *mcp.CallToolRequest, in 
 	switch {
 	case errors.Is(err, store.ErrNoRule):
 		return errResult("No autosend approval for task %q: whatsapp_status lists approvals.", strings.TrimSpace(in.Task))
-	case err != nil && strings.Contains(err.Error(), "use the task id"):
+	case errors.Is(err, store.ErrAmbiguousRule):
 		return errResult("%v", err)
 	case err != nil:
 		return nil, err
@@ -167,7 +167,7 @@ func (s *Server) checkReceipt(ctx context.Context, r autosend.Receipt, ids []str
 	if err != nil {
 		return "the task cannot be read (" + err.Error() + ")", nil
 	}
-	if filepath.Clean(task.Dir) != filepath.Clean(r.TaskDir) {
+	if !desktop.SamePath(task.Dir, r.TaskDir) {
 		return "the task moved to another Claude Desktop account or organization", nil
 	}
 	fp, err := desktop.Fingerprint(task)
@@ -247,7 +247,7 @@ func (s *Server) autosendState(ctx context.Context, r store.AutosendRule) string
 	if err != nil {
 		return "unknown: " + err.Error()
 	}
-	if filepath.Clean(task.Dir) != filepath.Clean(r.TaskDir) {
+	if !desktop.SamePath(task.Dir, r.TaskDir) {
 		return "inactive: the task is in another Claude Desktop account or organization"
 	}
 	if why := autosend.TaskModeProblem(desktop.EffectiveMode(task, s.ClaudeDir)); why != "" {

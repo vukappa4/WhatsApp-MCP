@@ -31,6 +31,9 @@ type AutosendRule struct {
 // ErrNoRule means no autosend rule matches.
 var ErrNoRule = errors.New("no autosend approval")
 
+// ErrAmbiguousRule means a name matches more than one approved task.
+var ErrAmbiguousRule = errors.New("names more than one approved task: use the task id")
+
 // PutAutosendRule stores r, replacing the task's earlier rule and its chats
 // in one transaction.
 func PutAutosendRule(ctx context.Context, db *DB, r AutosendRule) error {
@@ -131,7 +134,7 @@ func DeleteAutosendRule(ctx context.Context, db *DB, ref string) (AutosendRule, 
 		case len(rs) == 0:
 			return fmt.Errorf("task %q: %w", ref, ErrNoRule)
 		case len(rs) > 1:
-			return fmt.Errorf("%q names %d approved tasks: use the task id", ref, len(rs))
+			return fmt.Errorf("%q %w (%d)", ref, ErrAmbiguousRule, len(rs))
 		}
 		deleted = rs[0]
 		_, err = tx.ExecContext(ctx, `DELETE FROM autosend_rules WHERE task_id = ?`, deleted.TaskID)
